@@ -1,0 +1,92 @@
+# General
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Backup and editor temporary files
+*~
+*.swp
+*.swo
+*.tmp
+*.bak
+
+# Build directories and generated files
+/build/
+/build*/
+/Debug/
+/Release/
+/cmake-build*/
+
+# CMake files
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/compile_commands.json
+/Makefile
+/build.ninja
+/*.ninja
+/CTestTestfile.cmake
+
+# IDEs
+.vscode/
+.idea/
+/.settings/
+*.launch
+*.code-workspace
+
+# STM32CubeIDE / Eclipse
+*.project
+*.cproject
+
+# Keil/ARM uVision
+*.uvproj*
+*.uvopt*
+
+# IAR
+*.eww
+*.ewp
+
+# Xcode
+*.xcuserdata/
+
+# Toolchain object / binary files
+*.o
+*.obj
+*.d
+*.elf
+*.axf
+*.bin
+*.hex
+*.lst
+*.map
+*.out
+
+# Linker and map files
+*.lds
+
+# Coverage and profiling
+*.gcda
+*.gcno
+coverage/
+
+# Logs
+*.log
+
+# Python envs
+venv/
+env/
+.venv/
+__pycache__/
+*.py[cod]
+
+# Other caches
+.cache/
+.pytest_cache/
+
+# Deployment / flashing artifacts
+*.hex
+*.bin
+
+# Misc
+*.db
+*.sqlite
