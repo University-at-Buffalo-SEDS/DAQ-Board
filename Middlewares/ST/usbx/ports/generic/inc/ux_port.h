@@ -115,6 +115,7 @@ typedef uint64_t                                ULONG64;
    This will make USBX uses the controller for the timer. */
 
 #undef THREADX_X86_NO_PTIMER
+#pragma GCC diagnostic ignored "-Warray-bounds"
 
 
 /* For X86 systems, the define #define UX_USE_IO_INSTRUCTIONS should be used.  */

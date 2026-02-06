@@ -34,7 +34,7 @@ def main():
     import_and_run_build()
 
     # 2) Flash binary
-    bin_path = Path("build/Debug_Script/PowerBoard26.bin")
+    bin_path = Path("build/Debug_Script/DAQ-Board.bin")
     if not bin_path.exists():
         sys.exit(f"Error: binary not found at {bin_path}")
 

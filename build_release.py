@@ -43,8 +43,8 @@ def main() -> None:
     ])
 
     # 3) objcopy ELF → BIN
-    elf_path = build_dir / "PowerBoard26.elf"
-    bin_path = build_dir / "PowerBoard26.bin"
+    elf_path = build_dir / "DAQ-Board.elf"
+    bin_path = build_dir / "DAQ-Board.bin"
 
     run([
         "arm-none-eabi-objcopy",

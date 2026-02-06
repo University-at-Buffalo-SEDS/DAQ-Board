@@ -5,9 +5,9 @@
   * @author  MCD Application Team
   * @brief   ThreadX applicative file
   ******************************************************************************
-    * @attention
+  * @attention
   *
-  * Copyright (c) 2026 STMicroelectronics.
+  * Copyright (c) 2020-2021 STMicroelectronics.
   * All rights reserved.
   *
   * This software is licensed under terms that can be found in the LICENSE file
@@ -23,7 +23,11 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "main.h"
+#include "sedsprintf.h"
+#include "telemetry.h"
+#include "DAQ-Threads.h"
+#include "tx_api.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -59,10 +63,22 @@
 UINT App_ThreadX_Init(VOID *memory_ptr)
 {
   UINT ret = TX_SUCCESS;
+
   /* USER CODE BEGIN App_ThreadX_MEM_POOL */
+  if (init_telemetry_router() != SEDS_OK) {
+    Error_Handler();
+  }
+  /* Log after router is initialized, before threads start */
+
+  char started_txt[] = "Starting Threadx Scheduler";
+  log_telemetry_synchronous(SEDS_DT_MESSAGE_DATA, started_txt,
+                                  sizeof(started_txt), 1);
 
   /* USER CODE END App_ThreadX_MEM_POOL */
+
   /* USER CODE BEGIN App_ThreadX_Init */
+  create_telemetry_thread();
+
   /* USER CODE END App_ThreadX_Init */
 
   return ret;
@@ -75,15 +91,15 @@ UINT App_ThreadX_Init(VOID *memory_ptr)
   */
 void MX_ThreadX_Init(void)
 {
-  /* USER CODE BEGIN Before_Kernel_Start */
+  /* USER CODE BEGIN  Before_Kernel_Start */
 
-  /* USER CODE END Before_Kernel_Start */
+  /* USER CODE END  Before_Kernel_Start */
 
   tx_kernel_enter();
 
-  /* USER CODE BEGIN Kernel_Start_Error */
+  /* USER CODE BEGIN  Kernel_Start_Error */
 
-  /* USER CODE END Kernel_Start_Error */
+  /* USER CODE END  Kernel_Start_Error */
 }
 
 /* USER CODE BEGIN 1 */
