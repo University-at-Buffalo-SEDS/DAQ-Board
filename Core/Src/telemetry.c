@@ -18,33 +18,112 @@ static void print_data_no_telem(void *data, size_t len) {
   // Optional: dump bytes for debug
 }
 #endif
+
 #if defined(__GNUC__) || defined(__clang__)
 #define UNUSED_FUNCTION __attribute__((unused))
 #else
 #define UNUSED_FUNCTION
 #endif
 
-
 static uint8_t g_can_rx_subscribed = 0;
 static int32_t g_can_side_id = -1; // side ID returned by seds_router_add_side_serialized
 
-/* ---------------- Time helpers: 32->64 extender ---------------- */
-static uint64_t stm_now_ms(void *user) {
+/* ---------------- ThreadX clock helpers (32->64 extender) ----------------
+ *
+ * ThreadX "clock" is tx_time_get()/tx_time_set() (ULONG ticks).
+ * We extend 32-bit wrap and expose ms.
+ *
+ * This file previously used HAL_GetTick(); updated to use ThreadX time so
+ * time sync can adjust the ThreadX clock and your telemetry timestamps follow.
+ */
+#ifndef TX_TIMER_TICKS_PER_SECOND
+#error "TX_TIMER_TICKS_PER_SECOND must be defined by ThreadX."
+#endif
+
+static uint64_t tx_raw_now_ms(void *user) {
   (void)user;
-  static uint32_t last32 = 0;
+
+  // Extend 32-bit ULONG tick wrap
+  static uint32_t last_ticks32 = 0;
   static uint64_t high = 0;
 
-  uint32_t cur32 = HAL_GetTick();
-  if (cur32 < last32) {
-    high += (1ULL << 32); /* 32-bit wrap (~49.7 days) */
+  uint32_t cur32 = (uint32_t)tx_time_get();
+  if (cur32 < last_ticks32) {
+    high += (1ULL << 32);
   }
-  last32 = cur32;
-  return high | (uint64_t)cur32;
+  last_ticks32 = cur32;
+
+  uint64_t ticks64 = high | (uint64_t)cur32;
+
+  // Convert ticks -> ms (works even when not divisible)
+  return (ticks64 * 1000ULL) / (uint64_t)TX_TIMER_TICKS_PER_SECOND;
 }
 
-uint64_t node_now_since_ms(void *user) {
+static uint64_t node_now_since_ms(void *user);
+
+/* ---------------- Time sync (NTP-style offset/delay) ---------------- */
+static void compute_offset_delay(uint64_t t1, uint64_t t2, uint64_t t3, uint64_t t4,
+                                 int64_t *offset_ms, uint64_t *delay_ms) {
+  const int64_t o = ((int64_t)(t2 - t1) + (int64_t)(t3 - t4)) / 2;
+  const int64_t d = (int64_t)(t4 - t1) - (int64_t)(t3 - t2);
+  *offset_ms = o;
+  *delay_ms = (d < 0) ? 0 : (uint64_t)d;
+}
+
+static void threadx_apply_offset_ms(int64_t offset_ms) {
+  // Optional sanity clamp: ignore insane corrections
+  if (offset_ms > 30 * 1000 || offset_ms < -(30 * 1000)) {
+    return;
+  }
+
+  // Convert ms -> ticks
+  const int64_t tps = (int64_t)TX_TIMER_TICKS_PER_SECOND;
+  int64_t delta_ticks = (offset_ms * tps) / 1000;
+
+  ULONG cur = tx_time_get();
+  int64_t new_ticks = (int64_t)(uint32_t)cur + delta_ticks;
+  if (new_ticks < 0) new_ticks = 0;
+
+  tx_time_set((ULONG)(uint32_t)new_ticks);
+}
+
+/* Local endpoint handler: consume TIME_SYNC_RESPONSE and adjust ThreadX clock.
+ *
+ * Payload (u64, little-endian on STM32):
+ *   resp[0]=seq, resp[1]=t1, resp[2]=t2, resp[3]=t3
+ * and t4 is captured locally on receipt.
+ */
+static SedsResult on_timesync(const SedsPacketView *pkt, void *user) {
   (void)user;
-  const uint64_t now = stm_now_ms(NULL);
+  if (!pkt || !pkt->payload) return SEDS_ERR;
+
+  if (pkt->ty == SEDS_DT_TIME_SYNC_RESPONSE && pkt->payload_len >= 32) {
+    uint64_t seq = 0, t1 = 0, t2 = 0, t3 = 0;
+    memcpy(&seq, pkt->payload + 0, 8);
+    memcpy(&t1,  pkt->payload + 8, 8);
+    memcpy(&t2,  pkt->payload + 16, 8);
+    memcpy(&t3,  pkt->payload + 24, 8);
+
+    const uint64_t t4 = tx_raw_now_ms(NULL);
+
+    int64_t offset_ms = 0;
+    uint64_t delay_ms = 0;
+    compute_offset_delay(t1, t2, t3, t4, &offset_ms, &delay_ms);
+
+    threadx_apply_offset_ms(offset_ms);
+
+    // Optional debug:
+    // printf("timesync seq=%llu offset_ms=%lld delay_ms=%llu\r\n",
+    //        (unsigned long long)seq, (long long)offset_ms, (unsigned long long)delay_ms);
+  }
+
+  return SEDS_OK;
+}
+
+/* ---------------- Router timebase ---------------- */
+static uint64_t node_now_since_ms(void *user) {
+  (void)user;
+  const uint64_t now = tx_raw_now_ms(NULL);
   const RouterState s = g_router; /* snapshot */
   return s.r ? (now - s.start_time) : 0;
 }
@@ -135,6 +214,40 @@ static UNUSED_FUNCTION void rx_synchronous(const uint8_t *bytes, size_t len) {
 #endif
 }
 
+
+// --- Time sync request (client-side) ---
+// Called by telemetry thread periodically to request a resync with the master.
+//
+// Packet format matches your earlier example:
+//   req[0]=seq, req[1]=t1
+// where t1 is local send timestamp in ms (same timebase used for NTP math).
+//
+// The master should reply with TIME_SYNC_RESPONSE containing:
+//   [seq, t1, t2, t3]
+//
+// This node's on_timesync() will capture t4 and compute/apply offset.
+static uint64_t g_timesync_seq = 1;
+
+SedsResult telemetry_timesync_request(void)
+{
+#ifndef TELEMETRY_ENABLED
+  return SEDS_OK;
+#else
+  if (!g_router.r) {
+    if (init_telemetry_router() != SEDS_OK) return SEDS_ERR;
+  }
+
+  const uint64_t t1 = tx_raw_now_ms(NULL);   // use your local base time
+  const uint64_t req[2] = { g_timesync_seq++, t1 };
+
+  // IMPORTANT:
+  // - This logs a TIME_SYNC_REQUEST packet to the router so it can be routed to the master.
+  // - timestamp is explicitly t1 so the receiver can use it directly.
+  return seds_router_log_ts(g_router.r, SEDS_DT_TIME_SYNC_REQUEST, t1, req, 2);
+#endif
+}
+
+
 /* ---------------- Router init (idempotent) ---------------- */
 SedsResult init_telemetry_router(void) {
 #ifndef TELEMETRY_ENABLED
@@ -154,11 +267,19 @@ SedsResult init_telemetry_router(void) {
     }
   }
 
-  // Local endpoint handlers (SD terminates here)
+  // Local endpoint handlers:
+  // - SD terminates here
+  // - TIME_SYNC adjusts ThreadX clock
   const SedsLocalEndpointDesc locals[] = {
       {
           .endpoint = (uint32_t)SEDS_EP_SD_CARD,
           .packet_handler = on_sd_packet,
+          .serialized_handler = NULL,
+          .user = NULL,
+      },
+      {
+          .endpoint = (uint32_t)SEDS_EP_TIME_SYNC,
+          .packet_handler = on_timesync,
           .serialized_handler = NULL,
           .user = NULL,
       },
@@ -191,7 +312,7 @@ SedsResult init_telemetry_router(void) {
 
   g_router.r = r;
   g_router.created = 1;
-  g_router.start_time = stm_now_ms(NULL);
+  g_router.start_time = tx_raw_now_ms(NULL);
 
   return SEDS_OK;
 #endif
