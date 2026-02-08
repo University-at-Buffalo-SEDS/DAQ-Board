@@ -52,6 +52,16 @@ SedsResult log_error_syncronous(const char* fmt, ...);
 
 SedsResult telemetry_timesync_request(void);
 
+uint64_t telemetry_now_ms(void);
+
+uint64_t telemetry_unix_ms(void);
+uint64_t telemetry_unix_s(void);
+uint8_t  telemetry_unix_is_valid(void);
+
+// Master / GPS thread calls this:
+void telemetry_set_unix_time_ms(uint64_t unix_ms);
+
+
 void die(const char *fmt, ...);
 
 #ifdef __cplusplus

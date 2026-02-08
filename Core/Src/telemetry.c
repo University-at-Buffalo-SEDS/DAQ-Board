@@ -59,6 +59,77 @@ static uint64_t tx_raw_now_ms(void *user) {
   return (ticks64 * 1000ULL) / (uint64_t)TX_TIMER_TICKS_PER_SECOND;
 }
 
+// ---------------- Time sync state (software-only; does NOT affect ThreadX scheduling) ----------------
+//
+// We maintain two offsets:
+//
+// 1) g_master_offset_ms:
+//    "master-synced monotonic time" = tx_raw_now_ms() + g_master_offset_ms
+//
+// 2) g_unix_base_ms:
+//    "unix time" = telemetry_now_ms() + g_unix_base_ms
+//
+// Where telemetry_now_ms() is your synced monotonic ms.
+//
+// On the master (RF board w/ GPS), GPS thread should call telemetry_set_unix_time_ms(gps_unix_ms)
+// to keep g_unix_base_ms updated.
+// On clients, g_unix_base_ms is set from TIME_SYNC_ANNOUNCE packets from the master.
+//
+static volatile int64_t  g_master_offset_ms = 0;   // ms
+static volatile uint64_t g_last_delay_ms    = 0;   // ms (from last NTP response)
+static volatile int64_t  g_unix_base_ms     = 0;   // ms
+static volatile uint8_t  g_unix_valid       = 0;
+
+static inline int64_t telemetry_master_offset_ms_get(void) {
+  return (int64_t)g_master_offset_ms;
+}
+
+static inline void telemetry_master_offset_ms_set(int64_t off) {
+  g_master_offset_ms = off;
+}
+
+static inline uint64_t telemetry_last_delay_ms_get(void) {
+  return (uint64_t)g_last_delay_ms;
+}
+
+static inline void telemetry_last_delay_ms_set(uint64_t d) {
+  g_last_delay_ms = d;
+}
+
+// Public-ish helpers (you’ll expose prototypes in telemetry.h)
+uint64_t telemetry_now_ms(void) {
+  // synced monotonic time in ms (same across network once synced)
+  int64_t t = (int64_t)tx_raw_now_ms(NULL) + telemetry_master_offset_ms_get();
+  if (t < 0) t = 0;
+  return (uint64_t)t;
+}
+
+uint64_t telemetry_unix_ms(void) {
+  // unix ms only valid once base is set (master via GPS, clients via announce)
+  if (!g_unix_valid) return 0;
+  int64_t t = (int64_t)telemetry_now_ms() + (int64_t)g_unix_base_ms;
+  if (t < 0) t = 0;
+  return (uint64_t)t;
+}
+
+uint64_t telemetry_unix_s(void) {
+  return telemetry_unix_ms() / 1000ULL;
+}
+
+uint8_t telemetry_unix_is_valid(void) {
+  return g_unix_valid;
+}
+
+// Master-only API: GPS thread calls this with real unix time in ms.
+// It updates the base so telemetry_unix_ms() becomes correct.
+void telemetry_set_unix_time_ms(uint64_t unix_ms) {
+  // Align unix to *synced* monotonic now
+  const int64_t now = (int64_t)telemetry_now_ms();
+  g_unix_base_ms = (int64_t)unix_ms - now;
+  g_unix_valid = 1;
+}
+
+
 static uint64_t node_now_since_ms(void *user);
 
 /* ---------------- Time sync (NTP-style offset/delay) ---------------- */
@@ -68,23 +139,6 @@ static void compute_offset_delay(uint64_t t1, uint64_t t2, uint64_t t3, uint64_t
   const int64_t d = (int64_t)(t4 - t1) - (int64_t)(t3 - t2);
   *offset_ms = o;
   *delay_ms = (d < 0) ? 0 : (uint64_t)d;
-}
-
-static void threadx_apply_offset_ms(int64_t offset_ms) {
-  // Optional sanity clamp: ignore insane corrections
-  if (offset_ms > 30 * 1000 || offset_ms < -(30 * 1000)) {
-    return;
-  }
-
-  // Convert ms -> ticks
-  const int64_t tps = (int64_t)TX_TIMER_TICKS_PER_SECOND;
-  int64_t delta_ticks = (offset_ms * tps) / 1000;
-
-  ULONG cur = tx_time_get();
-  int64_t new_ticks = (int64_t)(uint32_t)cur + delta_ticks;
-  if (new_ticks < 0) new_ticks = 0;
-
-  tx_time_set((ULONG)(uint32_t)new_ticks);
 }
 
 /* Local endpoint handler: consume TIME_SYNC_RESPONSE and adjust ThreadX clock.
@@ -110,12 +164,38 @@ static SedsResult on_timesync(const SedsPacketView *pkt, void *user) {
     uint64_t delay_ms = 0;
     compute_offset_delay(t1, t2, t3, t4, &offset_ms, &delay_ms);
 
-    threadx_apply_offset_ms(offset_ms);
+    telemetry_master_offset_ms_set(offset_ms);
+    telemetry_last_delay_ms_set(delay_ms);
 
     // Optional debug:
     // printf("timesync seq=%llu offset_ms=%lld delay_ms=%llu\r\n",
     //        (unsigned long long)seq, (long long)offset_ms, (unsigned long long)delay_ms);
   }
+
+
+  // Master announces Unix time periodically (payload u64s):
+  //   announce[0] = priority
+  //   announce[1] = unix_ms
+  else if (pkt->ty == SEDS_DT_TIME_SYNC_ANNOUNCE && pkt->payload_len >= 16) {
+    uint64_t priority = 0;
+    uint64_t unix_ms  = 0;
+    memcpy(&priority, pkt->payload + 0, 8);
+    memcpy(&unix_ms,  pkt->payload + 8, 8);
+
+    // Use last measured delay to approximate the network transit time.
+    // (half RTT is the classic NTP assumption)
+    const uint64_t half_delay = telemetry_last_delay_ms_get() / 2ULL;
+
+    // Set unix base so telemetry_unix_ms() becomes correct:
+    // unix_now ≈ unix_ms + half_delay
+    // so base = (unix_ms + half_delay) - telemetry_now_ms()
+    const int64_t now = (int64_t)telemetry_now_ms();
+    g_unix_base_ms = (int64_t)(unix_ms + half_delay) - now;
+    g_unix_valid = 1;
+
+    return SEDS_OK;
+  }
+
 
   return SEDS_OK;
 }
@@ -123,10 +203,11 @@ static SedsResult on_timesync(const SedsPacketView *pkt, void *user) {
 /* ---------------- Router timebase ---------------- */
 static uint64_t node_now_since_ms(void *user) {
   (void)user;
-  const uint64_t now = tx_raw_now_ms(NULL);
-  const RouterState s = g_router; /* snapshot */
+  const uint64_t now = telemetry_now_ms();
+  const RouterState s = g_router;
   return s.r ? (now - s.start_time) : 0;
 }
+
 
 /* ---------------- Global router state ---------------- */
 RouterState g_router = {.r = NULL, .created = 0, .start_time = 0};
@@ -312,7 +393,7 @@ SedsResult init_telemetry_router(void) {
 
   g_router.r = r;
   g_router.created = 1;
-  g_router.start_time = tx_raw_now_ms(NULL);
+  g_router.start_time = telemetry_now_ms();
 
   return SEDS_OK;
 #endif
