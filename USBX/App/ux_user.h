@@ -113,6 +113,7 @@
 #define UX_USER_H
 
 /* USER CODE BEGIN 1 */
+#pragma GCC diagnostic ignored "-Warray-bounds"
 
 /* USER CODE END 1 */
 
