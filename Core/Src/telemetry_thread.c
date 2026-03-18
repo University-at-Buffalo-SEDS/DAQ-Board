@@ -39,7 +39,7 @@ void telemetry_thread_entry(ULONG initial_input)
             last_req_ticks = now_ticks;
         }
 
-        tx_thread_sleep(100);
+        tx_thread_sleep(1);
     }
 }
 

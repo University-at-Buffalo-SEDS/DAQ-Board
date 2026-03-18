@@ -50,6 +50,14 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry_thread.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry.c 
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry_hooks.c 
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/sd_card.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_adc1.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_adc4.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_board.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_dac.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_thread.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/mcp3564r.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/sd_writer_thread.c
 )
 
 # Add include paths
@@ -80,7 +88,7 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/sedsprintf_rs)
 target_link_libraries(${CMAKE_PROJECT_NAME} sedsprintf_rs)
 
 # Option defaults to ON
-option(ENABLE_TELEMETRY "Enable the telemetry subsystem" OFF)
+option(ENABLE_TELEMETRY "Enable the telemetry subsystem" ON)
 
 # Print its state for debugging
 message(STATUS "Telemetry enabled: ${ENABLE_TELEMETRY}")

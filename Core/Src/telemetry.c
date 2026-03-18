@@ -3,6 +3,7 @@
 
 #include "app_threadx.h" // should bring in tx_api.h; if not, include tx_api.h directly
 #include "can_bus.h"
+#include "sd_card.h"
 #include "sedsprintf.h"
 #include "stm32u5xx_hal.h"
 
@@ -230,10 +231,7 @@ SedsResult tx_send(const uint8_t *bytes, size_t len, void *user) {
  */
 SedsResult on_sd_packet(const SedsPacketView *pkt, void *user) {
   (void)user;
-  (void)pkt;
-
-  // TODO: write serialized form or payload to SD card.
-  return SEDS_OK;
+  return (sd_card_log_packet(pkt) == SD_CARD_STATUS_OK) ? SEDS_OK : SEDS_IO;
 }
 
 /* ---------------- RX helpers ---------------- */
@@ -353,12 +351,6 @@ SedsResult init_telemetry_router(void) {
   // - TIME_SYNC adjusts ThreadX clock
   const SedsLocalEndpointDesc locals[] = {
       {
-          .endpoint = (uint32_t)SEDS_EP_SD_CARD,
-          .packet_handler = on_sd_packet,
-          .serialized_handler = NULL,
-          .user = NULL,
-      },
-      {
           .endpoint = (uint32_t)SEDS_EP_TIME_SYNC,
           .packet_handler = on_timesync,
           .serialized_handler = NULL,
@@ -458,6 +450,26 @@ SedsResult log_telemetry_asynchronous(SedsDataType data_type, const void *data,
 #else
   (void)data_type;
   print_data_no_telem((void *)data, element_count * element_size);
+  return SEDS_OK;
+#endif
+}
+
+SedsResult log_telemetry_string_asynchronous(SedsDataType data_type, const char *str) {
+#ifdef TELEMETRY_ENABLED
+  if (!g_router.r) {
+    if (init_telemetry_router() != SEDS_OK) {
+      return SEDS_ERR;
+    }
+  }
+  if (!str) {
+    return SEDS_BAD_ARG;
+  }
+
+  return seds_router_log_string_ex(g_router.r, data_type, str, strlen(str),
+                                   NULL, 1);
+#else
+  (void)data_type;
+  (void)str;
   return SEDS_OK;
 #endif
 }
