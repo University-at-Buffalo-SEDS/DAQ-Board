@@ -81,7 +81,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 )
 
 # Telemetry Library
-set(SEDSPRINTF_RS_DEVICE_IDENTIFIER "DAQB" CACHE STRING "" FORCE)
+set(SEDSPRINTF_RS_DEVICE_IDENTIFIER "DAQ" CACHE STRING "" FORCE)
 set(SEDSPRINTF_RS_TARGET "thumbv8m.main-none-eabihf" CACHE STRING "" FORCE) # Set target for embedded systems
 # set(SEDSPRINTF_RS_TARGET "thumbv7em-none-eabihf" CACHE STRING "" FORCE) # Set target for embedded systems
 add_subdirectory(${CMAKE_SOURCE_DIR}/sedsprintf_rs)
