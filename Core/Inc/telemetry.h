@@ -48,10 +48,12 @@ SedsResult process_rx_queue_timeout(uint32_t timeout_ms);
 SedsResult process_all_queues_timeout(uint32_t timeout_ms);
 
 SedsResult print_telemetry_error(int32_t error_code);
+SedsResult log_error_asynchronous(const char* fmt, ...);
+SedsResult log_error_synchronous(const char* fmt, ...);
 SedsResult log_error_asyncronous(const char* fmt, ...);
 SedsResult log_error_syncronous(const char* fmt, ...);
 
-SedsResult telemetry_timesync_request(void);
+SedsResult telemetry_poll_timesync(void);
 
 uint64_t telemetry_now_ms(void);
 

@@ -1,13 +1,14 @@
 // telemetry.c
 #include "telemetry.h"
 
-#include "app_threadx.h" // should bring in tx_api.h; if not, include tx_api.h directly
+#include "app_threadx.h"
 #include "can_bus.h"
 #include "sd_card.h"
 #include "sedsprintf.h"
 #include "stm32u5xx_hal.h"
 
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -16,7 +17,6 @@
 static void print_data_no_telem(void *data, size_t len) {
   (void)data;
   (void)len;
-  // Optional: dump bytes for debug
 }
 #endif
 
@@ -26,215 +26,206 @@ static void print_data_no_telem(void *data, size_t len) {
 #define UNUSED_FUNCTION
 #endif
 
-static uint8_t g_can_rx_subscribed = 0;
-static int32_t g_can_side_id = -1; // side ID returned by seds_router_add_side_serialized
+#ifndef TELEMETRY_TIMESYNC_MASTER_PRIO
+#define TELEMETRY_TIMESYNC_MASTER_PRIO (-1)
+#endif
 
-/* ---------------- ThreadX clock helpers (32->64 extender) ----------------
- *
- * ThreadX "clock" is tx_time_get()/tx_time_set() (ULONG ticks).
- * We extend 32-bit wrap and expose ms.
- *
- * This file previously used HAL_GetTick(); updated to use ThreadX time so
- * time sync can adjust the ThreadX clock and your telemetry timestamps follow.
- */
+#ifndef TELEMETRY_TIMESYNC_SOURCE_TIMEOUT_MS
+#define TELEMETRY_TIMESYNC_SOURCE_TIMEOUT_MS 5000U
+#endif
+
+#ifndef TELEMETRY_TIMESYNC_ANNOUNCE_INTERVAL_MS
+#define TELEMETRY_TIMESYNC_ANNOUNCE_INTERVAL_MS 2000U
+#endif
+
+#ifndef TELEMETRY_TIMESYNC_REQUEST_INTERVAL_MS
+#define TELEMETRY_TIMESYNC_REQUEST_INTERVAL_MS 2000U
+#endif
+
 #ifndef TX_TIMER_TICKS_PER_SECOND
 #error "TX_TIMER_TICKS_PER_SECOND must be defined by ThreadX."
 #endif
 
-static uint64_t tx_raw_now_ms(void *user) {
+#define TELEMETRY_TIMESYNC_ROLE_CONSUMER 0U
+#define TELEMETRY_TIMESYNC_ROLE_SOURCE 1U
+
+static uint8_t g_can_rx_subscribed = 0U;
+static int32_t g_can_side_id = -1;
+static uint8_t g_local_unix_valid = 0U;
+static uint64_t g_local_unix_ms = 0ULL;
+
+RouterState g_router = {.r = NULL, .created = 0U, .start_time = 0ULL};
+
+static uint64_t tx_raw_now_ms_locked(void) {
+  const uint32_t ticks32 = (uint32_t)tx_time_get();
+  return ((uint64_t)ticks32 * 1000ULL) / (uint64_t)TX_TIMER_TICKS_PER_SECOND;
+}
+
+static UNUSED_FUNCTION uint64_t tx_raw_now_ms(void *user) {
   (void)user;
-
-  // Extend 32-bit ULONG tick wrap
-  static uint32_t last_ticks32 = 0;
-  static uint64_t high = 0;
-
-  uint32_t cur32 = (uint32_t)tx_time_get();
-  if (cur32 < last_ticks32) {
-    high += (1ULL << 32);
-  }
-  last_ticks32 = cur32;
-
-  uint64_t ticks64 = high | (uint64_t)cur32;
-
-  // Convert ticks -> ms (works even when not divisible)
-  return (ticks64 * 1000ULL) / (uint64_t)TX_TIMER_TICKS_PER_SECOND;
+  return tx_raw_now_ms_locked();
 }
 
-// ---------------- Time sync state (software-only; does NOT affect ThreadX scheduling) ----------------
-//
-// We maintain two offsets:
-//
-// 1) g_master_offset_ms:
-//    "master-synced monotonic time" = tx_raw_now_ms() + g_master_offset_ms
-//
-// 2) g_unix_base_ms:
-//    "unix time" = telemetry_now_ms() + g_unix_base_ms
-//
-// Where telemetry_now_ms() is your synced monotonic ms.
-//
-// On the master (RF board w/ GPS), GPS thread should call telemetry_set_unix_time_ms(gps_unix_ms)
-// to keep g_unix_base_ms updated.
-// On clients, g_unix_base_ms is set from TIME_SYNC_ANNOUNCE packets from the master.
-//
-static volatile int64_t  g_master_offset_ms = 0;   // ms
-static volatile uint64_t g_last_delay_ms    = 0;   // ms (from last NTP response)
-static volatile int64_t  g_unix_base_ms     = 0;   // ms
-static volatile uint8_t  g_unix_valid       = 0;
-
-static inline int64_t telemetry_master_offset_ms_get(void) {
-  return (int64_t)g_master_offset_ms;
+static uint8_t telemetry_timesync_is_source(void) {
+  return (TELEMETRY_TIMESYNC_MASTER_PRIO >= 0) ? 1U : 0U;
 }
 
-static inline void telemetry_master_offset_ms_set(int64_t off) {
-  g_master_offset_ms = off;
+static uint64_t telemetry_timesync_priority(void) {
+  return telemetry_timesync_is_source() ? (uint64_t)TELEMETRY_TIMESYNC_MASTER_PRIO : 0ULL;
 }
 
-static inline uint64_t telemetry_last_delay_ms_get(void) {
-  return (uint64_t)g_last_delay_ms;
+static uint32_t telemetry_timesync_role(void) {
+  return telemetry_timesync_is_source() ? TELEMETRY_TIMESYNC_ROLE_SOURCE
+                                        : TELEMETRY_TIMESYNC_ROLE_CONSUMER;
 }
 
-static inline void telemetry_last_delay_ms_set(uint64_t d) {
-  g_last_delay_ms = d;
-}
+static bool telemetry_unix_ms_to_utc(uint64_t unix_ms, int32_t *year, uint8_t *month,
+                                     uint8_t *day, uint8_t *hour, uint8_t *minute,
+                                     uint8_t *second, uint16_t *millisecond) {
+  static const uint16_t days_before_month[12] = {0U,   31U,  59U,  90U,  120U, 151U,
+                                                 181U, 212U, 243U, 273U, 304U, 334U};
+  uint64_t whole_seconds = unix_ms / 1000ULL;
+  const uint64_t days_since_epoch = whole_seconds / 86400ULL;
+  uint32_t seconds_of_day = (uint32_t)(whole_seconds % 86400ULL);
+  int32_t y = 1970;
+  uint64_t days = days_since_epoch;
 
-// Public-ish helpers (you’ll expose prototypes in telemetry.h)
-uint64_t telemetry_now_ms(void) {
-  // synced monotonic time in ms (same across network once synced)
-  int64_t t = (int64_t)tx_raw_now_ms(NULL) + telemetry_master_offset_ms_get();
-  if (t < 0) t = 0;
-  return (uint64_t)t;
-}
-
-uint64_t telemetry_unix_ms(void) {
-  // unix ms only valid once base is set (master via GPS, clients via announce)
-  if (!g_unix_valid) return 0;
-  int64_t t = (int64_t)telemetry_now_ms() + (int64_t)g_unix_base_ms;
-  if (t < 0) t = 0;
-  return (uint64_t)t;
-}
-
-uint64_t telemetry_unix_s(void) {
-  return telemetry_unix_ms() / 1000ULL;
-}
-
-uint8_t telemetry_unix_is_valid(void) {
-  return g_unix_valid;
-}
-
-// Master-only API: GPS thread calls this with real unix time in ms.
-// It updates the base so telemetry_unix_ms() becomes correct.
-void telemetry_set_unix_time_ms(uint64_t unix_ms) {
-  // Align unix to *synced* monotonic now
-  const int64_t now = (int64_t)telemetry_now_ms();
-  g_unix_base_ms = (int64_t)unix_ms - now;
-  g_unix_valid = 1;
-}
-
-
-static uint64_t node_now_since_ms(void *user);
-
-/* ---------------- Time sync (NTP-style offset/delay) ---------------- */
-static void compute_offset_delay(uint64_t t1, uint64_t t2, uint64_t t3, uint64_t t4,
-                                 int64_t *offset_ms, uint64_t *delay_ms) {
-  const int64_t o = ((int64_t)(t2 - t1) + (int64_t)(t3 - t4)) / 2;
-  const int64_t d = (int64_t)(t4 - t1) - (int64_t)(t3 - t2);
-  *offset_ms = o;
-  *delay_ms = (d < 0) ? 0 : (uint64_t)d;
-}
-
-/* Local endpoint handler: consume TIME_SYNC_RESPONSE and adjust ThreadX clock.
- *
- * Payload (u64, little-endian on STM32):
- *   resp[0]=seq, resp[1]=t1, resp[2]=t2, resp[3]=t3
- * and t4 is captured locally on receipt.
- */
-static SedsResult on_timesync(const SedsPacketView *pkt, void *user) {
-  (void)user;
-  if (!pkt || !pkt->payload) return SEDS_ERR;
-
-  if (pkt->ty == SEDS_DT_TIME_SYNC_RESPONSE && pkt->payload_len >= 32) {
-    uint64_t seq = 0, t1 = 0, t2 = 0, t3 = 0;
-    memcpy(&seq, pkt->payload + 0, 8);
-    memcpy(&t1,  pkt->payload + 8, 8);
-    memcpy(&t2,  pkt->payload + 16, 8);
-    memcpy(&t3,  pkt->payload + 24, 8);
-
-    const uint64_t t4 = tx_raw_now_ms(NULL);
-
-    int64_t offset_ms = 0;
-    uint64_t delay_ms = 0;
-    compute_offset_delay(t1, t2, t3, t4, &offset_ms, &delay_ms);
-
-    telemetry_master_offset_ms_set(offset_ms);
-    telemetry_last_delay_ms_set(delay_ms);
-
-    // Optional debug:
-    // printf("timesync seq=%llu offset_ms=%lld delay_ms=%llu\r\n",
-    //        (unsigned long long)seq, (long long)offset_ms, (unsigned long long)delay_ms);
+  if (!year || !month || !day || !hour || !minute || !second || !millisecond) {
+    return false;
   }
 
+  while (1) {
+    const uint32_t y_u32 = (uint32_t)y;
+    const uint8_t leap =
+        ((y_u32 % 4U) == 0U && ((y_u32 % 100U) != 0U || (y_u32 % 400U) == 0U)) ? 1U : 0U;
+    const uint32_t days_in_year = leap ? 366U : 365U;
+    if (days < days_in_year) {
+      uint8_t m = 1U;
+      uint32_t day_of_year = (uint32_t)days;
+      for (; m <= 12U; ++m) {
+        uint32_t month_start = days_before_month[m - 1U];
+        uint32_t month_end =
+            (m < 12U) ? days_before_month[m] : (uint32_t)(leap ? 366U : 365U);
+        if (leap && m > 2U) {
+          month_start += 1U;
+          month_end += 1U;
+        }
+        if (day_of_year < month_end) {
+          *year = y;
+          *month = m;
+          *day = (uint8_t)(day_of_year - month_start + 1U);
+          *hour = (uint8_t)(seconds_of_day / 3600U);
+          *minute = (uint8_t)((seconds_of_day % 3600U) / 60U);
+          *second = (uint8_t)(seconds_of_day % 60U);
+          *millisecond = (uint16_t)(unix_ms % 1000ULL);
+          return true;
+        }
+      }
+      return false;
+    }
+    days -= days_in_year;
+    ++y;
+  }
+}
 
-  // Master announces Unix time periodically (payload u64s):
-  //   announce[0] = priority
-  //   announce[1] = unix_ms
-  else if (pkt->ty == SEDS_DT_TIME_SYNC_ANNOUNCE && pkt->payload_len >= 16) {
-    uint64_t priority = 0;
-    uint64_t unix_ms  = 0;
-    memcpy(&priority, pkt->payload + 0, 8);
-    memcpy(&unix_ms,  pkt->payload + 8, 8);
+static SedsResult telemetry_apply_local_unix_time_locked(SedsRouter *router) {
+  int32_t year = 0;
+  uint8_t month = 0;
+  uint8_t day = 0;
+  uint8_t hour = 0;
+  uint8_t minute = 0;
+  uint8_t second = 0;
+  uint16_t millisecond = 0;
 
-    // Use last measured delay to approximate the network transit time.
-    // (half RTT is the classic NTP assumption)
-    const uint64_t half_delay = telemetry_last_delay_ms_get() / 2ULL;
-
-    // Set unix base so telemetry_unix_ms() becomes correct:
-    // unix_now ≈ unix_ms + half_delay
-    // so base = (unix_ms + half_delay) - telemetry_now_ms()
-    const int64_t now = (int64_t)telemetry_now_ms();
-    g_unix_base_ms = (int64_t)(unix_ms + half_delay) - now;
-    g_unix_valid = 1;
-
+  if (!router || !telemetry_timesync_is_source() || !g_local_unix_valid) {
     return SEDS_OK;
   }
 
-
-  return SEDS_OK;
-}
-
-/* ---------------- Router timebase ---------------- */
-static uint64_t node_now_since_ms(void *user) {
-  (void)user;
-  const uint64_t now = telemetry_now_ms();
-  const RouterState s = g_router;
-  return s.r ? (now - s.start_time) : 0;
-}
-
-
-/* ---------------- Global router state ---------------- */
-RouterState g_router = {.r = NULL, .created = 0, .start_time = 0};
-
-/* ---------------- TX helpers ---------------- */
-SedsResult tx_send(const uint8_t *bytes, size_t len, void *user) {
-  (void)user;
-
-  if (!bytes || len == 0) {
+  if (!telemetry_unix_ms_to_utc(g_local_unix_ms, &year, &month, &day, &hour, &minute,
+                                &second, &millisecond)) {
     return SEDS_BAD_ARG;
   }
 
-  // Only CAN TX in this build
+  return seds_router_set_local_network_datetime_millis(router, year, month, day, hour, minute,
+                                                       second, millisecond);
+}
+
+static SedsResult telemetry_configure_timesync_locked(SedsRouter *router) {
+  SedsResult result;
+
+  if (!router) {
+    return SEDS_BAD_ARG;
+  }
+
+  result = seds_router_configure_timesync(
+      router, true, telemetry_timesync_role(), telemetry_timesync_priority(),
+      (uint64_t)TELEMETRY_TIMESYNC_SOURCE_TIMEOUT_MS,
+      (uint64_t)TELEMETRY_TIMESYNC_ANNOUNCE_INTERVAL_MS,
+      (uint64_t)TELEMETRY_TIMESYNC_REQUEST_INTERVAL_MS);
+  if (result != SEDS_OK) {
+    return result;
+  }
+
+  return telemetry_apply_local_unix_time_locked(router);
+}
+
+uint64_t telemetry_now_ms(void) { return tx_raw_now_ms_locked(); }
+
+uint64_t telemetry_unix_ms(void) {
+#ifndef TELEMETRY_ENABLED
+  return g_local_unix_valid ? g_local_unix_ms : 0ULL;
+#else
+  uint64_t unix_ms = 0ULL;
+
+  if (g_router.r && seds_router_get_network_time_ms(g_router.r, &unix_ms) == SEDS_OK) {
+    return unix_ms;
+  }
+
+  if (telemetry_timesync_is_source() && g_local_unix_valid) {
+    return g_local_unix_ms;
+  }
+
+  return 0ULL;
+#endif
+}
+
+uint64_t telemetry_unix_s(void) { return telemetry_unix_ms() / 1000ULL; }
+
+uint8_t telemetry_unix_is_valid(void) { return telemetry_unix_ms() != 0ULL ? 1U : 0U; }
+
+void telemetry_set_unix_time_ms(uint64_t unix_ms) {
+  g_local_unix_ms = unix_ms;
+  g_local_unix_valid = (unix_ms != 0ULL) ? 1U : 0U;
+
+#ifdef TELEMETRY_ENABLED
+  if (g_router.r != NULL) {
+    (void)telemetry_apply_local_unix_time_locked(g_router.r);
+  }
+#endif
+}
+
+static uint64_t node_now_since_ms(void *user) {
+  (void)user;
+  const RouterState s = g_router;
+  const uint64_t now = tx_raw_now_ms_locked();
+  return s.r ? (now - s.start_time) : 0ULL;
+}
+
+SedsResult tx_send(const uint8_t *bytes, size_t len, void *user) {
+  (void)user;
+
+  if (!bytes || len == 0U) {
+    return SEDS_BAD_ARG;
+  }
+
   return (can_bus_send_large(bytes, len, 0x03) == HAL_OK) ? SEDS_OK : SEDS_IO;
 }
 
-/* ---------------- Local endpoint handler(s) ----------------
- * SD endpoint packets terminate here (Sink mode).
- * If you don't have SD logging wired yet, just accept.
- */
 SedsResult on_sd_packet(const SedsPacketView *pkt, void *user) {
   (void)user;
   return (sd_card_log_packet(pkt) == SD_CARD_STATUS_OK) ? SEDS_OK : SEDS_IO;
 }
 
-/* ---------------- RX helpers ---------------- */
 static void telemetry_can_rx(const uint8_t *data, size_t len, void *user) {
   (void)user;
   rx_asynchronous(data, len);
@@ -246,18 +237,14 @@ void rx_asynchronous(const uint8_t *bytes, size_t len) {
   (void)len;
   return;
 #else
-  if (!bytes || len == 0) {
+  if (!bytes || len == 0U) {
     return;
   }
 
-  if (!g_router.r) {
-    if (init_telemetry_router() != SEDS_OK) {
-      return;
-    }
+  if (!g_router.r && init_telemetry_router() != SEDS_OK) {
+    return;
   }
 
-  // If we have a registered CAN side, tag RX as "from that side" so the router
-  // can do side-aware behavior (e.g., avoid reflexively re-sending to origin).
   if (g_can_side_id >= 0) {
     (void)seds_router_rx_serialized_packet_to_queue_from_side(
         g_router.r, (uint32_t)g_can_side_id, bytes, len);
@@ -267,160 +254,112 @@ void rx_asynchronous(const uint8_t *bytes, size_t len) {
 #endif
 }
 
-/* Optional synchronous RX (not in telemetry.h, but sometimes handy internally) */
 static UNUSED_FUNCTION void rx_synchronous(const uint8_t *bytes, size_t len) {
 #ifndef TELEMETRY_ENABLED
   (void)bytes;
   (void)len;
   return;
 #else
-  if (!bytes || len == 0) {
+  if (!bytes || len == 0U) {
     return;
   }
 
-  if (!g_router.r) {
-    if (init_telemetry_router() != SEDS_OK) {
-      return;
-    }
+  if (!g_router.r && init_telemetry_router() != SEDS_OK) {
+    return;
   }
 
   if (g_can_side_id >= 0) {
-    (void)seds_router_receive_serialized_from_side(
-        g_router.r, (uint32_t)g_can_side_id, bytes, len);
+    (void)seds_router_receive_serialized_from_side(g_router.r, (uint32_t)g_can_side_id, bytes,
+                                                   len);
   } else {
     (void)seds_router_receive_serialized(g_router.r, bytes, len);
   }
 #endif
 }
 
-
-// --- Time sync request (client-side) ---
-// Called by telemetry thread periodically to request a resync with the master.
-//
-// Packet format matches your earlier example:
-//   req[0]=seq, req[1]=t1
-// where t1 is local send timestamp in ms (same timebase used for NTP math).
-//
-// The master should reply with TIME_SYNC_RESPONSE containing:
-//   [seq, t1, t2, t3]
-//
-// This node's on_timesync() will capture t4 and compute/apply offset.
-static uint64_t g_timesync_seq = 1;
-
-SedsResult telemetry_timesync_request(void)
-{
+SedsResult telemetry_poll_timesync(void) {
 #ifndef TELEMETRY_ENABLED
   return SEDS_OK;
 #else
-  if (!g_router.r) {
-    if (init_telemetry_router() != SEDS_OK) return SEDS_ERR;
+  if (init_telemetry_router() != SEDS_OK) {
+    return SEDS_ERR;
   }
 
-  const uint64_t t1 = tx_raw_now_ms(NULL);   // use your local base time
-  const uint64_t req[2] = { g_timesync_seq++, t1 };
-
-  // IMPORTANT:
-  // - This logs a TIME_SYNC_REQUEST packet to the router so it can be routed to the master.
-  // - timestamp is explicitly t1 so the receiver can use it directly.
-  return seds_router_log_ts(g_router.r, SEDS_DT_TIME_SYNC_REQUEST, t1, req, 2);
+  return seds_router_poll_timesync(g_router.r, NULL);
 #endif
 }
 
-
-/* ---------------- Router init (idempotent) ---------------- */
 SedsResult init_telemetry_router(void) {
 #ifndef TELEMETRY_ENABLED
   return SEDS_OK;
 #else
+  SedsRouter *r = NULL;
+  SedsResult result = SEDS_OK;
+
   if (g_router.created && g_router.r) {
     return SEDS_OK;
   }
 
-  /* Subscribe exactly once */
   if (!g_can_rx_subscribed) {
     if (can_bus_subscribe_rx(telemetry_can_rx, NULL) == HAL_OK) {
-      g_can_rx_subscribed = 1;
+      g_can_rx_subscribed = 1U;
     } else {
       printf("Error: can_bus_subscribe_rx failed\r\n");
-      // Not fatal: you can still TX/log, but you'll miss CAN RX
     }
   }
 
-  // Local endpoint handlers:
-  // - SD terminates here
-  // - TIME_SYNC adjusts ThreadX clock
-  const SedsLocalEndpointDesc locals[] = {
-      {
-          .endpoint = (uint32_t)SEDS_EP_TIME_SYNC,
-          .packet_handler = on_timesync,
-          .serialized_handler = NULL,
-          .user = NULL,
-      },
-  };
-
-  // Correct API: seds_router_new(mode, now_ms_cb, user, handlers, n_handlers)
-  SedsRouter *r = seds_router_new(Seds_RM_Sink, node_now_since_ms, NULL, locals,
-                                  (size_t)(sizeof(locals) / sizeof(locals[0])));
-
+  r = seds_router_new(Seds_RM_Relay, node_now_since_ms, NULL, NULL, 0U);
   if (!r) {
     printf("Error: failed to create router\r\n");
     g_router.r = NULL;
-    g_router.created = 0;
+    g_router.created = 0U;
     g_can_side_id = -1;
     return SEDS_ERR;
   }
 
-  // Add a CAN "side" so the router can be side-aware for RX/TX.
-  // TX callback signature: SedsTransmitFn(const uint8_t*, size_t, void*)
-  g_can_side_id = seds_router_add_side_serialized(
-      r, "can", 3, tx_send, NULL,
-      /*reliable_enabled=*/false);
-
+  g_can_side_id = seds_router_add_side_serialized(r, "can", 3U, tx_send, NULL, false);
   if (g_can_side_id < 0) {
-    // Side registration failure is meaningful; router still exists though.
     printf("Error: failed to add CAN side: %ld\r\n", (long)g_can_side_id);
-    // Keep router alive but clear side id so RX falls back to non-side calls.
     g_can_side_id = -1;
   }
 
-  g_router.r = r;
-  g_router.created = 1;
-  g_router.start_time = telemetry_now_ms();
+  result = telemetry_configure_timesync_locked(r);
+  if (result != SEDS_OK) {
+    printf("Error: failed to configure telemetry timesync: %d\r\n", (int)result);
+    seds_router_free(r);
+    g_router.r = NULL;
+    g_router.created = 0U;
+    g_can_side_id = -1;
+    return result;
+  }
 
+  g_router.r = r;
+  g_router.created = 1U;
+  g_router.start_time = tx_raw_now_ms_locked();
   return SEDS_OK;
 #endif
 }
 
-/* ---------------- Logging APIs ---------------- */
 static inline SedsElemKind guess_kind_from_elem_size(size_t elem_size) {
-  // Heuristic: most of your schema looks float32-heavy; treat 4/8 as float.
-  // If you need exact kinds per datatype, we can add a switch(data_type).
-  if (elem_size == 4 || elem_size == 8) {
+  if (elem_size == 4U || elem_size == 8U) {
     return SEDS_EK_FLOAT;
   }
   return SEDS_EK_UNSIGNED;
 }
 
 SedsResult log_telemetry_synchronous(SedsDataType data_type, const void *data,
-                                     size_t element_count,
-                                     size_t element_size) {
+                                     size_t element_count, size_t element_size) {
 #ifdef TELEMETRY_ENABLED
-  if (!g_router.r) {
-    if (init_telemetry_router() != SEDS_OK) {
-      return SEDS_ERR;
-    }
-  }
-  if (!data || element_count == 0 || element_size == 0) {
+  if (!data || element_count == 0U || element_size == 0U) {
     return SEDS_BAD_ARG;
   }
 
-  const SedsElemKind kind = guess_kind_from_elem_size(element_size);
+  if (!g_router.r && init_telemetry_router() != SEDS_OK) {
+    return SEDS_ERR;
+  }
 
-  // Correct API: seds_router_log_typed_ex expects (count, elem_size) not total bytes.
-  return seds_router_log_typed_ex(g_router.r, data_type, data, element_count,
-                                  element_size, kind,
-                                  /*timestamp*/ NULL,
-                                  /*queue*/ 0);
+  return seds_router_log_typed_ex(g_router.r, data_type, data, element_count, element_size,
+                                  guess_kind_from_elem_size(element_size), NULL, 0);
 #else
   (void)data_type;
   print_data_no_telem((void *)data, element_count * element_size);
@@ -429,24 +368,18 @@ SedsResult log_telemetry_synchronous(SedsDataType data_type, const void *data,
 }
 
 SedsResult log_telemetry_asynchronous(SedsDataType data_type, const void *data,
-                                      size_t element_count,
-                                      size_t element_size) {
+                                      size_t element_count, size_t element_size) {
 #ifdef TELEMETRY_ENABLED
-  if (!g_router.r) {
-    if (init_telemetry_router() != SEDS_OK) {
-      return SEDS_ERR;
-    }
-  }
-  if (!data || element_count == 0 || element_size == 0) {
+  if (!data || element_count == 0U || element_size == 0U) {
     return SEDS_BAD_ARG;
   }
 
-  const SedsElemKind kind = guess_kind_from_elem_size(element_size);
+  if (!g_router.r && init_telemetry_router() != SEDS_OK) {
+    return SEDS_ERR;
+  }
 
-  return seds_router_log_typed_ex(g_router.r, data_type, data, element_count,
-                                  element_size, kind,
-                                  /*timestamp*/ NULL,
-                                  /*queue*/ 1);
+  return seds_router_log_typed_ex(g_router.r, data_type, data, element_count, element_size,
+                                  guess_kind_from_elem_size(element_size), NULL, 1);
 #else
   (void)data_type;
   print_data_no_telem((void *)data, element_count * element_size);
@@ -456,17 +389,15 @@ SedsResult log_telemetry_asynchronous(SedsDataType data_type, const void *data,
 
 SedsResult log_telemetry_string_asynchronous(SedsDataType data_type, const char *str) {
 #ifdef TELEMETRY_ENABLED
-  if (!g_router.r) {
-    if (init_telemetry_router() != SEDS_OK) {
-      return SEDS_ERR;
-    }
-  }
   if (!str) {
     return SEDS_BAD_ARG;
   }
 
-  return seds_router_log_string_ex(g_router.r, data_type, str, strlen(str),
-                                   NULL, 1);
+  if (!g_router.r && init_telemetry_router() != SEDS_OK) {
+    return SEDS_ERR;
+  }
+
+  return seds_router_log_string_ex(g_router.r, data_type, str, strlen(str), NULL, 1);
 #else
   (void)data_type;
   (void)str;
@@ -474,16 +405,14 @@ SedsResult log_telemetry_string_asynchronous(SedsDataType data_type, const char 
 #endif
 }
 
-/* ---------------- Queue processing ---------------- */
 SedsResult dispatch_tx_queue(void) {
 #ifndef TELEMETRY_ENABLED
   return SEDS_OK;
 #else
-  if (!g_router.r) {
-    if (init_telemetry_router() != SEDS_OK) {
-      return SEDS_ERR;
-    }
+  if (!g_router.r && init_telemetry_router() != SEDS_OK) {
+    return SEDS_ERR;
   }
+
   return seds_router_process_tx_queue(g_router.r);
 #endif
 }
@@ -492,100 +421,132 @@ SedsResult process_rx_queue(void) {
 #ifndef TELEMETRY_ENABLED
   return SEDS_OK;
 #else
-  if (!g_router.r) {
-    if (init_telemetry_router() != SEDS_OK) {
-      return SEDS_ERR;
-    }
+  if (!g_router.r && init_telemetry_router() != SEDS_OK) {
+    return SEDS_ERR;
   }
+
   return seds_router_process_rx_queue(g_router.r);
 #endif
 }
 
 SedsResult dispatch_tx_queue_timeout(uint32_t timeout_ms) {
 #ifndef TELEMETRY_ENABLED
+  (void)timeout_ms;
   return SEDS_OK;
 #else
-  if (!g_router.r) {
-    if (init_telemetry_router() != SEDS_OK) {
-      return SEDS_ERR;
-    }
+  if (!g_router.r && init_telemetry_router() != SEDS_OK) {
+    return SEDS_ERR;
   }
+
   return seds_router_process_tx_queue_with_timeout(g_router.r, timeout_ms);
 #endif
 }
 
 SedsResult process_rx_queue_timeout(uint32_t timeout_ms) {
 #ifndef TELEMETRY_ENABLED
+  (void)timeout_ms;
   return SEDS_OK;
 #else
-  if (!g_router.r) {
-    if (init_telemetry_router() != SEDS_OK) {
-      return SEDS_ERR;
-    }
+  if (!g_router.r && init_telemetry_router() != SEDS_OK) {
+    return SEDS_ERR;
   }
+
   return seds_router_process_rx_queue_with_timeout(g_router.r, timeout_ms);
 #endif
 }
 
 SedsResult process_all_queues_timeout(uint32_t timeout_ms) {
 #ifndef TELEMETRY_ENABLED
+  (void)timeout_ms;
   return SEDS_OK;
 #else
-  if (!g_router.r) {
-    if (init_telemetry_router() != SEDS_OK) {
-      return SEDS_ERR;
-    }
+  if (!g_router.r && init_telemetry_router() != SEDS_OK) {
+    return SEDS_ERR;
   }
+
   return seds_router_process_all_queues_with_timeout(g_router.r, timeout_ms);
 #endif
 }
 
-/* ---------------- Error logging ----------------
- * Use the string-aware API so fixed-size schema string types don't explode with
- * SEDS_SIZE_MISMATCH and the router can pad/truncate.
- */
-SedsResult log_error_asyncronous(const char *fmt, ...) {
-#ifndef TELEMETRY_ENABLED
-  (void)fmt;
-  return SEDS_OK;
-#else
-  if (!g_router.r) {
-    if (init_telemetry_router() != SEDS_OK) {
-      return SEDS_ERR;
-    }
+static SedsResult log_error_impl(uint8_t queue, const char *fmt, va_list args) {
+  va_list args_copy;
+  int len = 0;
+  int written = 0;
+
+  if (!fmt) {
+    return SEDS_BAD_ARG;
   }
 
-  va_list args;
-  va_start(args, fmt);
+  if (!g_router.r && init_telemetry_router() != SEDS_OK) {
+    return SEDS_ERR;
+  }
 
-  va_list args_copy;
   va_copy(args_copy, args);
-  int len = vsnprintf(NULL, 0, fmt, args_copy);
+  len = vsnprintf(NULL, 0U, fmt, args_copy);
   va_end(args_copy);
 
   if (len < 0) {
-    va_end(args);
     const char *empty = "";
-    return seds_router_log_string_ex(g_router.r, SEDS_DT_GENERIC_ERROR, empty, 0,
-                                    NULL, 1);
+    return seds_router_log_string_ex(g_router.r, SEDS_DT_GENERIC_ERROR, empty, 0U, NULL, queue);
   }
 
   if (len > 512) {
     len = 512;
   }
 
-  char buf[(size_t)len + 1];
-  int written = vsnprintf(buf, (size_t)len + 1, fmt, args);
-  va_end(args);
-
+  char buf[(size_t)len + 1U];
+  written = vsnprintf(buf, (size_t)len + 1U, fmt, args);
   if (written < 0) {
     const char *empty = "";
-    return seds_router_log_string_ex(g_router.r, SEDS_DT_GENERIC_ERROR, empty, 0,
-                                    NULL, 1);
+    return seds_router_log_string_ex(g_router.r, SEDS_DT_GENERIC_ERROR, empty, 0U, NULL, queue);
   }
 
-  return seds_router_log_string_ex(g_router.r, SEDS_DT_GENERIC_ERROR, buf,
-                                   (size_t)written, NULL, 1);
+  return seds_router_log_string_ex(g_router.r, SEDS_DT_GENERIC_ERROR, buf, (size_t)written, NULL,
+                                   queue);
+}
+
+SedsResult log_error_asynchronous(const char *fmt, ...) {
+#ifndef TELEMETRY_ENABLED
+  (void)fmt;
+  return SEDS_OK;
+#else
+  va_list args;
+  SedsResult result;
+
+  va_start(args, fmt);
+  result = log_error_impl(1U, fmt, args);
+  va_end(args);
+  return result;
+#endif
+}
+
+SedsResult log_error_synchronous(const char *fmt, ...) {
+#ifndef TELEMETRY_ENABLED
+  (void)fmt;
+  return SEDS_OK;
+#else
+  va_list args;
+  SedsResult result;
+
+  va_start(args, fmt);
+  result = log_error_impl(0U, fmt, args);
+  va_end(args);
+  return result;
+#endif
+}
+
+SedsResult log_error_asyncronous(const char *fmt, ...) {
+#ifndef TELEMETRY_ENABLED
+  (void)fmt;
+  return SEDS_OK;
+#else
+  va_list args;
+  SedsResult result;
+
+  va_start(args, fmt);
+  result = log_error_impl(1U, fmt, args);
+  va_end(args);
+  return result;
 #endif
 }
 
@@ -594,47 +555,16 @@ SedsResult log_error_syncronous(const char *fmt, ...) {
   (void)fmt;
   return SEDS_OK;
 #else
-  if (!g_router.r) {
-    if (init_telemetry_router() != SEDS_OK) {
-      return SEDS_ERR;
-    }
-  }
-
   va_list args;
+  SedsResult result;
+
   va_start(args, fmt);
-
-  va_list args_copy;
-  va_copy(args_copy, args);
-  int len = vsnprintf(NULL, 0, fmt, args_copy);
-  va_end(args_copy);
-
-  if (len < 0) {
-    va_end(args);
-    const char *empty = "";
-    return seds_router_log_string_ex(g_router.r, SEDS_DT_GENERIC_ERROR, empty, 0,
-                                    NULL, 0);
-  }
-
-  if (len > 512) {
-    len = 512;
-  }
-
-  char buf[(size_t)len + 1];
-  int written = vsnprintf(buf, (size_t)len + 1, fmt, args);
+  result = log_error_impl(0U, fmt, args);
   va_end(args);
-
-  if (written < 0) {
-    const char *empty = "";
-    return seds_router_log_string_ex(g_router.r, SEDS_DT_GENERIC_ERROR, empty, 0,
-                                    NULL, 0);
-  }
-
-  return seds_router_log_string_ex(g_router.r, SEDS_DT_GENERIC_ERROR, buf,
-                                   (size_t)written, NULL, 0);
+  return result;
 #endif
 }
 
-/* ---------------- Error printing ---------------- */
 SedsResult print_telemetry_error(const int32_t error_code) {
 #ifndef TELEMETRY_ENABLED
   (void)error_code;
@@ -645,23 +575,22 @@ SedsResult print_telemetry_error(const int32_t error_code) {
     return (SedsResult)need;
   }
 
-  // VLA is OK here; need is typically small.
   char buf[(size_t)need];
   SedsResult res = seds_error_to_string(error_code, buf, sizeof(buf));
   if (res == SEDS_OK) {
     printf("Error: %s\r\n", buf);
   } else {
-    (void)log_error_asyncronous("Error: seds_error_to_string failed: %d\r\n",
-                                (int)res);
+    (void)log_error_asynchronous("Error: seds_error_to_string failed: %d\r\n", (int)res);
   }
+
   return res;
 #endif
 }
 
-/* ---------------- Fatal helper ---------------- */
 void die(const char *fmt, ...) {
   char buf[128];
   va_list args;
+
   va_start(args, fmt);
   vsnprintf(buf, sizeof(buf), fmt, args);
   va_end(args);
