@@ -262,7 +262,7 @@ uint16_t USBD_Get_Configuration_Number(uint8_t class_type, uint8_t interface_typ
 #define USBD_PID                                      22288
 #define USBD_LANGID_STRING                            1033
 #define USBD_MANUFACTURER_STRING                      "UBSEDS"
-#define USBD_PRODUCT_STRING                           "DAQ Board"
+#define USBD_PRODUCT_STRING                           "MichaelContoller DAQ Board"
 #define USBD_SERIAL_NUMBER                            "67"
 
 #define USB_DESC_TYPE_INTERFACE                       0x04U
