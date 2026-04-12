@@ -7,6 +7,7 @@
 
 TX_THREAD telemetry_thread;
 #define TELEMETRY_THREAD_STACK_SIZE (16U *1024U)
+extern FDCAN_HandleTypeDef hfdcan1;
 
 void telemetry_thread_entry(ULONG initial_input)
 {
@@ -14,6 +15,7 @@ void telemetry_thread_entry(ULONG initial_input)
 
     // Ensure router exists early (so we can send requests immediately)
     (void)init_telemetry_router();
+    (void)can_bus_init(&hfdcan1);
 
     for (;;) {
         can_bus_process_rx();
