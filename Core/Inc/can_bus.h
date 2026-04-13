@@ -25,10 +25,6 @@ HAL_StatusTypeDef can_bus_send_large(const uint8_t *bytes, size_t len, uint32_t 
  */
 void can_bus_process_rx(void);
 
-/*
- * MUST be called periodically from thread/main-loop context.
- * This drains the ISR RX ring, performs reassembly, and invokes subscribers.
- */
 
 /*
  * Subscribe a callback to RX events (FIFO1).
