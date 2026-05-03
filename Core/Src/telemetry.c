@@ -2,7 +2,12 @@
 #include "telemetry.h"
 
 #include "app_threadx.h"
+#ifdef TELEMETRY_BOARD_LINK_UART
+#include "board_link_uart.h"
+#endif
+#ifdef TELEMETRY_CAN_BUS
 #include "can_bus.h"
+#endif
 #include "sedsprintf.h"
 #include "stm32U5xx_hal.h"
 
@@ -48,8 +53,18 @@ static void print_data_no_telem(void *data, size_t len) {
 #define TELEMETRY_TIMESYNC_ROLE_CONSUMER 0U
 #define TELEMETRY_TIMESYNC_ROLE_SOURCE 1U
 
+#ifdef TELEMETRY_CAN_BUS
 static uint8_t g_can_rx_subscribed = 0U;
+#endif
+#ifdef TELEMETRY_BOARD_LINK_UART
+static uint8_t g_board_link_rx_subscribed = 0U;
+#endif
+#ifdef TELEMETRY_CAN_BUS
 static int32_t g_can_side_id = -1;
+#endif
+#ifdef TELEMETRY_BOARD_LINK_UART
+static int32_t g_board_link_side_id = -1;
+#endif
 static uint8_t g_local_unix_valid = 0U;
 static uint64_t g_local_unix_ms = 0ULL;
 
@@ -210,6 +225,7 @@ static uint64_t node_now_since_ms(void *user) {
   return s.r ? (now - s.start_time) : 0ULL;
 }
 
+#ifdef TELEMETRY_CAN_BUS
 SedsResult tx_send(const uint8_t *bytes, size_t len, void *user) {
   (void)user;
 
@@ -219,14 +235,58 @@ SedsResult tx_send(const uint8_t *bytes, size_t len, void *user) {
 
   return (can_bus_send_large(bytes, len, 0x03) == HAL_OK) ? SEDS_OK : SEDS_IO;
 }
+#endif
 
+#ifdef TELEMETRY_BOARD_LINK_UART
+static SedsResult board_link_tx_send(const uint8_t *bytes, size_t len, void *user) {
+  return board_link_uart_tx_send(bytes, len, user);
+}
+#endif
+
+#ifdef TELEMETRY_CAN_BUS
 static void telemetry_can_rx(const uint8_t *data, size_t len, void *user) {
   (void)user;
   rx_asynchronous(data, len);
 }
+#endif
+
+#ifdef TELEMETRY_BOARD_LINK_UART
+static void telemetry_board_link_rx(const uint8_t *data, size_t len, void *user) {
+  (void)user;
+
+#ifdef TELEMETRY_ENABLED
+  SedsResult result = SEDS_OK;
+
+  if (!data || len == 0U) {
+    return;
+  }
+
+  if (!g_router.r && init_telemetry_router() != SEDS_OK) {
+    return;
+  }
+
+  if (g_board_link_side_id >= 0) {
+    result = seds_router_rx_serialized_packet_to_queue_from_side(
+        g_router.r, (uint32_t)g_board_link_side_id, data, len);
+  } else {
+    result = seds_router_rx_serialized_packet_to_queue(g_router.r, data, len);
+  }
+
+  (void)result;
+#else
+  (void)data;
+  (void)len;
+#endif
+}
+#endif
 
 void rx_asynchronous(const uint8_t *bytes, size_t len) {
 #ifndef TELEMETRY_ENABLED
+  (void)bytes;
+  (void)len;
+  return;
+#else
+#ifndef TELEMETRY_CAN_BUS
   (void)bytes;
   (void)len;
   return;
@@ -246,10 +306,16 @@ void rx_asynchronous(const uint8_t *bytes, size_t len) {
     (void)seds_router_rx_serialized_packet_to_queue(g_router.r, bytes, len);
   }
 #endif
+#endif
 }
 
 static UNUSED_FUNCTION void rx_synchronous(const uint8_t *bytes, size_t len) {
 #ifndef TELEMETRY_ENABLED
+  (void)bytes;
+  (void)len;
+  return;
+#else
+#ifndef TELEMETRY_CAN_BUS
   (void)bytes;
   (void)len;
   return;
@@ -268,6 +334,7 @@ static UNUSED_FUNCTION void rx_synchronous(const uint8_t *bytes, size_t len) {
   } else {
     (void)seds_router_receive_serialized(g_router.r, bytes, len);
   }
+#endif
 #endif
 }
 
@@ -313,11 +380,15 @@ SedsResult init_telemetry_router(void) {
 #else
   SedsRouter *r = NULL;
   SedsResult result = SEDS_OK;
+#ifdef TELEMETRY_BOARD_LINK_UART
+  int32_t board_link_side_id = -1;
+#endif
 
   if (g_router.created && g_router.r) {
     return SEDS_OK;
   }
 
+#ifdef TELEMETRY_CAN_BUS
   if (!g_can_rx_subscribed) {
     if (can_bus_subscribe_rx(telemetry_can_rx, NULL) == HAL_OK) {
       g_can_rx_subscribed = 1U;
@@ -325,20 +396,68 @@ SedsResult init_telemetry_router(void) {
       printf("Error: can_bus_subscribe_rx failed\r\n");
     }
   }
+#endif
+
+#ifdef TELEMETRY_BOARD_LINK_UART
+  if (!g_board_link_rx_subscribed) {
+    if (board_link_uart_subscribe_rx(telemetry_board_link_rx, NULL) == HAL_OK) {
+      g_board_link_rx_subscribed = 1U;
+    } else {
+      printf("Error: board_link_uart_subscribe_rx failed\r\n");
+    }
+  }
+#endif
 
   r = seds_router_new(Seds_RM_Relay, node_now_since_ms, NULL, NULL, 0U);
   if (!r) {
     printf("Error: failed to create router\r\n");
     g_router.r = NULL;
     g_router.created = 0U;
+#ifdef TELEMETRY_CAN_BUS
     g_can_side_id = -1;
+#endif
+#ifdef TELEMETRY_BOARD_LINK_UART
+    g_board_link_side_id = -1;
+#endif
     return SEDS_ERR;
   }
 
+#ifdef TELEMETRY_CAN_BUS
   g_can_side_id = seds_router_add_side_serialized(r, "can", 3U, tx_send, NULL, true);
   if (g_can_side_id < 0) {
     printf("Error: failed to add CAN side: %ld\r\n", (long)g_can_side_id);
     g_can_side_id = -1;
+  }
+#endif
+
+#ifdef TELEMETRY_BOARD_LINK_UART
+  board_link_side_id =
+      seds_router_add_side_serialized(r, "board-link-uart", 5U, board_link_tx_send, NULL, true);
+  g_board_link_side_id = board_link_side_id;
+  if (board_link_side_id < 0) {
+    printf("Error: failed to add board-link UART side: %ld\r\n", (long)board_link_side_id);
+    g_board_link_side_id = -1;
+  }
+#endif
+
+#ifdef TELEMETRY_CAN_BUS
+  if (g_can_side_id < 0) {
+#elif defined(TELEMETRY_BOARD_LINK_UART)
+  if (board_link_side_id < 0) {
+#else
+  if (1) {
+#endif
+    printf("Error: relay requires configured telemetry sides\r\n");
+    seds_router_free(r);
+    g_router.r = NULL;
+    g_router.created = 0U;
+#ifdef TELEMETRY_CAN_BUS
+    g_can_side_id = -1;
+#endif
+#ifdef TELEMETRY_BOARD_LINK_UART
+    g_board_link_side_id = -1;
+#endif
+    return SEDS_ERR;
   }
 
   result = telemetry_configure_timesync_locked(r);
@@ -347,7 +466,12 @@ SedsResult init_telemetry_router(void) {
     seds_router_free(r);
     g_router.r = NULL;
     g_router.created = 0U;
+#ifdef TELEMETRY_CAN_BUS
     g_can_side_id = -1;
+#endif
+#ifdef TELEMETRY_BOARD_LINK_UART
+    g_board_link_side_id = -1;
+#endif
     return result;
   }
 
@@ -357,7 +481,12 @@ SedsResult init_telemetry_router(void) {
     seds_router_free(r);
     g_router.r = NULL;
     g_router.created = 0U;
+#ifdef TELEMETRY_CAN_BUS
     g_can_side_id = -1;
+#endif
+#ifdef TELEMETRY_BOARD_LINK_UART
+    g_board_link_side_id = -1;
+#endif
     return result;
   }
 

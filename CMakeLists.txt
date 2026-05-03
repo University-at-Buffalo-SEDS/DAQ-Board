@@ -47,6 +47,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     # STM32CubeMX generated application sources
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/can_bus.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/board_link_uart.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry_thread.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry.c 
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry_hooks.c 
@@ -96,11 +97,24 @@ target_link_libraries(${CMAKE_PROJECT_NAME} sedsprintf_rs::sedsprintf_rs)
 
 # Option defaults to ON
 option(ENABLE_TELEMETRY "Enable the telemetry subsystem" ON)
+option(ENABLE_TELEMETRY_CAN_BUS "Use CAN as the telemetry transport" OFF)
+option(ENABLE_TELEMETRY_BOARD_LINK_UART "Use USART1 DMA as the telemetry transport" ON)
 set(TELEMETRY_TIMESYNC_MASTER_PRIO "-1" CACHE STRING
     "Timesync source priority. Values < 0 make this board a consumer; values >= 0 make it a source with that priority.")
 
+if(ENABLE_TELEMETRY)
+    if(ENABLE_TELEMETRY_CAN_BUS AND ENABLE_TELEMETRY_BOARD_LINK_UART)
+        message(FATAL_ERROR "Telemetry transports are mutually exclusive: enable CAN or board-link UART, not both.")
+    endif()
+    if(NOT ENABLE_TELEMETRY_CAN_BUS AND NOT ENABLE_TELEMETRY_BOARD_LINK_UART)
+        message(FATAL_ERROR "Telemetry is enabled but no transport is selected. Enable CAN or board-link UART.")
+    endif()
+endif()
+
 # Print its state for debugging
 message(STATUS "Telemetry enabled: ${ENABLE_TELEMETRY}")
+message(STATUS "Telemetry CAN bus enabled: ${ENABLE_TELEMETRY_CAN_BUS}")
+message(STATUS "Telemetry board-link UART enabled: ${ENABLE_TELEMETRY_BOARD_LINK_UART}")
 message(STATUS "Telemetry timesync master priority: ${TELEMETRY_TIMESYNC_MASTER_PRIO}")
 
 # Define or undefine the macro globally
@@ -111,4 +125,12 @@ if(ENABLE_TELEMETRY)
     )
 else()
     # Not defined → disabled
+endif()
+
+if(ENABLE_TELEMETRY_CAN_BUS)
+    add_compile_definitions(TELEMETRY_CAN_BUS)
+endif()
+
+if(ENABLE_TELEMETRY_BOARD_LINK_UART)
+    add_compile_definitions(TELEMETRY_BOARD_LINK_UART)
 endif()
