@@ -16,7 +16,7 @@ Features
 - Friendly, non-traceback error messages by default
 
 Usage examples
-  ./scripts/build.py build --debug
+  ./scripts/build.py build --make sure the can bus timings for the debug
   ./scripts/build.py build --release --no-telemetry
   ./scripts/build.py flash --debug --method st-flash
   ./scripts/build.py flash --release --method st-util --device /dev/ttyACM0

@@ -343,7 +343,16 @@ void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* hfdcan)
   /** Initializes the peripherals clock
   */
     PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_FDCAN1;
-    PeriphClkInit.Fdcan1ClockSelection = RCC_FDCAN1CLKSOURCE_PLL1;
+    PeriphClkInit.Fdcan1ClockSelection = RCC_FDCAN1CLKSOURCE_PLL2;
+    PeriphClkInit.PLL2.PLL2Source = RCC_PLLSOURCE_HSE;
+    PeriphClkInit.PLL2.PLL2M = 4;
+    PeriphClkInit.PLL2.PLL2N = 85;
+    PeriphClkInit.PLL2.PLL2P = 2;
+    PeriphClkInit.PLL2.PLL2Q = 2;
+    PeriphClkInit.PLL2.PLL2R = 2;
+    PeriphClkInit.PLL2.PLL2RGE = RCC_PLLVCIRANGE_0;
+    PeriphClkInit.PLL2.PLL2FRACN = 0;
+    PeriphClkInit.PLL2.PLL2ClockOut = RCC_PLL2_DIVP;
     if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
     {
       Error_Handler();
@@ -811,16 +820,7 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef* hpcd)
   /** Initializes the peripherals clock
   */
     PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_CLK48;
-    PeriphClkInit.IclkClockSelection = RCC_CLK48CLKSOURCE_PLL2;
-    PeriphClkInit.PLL2.PLL2Source = RCC_PLLSOURCE_HSE;
-    PeriphClkInit.PLL2.PLL2M = 4;
-    PeriphClkInit.PLL2.PLL2N = 48;
-    PeriphClkInit.PLL2.PLL2P = 2;
-    PeriphClkInit.PLL2.PLL2Q = 4;
-    PeriphClkInit.PLL2.PLL2R = 4;
-    PeriphClkInit.PLL2.PLL2RGE = RCC_PLLVCIRANGE_0;
-    PeriphClkInit.PLL2.PLL2FRACN = 0;
-    PeriphClkInit.PLL2.PLL2ClockOut = RCC_PLL2_DIVQ;
+    PeriphClkInit.IclkClockSelection = RCC_CLK48CLKSOURCE_HSI48;
     if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
     {
       Error_Handler();
