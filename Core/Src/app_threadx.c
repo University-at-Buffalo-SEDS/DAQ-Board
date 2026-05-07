@@ -27,7 +27,9 @@
 #include "sedsprintf.h"
 #include "telemetry.h"
 #include "DAQ-Threads.h"
+#if (DISABLE_SD_CARD == 0U)
 #include "sd_card.h"
+#endif
 #include "tx_api.h"
 /* Provide telemetry_set_byte_pool so rust hooks use the app memory pool */
 extern void telemetry_set_byte_pool(TX_BYTE_POOL *pool);
@@ -67,13 +69,16 @@ extern void telemetry_init_lock(void);
 UINT App_ThreadX_Init(VOID *memory_ptr)
 {
   UINT ret = TX_SUCCESS;
+
   /* USER CODE BEGIN App_ThreadX_MEM_POOL */
   TX_BYTE_POOL *byte_pool = (TX_BYTE_POOL*)memory_ptr;
   /* USER CODE END App_ThreadX_MEM_POOL */
+
   /* USER CODE BEGIN App_ThreadX_Init */
   telemetry_set_byte_pool(byte_pool);
   /* Initialize telemetry lock used by Rust (telemetry_lock/telemetry_unlock). */
   telemetry_init_lock();
+#if (DISABLE_SD_CARD == 0U)
   ret = sd_card_init(byte_pool);
   if (ret != TX_SUCCESS)
   {
@@ -84,6 +89,7 @@ UINT App_ThreadX_Init(VOID *memory_ptr)
   {
     Error_Handler();
   }
+#endif
   ret = create_telemetry_thread(byte_pool);
   if (ret != TX_SUCCESS)
   {

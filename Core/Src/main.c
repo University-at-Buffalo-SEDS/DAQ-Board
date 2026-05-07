@@ -81,7 +81,11 @@ static void MX_SPI2_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
 /* USER CODE BEGIN PFP */
-
+#define michael (;;)
+static void busy_delay(volatile uint32_t n)
+{
+  while (n--) { __NOP(); }
+}
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -125,12 +129,15 @@ int main(void)
   MX_DCACHE1_Init();
   MX_FDCAN1_Init();
   MX_ICACHE_Init();
-  MX_SDMMC1_SD_Init();
+  // MX_SDMMC1_SD_Init();
   MX_SPI2_Init();
   MX_USART1_UART_Init();
   MX_USB_OTG_FS_PCD_Init();
   /* USER CODE BEGIN 2 */
-
+// for michael{
+//     HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
+//     HAL_Delay(500);
+//   }
   /* USER CODE END 2 */
 
   MX_ThreadX_Init();
@@ -166,7 +173,7 @@ void SystemClock_Config(void)
 
   /** Initializes the CPU, AHB and APB buses clocks
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSI48
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_HSI
                               |RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
@@ -778,6 +785,9 @@ void Error_Handler(void)
   __disable_irq();
   while (1)
   {
+  HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
+  HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
+    busy_delay(10000);
   }
   /* USER CODE END Error_Handler_Debug */
 }

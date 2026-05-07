@@ -346,10 +346,10 @@ void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* hfdcan)
     PeriphClkInit.Fdcan1ClockSelection = RCC_FDCAN1CLKSOURCE_PLL2;
     PeriphClkInit.PLL2.PLL2Source = RCC_PLLSOURCE_HSE;
     PeriphClkInit.PLL2.PLL2M = 4;
-    PeriphClkInit.PLL2.PLL2N = 85;
+    PeriphClkInit.PLL2.PLL2N = 48;
     PeriphClkInit.PLL2.PLL2P = 2;
-    PeriphClkInit.PLL2.PLL2Q = 2;
-    PeriphClkInit.PLL2.PLL2R = 2;
+    PeriphClkInit.PLL2.PLL2Q = 4;
+    PeriphClkInit.PLL2.PLL2R = 4;
     PeriphClkInit.PLL2.PLL2RGE = RCC_PLLVCIRANGE_0;
     PeriphClkInit.PLL2.PLL2FRACN = 0;
     PeriphClkInit.PLL2.PLL2ClockOut = RCC_PLL2_DIVP;

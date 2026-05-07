@@ -90,6 +90,7 @@ set(SEDSPRINTF_RS_ENV_QUEUE_GROW_STEP "1.25" CACHE STRING "" FORCE)
 set(SEDSPRINTF_RS_ENV_MAX_RECENT_RX_IDS "32" CACHE STRING "" FORCE)
 set(SEDSPRINTF_RS_ENV_STARTING_RECENT_RX_IDS "16" CACHE STRING "" FORCE)
 set(SEDSPRINTF_RS_ENV_PAYLOAD_COMPRESS_THRESHOLD "30" CACHE STRING "" FORCE)
+set(SEDSPRINTF_EMBEDDED_BUILD ON CACHE BOOL "Build sedsprintf_rs for embedded" FORCE)
 set(SEDSPRINTF_RS_TARGET "thumbv8m.main-none-eabihf" CACHE STRING "" FORCE) # Set target for embedded systems
 # set(SEDSPRINTF_RS_TARGET "thumbv7em-none-eabihf" CACHE STRING "" FORCE) # Set target for embedded systems
 add_subdirectory(${CMAKE_SOURCE_DIR}/sedsprintf_rs)
@@ -97,8 +98,8 @@ target_link_libraries(${CMAKE_PROJECT_NAME} sedsprintf_rs::sedsprintf_rs)
 
 # Option defaults to ON
 option(ENABLE_TELEMETRY "Enable the telemetry subsystem" ON)
-option(ENABLE_TELEMETRY_CAN_BUS "Use CAN as the telemetry transport" OFF)
-option(ENABLE_TELEMETRY_BOARD_LINK_UART "Use USART1 DMA as the telemetry transport" ON)
+option(ENABLE_TELEMETRY_CAN_BUS "Use CAN as the telemetry transport" ON)
+option(ENABLE_TELEMETRY_BOARD_LINK_UART "Use USART1 DMA as the telemetry transport" OFF)
 set(TELEMETRY_TIMESYNC_MASTER_PRIO "-1" CACHE STRING
     "Timesync source priority. Values < 0 make this board a consumer; values >= 0 make it a source with that priority.")
 

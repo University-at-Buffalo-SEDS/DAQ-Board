@@ -2,6 +2,8 @@
 #include "telemetry.h"
 
 #include "app_threadx.h"
+#include "main.h"
+#include "stm32u5xx_hal_gpio.h"
 #ifdef TELEMETRY_BOARD_LINK_UART
 #include "board_link_uart.h"
 #endif
@@ -232,11 +234,10 @@ SedsResult tx_send(const uint8_t *bytes, size_t len, void *user) {
   if (!bytes || len == 0U) {
     return SEDS_BAD_ARG;
   }
-
+  HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
   return (can_bus_send_large(bytes, len, 0x03) == HAL_OK) ? SEDS_OK : SEDS_IO;
 }
 #endif
-
 #ifdef TELEMETRY_BOARD_LINK_UART
 static SedsResult board_link_tx_send(const uint8_t *bytes, size_t len, void *user) {
   return board_link_uart_tx_send(bytes, len, user);

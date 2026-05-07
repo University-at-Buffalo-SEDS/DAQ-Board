@@ -63,6 +63,9 @@ void Error_Handler(void);
 #define LED1_GPIO_Port GPIOC
 
 /* USER CODE BEGIN Private defines */
+#ifndef DISABLE_SD_CARD
+#define DISABLE_SD_CARD 1U
+#endif
 
 /* USER CODE END Private defines */
 
