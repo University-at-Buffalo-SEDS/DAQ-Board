@@ -185,6 +185,12 @@ static SedsResult telemetry_configure_timesync_locked(SedsRouter *router) {
   return telemetry_apply_local_unix_time_locked(router);
 }
 
+static SedsResult telemetry_heartbeat_handler(const SedsPacketView *pkt, void *user) {
+  (void)pkt;
+  (void)user;
+  return SEDS_OK;
+}
+
 uint64_t telemetry_now_ms(void) { return tx_raw_now_ms_locked(); }
 
 uint64_t telemetry_unix_ms(void) {
@@ -409,7 +415,17 @@ SedsResult init_telemetry_router(void) {
   }
 #endif
 
-  r = seds_router_new(Seds_RM_Relay, node_now_since_ms, NULL, NULL, 0U);
+  static const SedsLocalEndpointDesc locals[] = {
+      {
+          .endpoint = SEDS_EP_HEART_BEAT,
+          .packet_handler = telemetry_heartbeat_handler,
+          .serialized_handler = NULL,
+          .user = NULL,
+      },
+  };
+
+  r = seds_router_new(Seds_RM_Relay, node_now_since_ms, NULL, locals,
+                      sizeof(locals) / sizeof(locals[0]));
   if (!r) {
     printf("Error: failed to create router\r\n");
     g_router.r = NULL;
@@ -559,6 +575,20 @@ SedsResult log_telemetry_string_asynchronous(SedsDataType data_type, const char 
 #else
   (void)data_type;
   (void)str;
+  return SEDS_OK;
+#endif
+}
+
+SedsResult log_telemetry_heartbeat_asynchronous(void) {
+#ifdef TELEMETRY_ENABLED
+  static const uint8_t empty_payload = 0U;
+
+  if (!g_router.r && init_telemetry_router() != SEDS_OK) {
+    return SEDS_ERR;
+  }
+
+  return seds_router_log_bytes_ex(g_router.r, SEDS_DT_HEARTBEAT, &empty_payload, 0U, NULL, 1);
+#else
   return SEDS_OK;
 #endif
 }

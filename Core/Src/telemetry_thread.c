@@ -11,7 +11,7 @@
 #include "main.h"
 
 TX_THREAD telemetry_thread;
-#define TELEMETRY_THREAD_STACK_SIZE (16U * 1024U)
+#define TELEMETRY_THREAD_STACK_SIZE (32U * 1024U)
 #ifdef TELEMETRY_CAN_BUS
 extern FDCAN_HandleTypeDef hfdcan1;
 #endif

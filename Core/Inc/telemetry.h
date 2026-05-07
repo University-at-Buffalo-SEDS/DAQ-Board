@@ -29,6 +29,7 @@ SedsResult log_telemetry_asynchronous(SedsDataType data_type, const void *data,
                                       size_t element_count, size_t element_size);
 
 SedsResult log_telemetry_string_asynchronous(SedsDataType data_type, const char *str);
+SedsResult log_telemetry_heartbeat_asynchronous(void);
 
 SedsResult dispatch_tx_queue(void);
 

@@ -26,7 +26,10 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN TD */
-
+static void busy_delay(volatile uint32_t n)
+{
+  while (n--) { __NOP(); }
+}
 /* USER CODE END TD */
 
 /* Private define ------------------------------------------------------------*/
@@ -98,6 +101,11 @@ void HardFault_Handler(void)
   while (1)
   {
     /* USER CODE BEGIN W1_HardFault_IRQn 0 */
+    HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
+    busy_delay(1000000);
+    HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
+    busy_delay(1000000);
+
     /* USER CODE END W1_HardFault_IRQn 0 */
   }
 }

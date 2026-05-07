@@ -278,6 +278,8 @@ def configure_and_build(ui: UI, cfg: BuildConfig) -> tuple[Path, Path]:
         f"-DCMAKE_TOOLCHAIN_FILE={str(cfg.toolchain_file)}",
         "-DCMAKE_COMMAND=cmake",
         telemetry_flag,
+        "-DENABLE_TELEMETRY_CAN_BUS=ON",
+        "-DENABLE_TELEMETRY_BOARD_LINK_UART=OFF",
         "-S", str(cfg.repo_root),
         "-B", str(cfg.build_dir),
         "-G", cfg.generator,
