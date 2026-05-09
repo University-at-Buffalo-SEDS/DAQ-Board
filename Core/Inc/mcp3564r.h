@@ -37,9 +37,11 @@ typedef struct
 extern const mcp3564r_config_t MCP3564R_DEFAULT_CONFIG;
 
 UINT mcp3564r_init(SPI_HandleTypeDef *spi);
+void mcp3564r_set_start_offset_us(uint32_t offset_us);
 HAL_StatusTypeDef mcp3564r_start_dma(void);
 void mcp3564r_dma_complete(void);
 void mcp3564r_dma_error(void);
+void mcp3564r_timer_elapsed_callback(TIM_HandleTypeDef *htim);
 UINT mcp3564r_get_sample(mcp3564r_sample_t *sample);
 
 #ifdef __cplusplus
