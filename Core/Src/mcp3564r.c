@@ -25,7 +25,7 @@
 #define MCP3564R_SAMPLE_QUEUE_DEPTH (128U)
 
 #ifndef MCP3564R_DEFAULT_START_OFFSET_US
-#define MCP3564R_DEFAULT_START_OFFSET_US (200000U)
+#define MCP3564R_DEFAULT_START_OFFSET_US (200U)
 #endif
 
 #define EN_12V HAL_GPIO_WritePin(EN_12V_GPIO_Port, EN_12V_Pin, GPIO_PIN_SET)
@@ -47,6 +47,7 @@ typedef struct
   volatile uint8_t dma_busy;
   volatile uint8_t sample_valid;
   volatile uint8_t conversion_active;
+  volatile uint8_t start_sent;
   volatile uint8_t queue_head;
   volatile uint8_t queue_tail;
   volatile uint8_t queue_count;
@@ -207,13 +208,17 @@ static HAL_StatusTypeDef mcp3564r_write_config(const mcp3564r_config_t *config)
   return status;
 }
 
-static HAL_StatusTypeDef mcp3564r_start_conversion(void)
+static HAL_StatusTypeDef mcp3564r_send_start_once(void)
 {
-  const HAL_StatusTypeDef status = mcp3564r_transmit_byte(MCP3564R_CMD_START);
+  if (g_mcp3564r.start_sent != 0U)
+  {
+    return HAL_OK;
+  }
 
+  const HAL_StatusTypeDef status = mcp3564r_transmit_byte(MCP3564R_CMD_START);
   if (status == HAL_OK)
   {
-    g_mcp3564r.conversion_active = 1U;
+    g_mcp3564r.start_sent = 1U;
   }
 
   return status;
@@ -265,7 +270,7 @@ static HAL_StatusTypeDef mcp3564r_read_data_blocking(void)
   uint8_t rx_buf24[3] = {0x00U, 0x00U, 0x00U};
   HAL_StatusTypeDef status;
 
-  status = mcp3564r_start_conversion();
+  status = mcp3564r_send_start_once();
   if (status != HAL_OK)
   {
     return status;
@@ -376,6 +381,8 @@ static HAL_StatusTypeDef mcp3564r_arm_start_offset_timer(void)
   (void)HAL_TIM_Base_Stop_IT(&htim2);
   __HAL_TIM_SET_COUNTER(&htim2, 0U);
   __HAL_TIM_SET_AUTORELOAD(&htim2, g_mcp3564r.start_offset_us - 1U);
+  (void)HAL_TIM_GenerateEvent(&htim2, TIM_EVENTSOURCE_UPDATE);
+  __HAL_TIM_SET_COUNTER(&htim2, 0U);
   __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_UPDATE);
 
   return HAL_TIM_Base_Start_IT(&htim2);
@@ -383,13 +390,20 @@ static HAL_StatusTypeDef mcp3564r_arm_start_offset_timer(void)
 
 static HAL_StatusTypeDef mcp3564r_start_cycle(void)
 {
-  const HAL_StatusTypeDef status = mcp3564r_start_conversion();
+  HAL_StatusTypeDef status = mcp3564r_send_start_once();
   if (status != HAL_OK)
   {
     return status;
   }
 
-  return mcp3564r_arm_start_offset_timer();
+  g_mcp3564r.conversion_active = 1U;
+  status = mcp3564r_arm_start_offset_timer();
+  if (status != HAL_OK)
+  {
+    g_mcp3564r.conversion_active = 0U;
+  }
+
+  return status;
 }
 
 UINT mcp3564r_init(SPI_HandleTypeDef *spi)
