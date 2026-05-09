@@ -10,11 +10,29 @@ extern "C" {
 
 typedef struct
 {
+  uint8_t config0_reg;
+  uint8_t config1_reg;
+  uint8_t config2_reg;
+  uint8_t config3_reg;
+  uint8_t irq_reg;
+  uint8_t mux_reg;
+  uint32_t scan_reg;
+  uint32_t timer_reg;
+  uint32_t offsetCal_reg;
+  uint32_t gainCal_reg;
+} mcp3564r_config_t;
+
+typedef struct
+{
   uint8_t sample_valid;
   uint8_t dma_busy;
   int32_t code;
+  float voltage_v;
+  float loadcell_kg1000;
   float temperature_c;
 } mcp3564r_sample_t;
+
+extern const mcp3564r_config_t MCP3564R_DEFAULT_CONFIG;
 
 UINT mcp3564r_init(SPI_HandleTypeDef *spi);
 HAL_StatusTypeDef mcp3564r_start_dma(void);

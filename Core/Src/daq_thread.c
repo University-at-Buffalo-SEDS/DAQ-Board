@@ -7,15 +7,12 @@
 #include "sd_card.h"
 #endif
 #include "telemetry.h"
-
 TX_THREAD daq_thread;
 
 #define DAQ_THREAD_STACK_SIZE (32U * 1024U)
 #define DAQ_SAMPLE_PERIOD_TICKS ((TX_TIMER_TICKS_PER_SECOND + 25U) / 50U)
 #define DAQ_INPUT_VOLTAGE_LOW_V 8.5f
-#define DAQ_KG1000_LOADCELL_SCALE 1.0f
-#define DAQ_KG1000_LOADCELL_OFFSET 0.0f
-#define DAQ_ENABLE_DUMMY_CAN_TELEMETRY 1U
+#define DAQ_ENABLE_DUMMY_CAN_TELEMETRY 0U
 
 static ULONG g_daq_thread_stack[DAQ_THREAD_STACK_SIZE / sizeof(ULONG)];
 
@@ -34,6 +31,8 @@ static void daq_store_snapshot_csv(const daq_snapshot_t *snapshot)
   if (snapshot->ext_adc_sample_valid != 0U)
   {
     (void)sd_card_enqueue_csv_row("mcp3564r_code", snapshot->monotonic_ms, (float)snapshot->ext_adc_code);
+    (void)sd_card_enqueue_csv_row("mcp3564r_voltage_v", snapshot->monotonic_ms, snapshot->ext_adc_voltage_v);
+    (void)sd_card_enqueue_csv_row("kg1000_loadcell", snapshot->monotonic_ms, snapshot->ext_adc_loadcell_kg1000);
     (void)sd_card_enqueue_csv_row("mcp3564r_temp_c", snapshot->monotonic_ms, snapshot->ext_adc_temp_c);
   }
 #else
@@ -50,8 +49,7 @@ static void daq_publish_loadcell(const daq_snapshot_t *snapshot)
     return;
   }
 
-  loadcell_kg1000 = ((float)snapshot->ext_adc_code * DAQ_KG1000_LOADCELL_SCALE)
-                  + DAQ_KG1000_LOADCELL_OFFSET;
+  loadcell_kg1000 = snapshot->ext_adc_loadcell_kg1000;
 
   (void)log_telemetry_asynchronous(SEDS_DT_KG1000,
                                    &loadcell_kg1000,
@@ -59,21 +57,17 @@ static void daq_publish_loadcell(const daq_snapshot_t *snapshot)
                                    sizeof(loadcell_kg1000));
 }
 
+#if (DAQ_ENABLE_DUMMY_CAN_TELEMETRY != 0U)
 static void daq_publish_dummy_can_telemetry(void)
 {
-#if (DAQ_ENABLE_DUMMY_CAN_TELEMETRY != 0U)
-  static uint32_t dummy_count = 0U;
-  float kg1000;
+  const float kg1000 = 0.0f;
 
-  kg1000 = 100.0f + ((float)(dummy_count % 100U) * 0.25f);
   (void)log_telemetry_asynchronous(SEDS_DT_KG1000,
                                    &kg1000,
                                    1U,
                                    sizeof(kg1000));
-
-  dummy_count++;
-#endif
 }
+#endif
 
 void daq_thread_entry(ULONG initial_input)
 {
@@ -87,11 +81,17 @@ void daq_thread_entry(ULONG initial_input)
   {
     daq_ready = 0U;
   }
+  else
+  {
+    (void)daq_board_ext_adc_start_dma();
+  }
 
   for (;;)
   {
     HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
+#if (DAQ_ENABLE_DUMMY_CAN_TELEMETRY != 0U)
     daq_publish_dummy_can_telemetry();
+#endif
 
     if (daq_ready == 0U)
     {

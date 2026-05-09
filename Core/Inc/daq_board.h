@@ -21,6 +21,8 @@ typedef struct
   uint8_t ext_adc_sample_valid;
   uint8_t ext_adc_dma_busy;
   int32_t ext_adc_code;
+  float ext_adc_voltage_v;
+  float ext_adc_loadcell_kg1000;
   float ext_adc_temp_c;
 } daq_snapshot_t;
 

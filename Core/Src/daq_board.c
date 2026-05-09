@@ -74,6 +74,8 @@ UINT daq_board_sample(daq_snapshot_t *snapshot)
   snapshot->ext_adc_sample_valid = ext_adc_sample.sample_valid;
   snapshot->ext_adc_dma_busy = ext_adc_sample.dma_busy;
   snapshot->ext_adc_code = ext_adc_sample.code;
+  snapshot->ext_adc_voltage_v = ext_adc_sample.voltage_v;
+  snapshot->ext_adc_loadcell_kg1000 = ext_adc_sample.loadcell_kg1000;
   snapshot->ext_adc_temp_c = ext_adc_sample.temperature_c;
 
   return TX_SUCCESS;
