@@ -23,6 +23,7 @@
 #define MCP3564R_USE_DMA_READ (1U)
 #define MCP3564R_WRITE_EXTENDED_CONFIG (1U)
 #define MCP3564R_CONVERSION_DELAY_MS (200U)
+#define MCP3564R_SAMPLE_QUEUE_DEPTH (128U)
 
 #define EN_12V HAL_GPIO_WritePin(EN_12V_GPIO_Port, EN_12V_Pin, GPIO_PIN_SET)
 
@@ -34,13 +35,28 @@
 
 typedef struct
 {
+  int32_t code;
+  float voltage_v;
+  float loadcell_kg1000;
+  float temp_c;
+} mcp3564r_sample_entry_t;
+
+typedef struct
+{
   SPI_HandleTypeDef *spi;
   volatile uint8_t dma_busy;
   volatile uint8_t sample_valid;
+  volatile uint8_t conversion_active;
+  volatile uint8_t queue_head;
+  volatile uint8_t queue_tail;
+  volatile uint8_t queue_count;
+  volatile uint32_t overrun_count;
+  uint32_t conversion_started_ticks;
   int32_t latest_code;
   float latest_voltage_v;
   float latest_loadcell_kg1000;
   float latest_temp_c;
+  mcp3564r_sample_entry_t queue[MCP3564R_SAMPLE_QUEUE_DEPTH];
 } mcp3564r_context_t;
 
 static mcp3564r_context_t g_mcp3564r = {0};
@@ -195,7 +211,26 @@ static HAL_StatusTypeDef mcp3564r_write_config(const mcp3564r_config_t *config)
 
 static HAL_StatusTypeDef mcp3564r_start_conversion(void)
 {
-  return mcp3564r_transmit_byte(MCP3564R_CMD_START);
+  const HAL_StatusTypeDef status = mcp3564r_transmit_byte(MCP3564R_CMD_START);
+
+  if (status == HAL_OK)
+  {
+    g_mcp3564r.conversion_started_ticks = tx_time_get();
+    g_mcp3564r.conversion_active = 1U;
+  }
+
+  return status;
+}
+
+static uint32_t mcp3564r_ms_to_ticks(uint32_t ms)
+{
+  return (uint32_t)((((uint64_t)ms * (uint64_t)TX_TIMER_TICKS_PER_SECOND) + 999ULL) / 1000ULL);
+}
+
+static uint8_t mcp3564r_conversion_ready(void)
+{
+  const uint32_t elapsed_ticks = tx_time_get() - g_mcp3564r.conversion_started_ticks;
+  return elapsed_ticks >= mcp3564r_ms_to_ticks(MCP3564R_CONVERSION_DELAY_MS);
 }
 
 static int32_t mcp3564r_sign_extend_24(uint32_t raw24)
@@ -217,10 +252,28 @@ static float mcp3564r_code_to_loadcell_kg1000(int32_t code)
 
 static void mcp3564r_store_raw24(uint32_t raw24)
 {
-  g_mcp3564r.latest_code = mcp3564r_sign_extend_24(raw24);
-  g_mcp3564r.latest_voltage_v = mcp3564r_code_to_loadcell_kg1000(g_mcp3564r.latest_code);
-  g_mcp3564r.latest_loadcell_kg1000 = g_mcp3564r.latest_voltage_v;
-  g_mcp3564r.latest_temp_c = 0.0f;
+  mcp3564r_sample_entry_t entry;
+
+  entry.code = mcp3564r_sign_extend_24(raw24);
+  entry.voltage_v = mcp3564r_code_to_loadcell_kg1000(entry.code);
+  entry.loadcell_kg1000 = entry.voltage_v;
+  entry.temp_c = 0.0f;
+
+  g_mcp3564r.latest_code = entry.code;
+  g_mcp3564r.latest_voltage_v = entry.voltage_v;
+  g_mcp3564r.latest_loadcell_kg1000 = entry.loadcell_kg1000;
+  g_mcp3564r.latest_temp_c = entry.temp_c;
+
+  if (g_mcp3564r.queue_count >= MCP3564R_SAMPLE_QUEUE_DEPTH)
+  {
+    g_mcp3564r.queue_tail = (uint8_t)((g_mcp3564r.queue_tail + 1U) % MCP3564R_SAMPLE_QUEUE_DEPTH);
+    g_mcp3564r.queue_count--;
+    g_mcp3564r.overrun_count++;
+  }
+
+  g_mcp3564r.queue[g_mcp3564r.queue_head] = entry;
+  g_mcp3564r.queue_head = (uint8_t)((g_mcp3564r.queue_head + 1U) % MCP3564R_SAMPLE_QUEUE_DEPTH);
+  g_mcp3564r.queue_count++;
   g_mcp3564r.sample_valid = 1U;
 }
 
@@ -336,18 +389,20 @@ HAL_StatusTypeDef mcp3564r_start_dma(void)
     return HAL_BUSY;
   }
 
+  if (g_mcp3564r.conversion_active == 0U)
+  {
+    return mcp3564r_start_conversion();
+  }
+
+  if (mcp3564r_conversion_ready() == 0U)
+  {
+    return HAL_BUSY;
+  }
+
   if ((g_mcp3564r.spi->hdmatx == NULL) || (g_mcp3564r.spi->hdmarx == NULL))
   {
     return HAL_ERROR;
   }
-
-  const HAL_StatusTypeDef start_status = mcp3564r_start_conversion();
-  if (start_status != HAL_OK)
-  {
-    return start_status;
-  }
-
-  HAL_Delay(MCP3564R_CONVERSION_DELAY_MS);
 
   uint8_t dummy_data = 0U;
   uint8_t read_cmd = MCP3564R_CMD_READ;
@@ -365,6 +420,7 @@ HAL_StatusTypeDef mcp3564r_start_dma(void)
   }
 
   g_mcp3564r.dma_busy = 1U;
+  g_mcp3564r.conversion_active = 0U;
   mcp3564r_dcache_clean(g_mcp3564r_tx_frame, sizeof(g_mcp3564r_tx_frame));
   mcp3564r_dcache_invalidate(g_mcp3564r_rx_frame, sizeof(g_mcp3564r_rx_frame));
 
@@ -376,6 +432,7 @@ HAL_StatusTypeDef mcp3564r_start_dma(void)
   {
     mcp3564r_deselect();
     g_mcp3564r.dma_busy = 0U;
+    (void)mcp3564r_start_conversion();
   }
 
   return status;
@@ -394,6 +451,7 @@ void mcp3564r_dma_complete(void)
   mcp3564r_store_raw24(raw24);
   g_mcp3564r.dma_busy = 0U;
   mcp3564r_deselect();
+  (void)mcp3564r_start_conversion();
 #endif
 }
 
@@ -405,17 +463,49 @@ void mcp3564r_dma_error(void)
 
 UINT mcp3564r_get_sample(mcp3564r_sample_t *sample)
 {
+  uint32_t primask;
+
   if (sample == NULL)
   {
     return TX_PTR_ERROR;
   }
 
-  sample->sample_valid = g_mcp3564r.sample_valid;
+  memset(sample, 0, sizeof(*sample));
+
+  primask = __get_PRIMASK();
+  __disable_irq();
+
   sample->dma_busy = g_mcp3564r.dma_busy;
-  sample->code = g_mcp3564r.latest_code;
-  sample->voltage_v = g_mcp3564r.latest_voltage_v;
-  sample->loadcell_kg1000 = g_mcp3564r.latest_loadcell_kg1000;
-  sample->temperature_c = g_mcp3564r.latest_temp_c;
+  sample->queued_samples = g_mcp3564r.queue_count;
+  sample->overrun_count = g_mcp3564r.overrun_count;
+
+  if (g_mcp3564r.queue_count != 0U)
+  {
+    const mcp3564r_sample_entry_t entry = g_mcp3564r.queue[g_mcp3564r.queue_tail];
+
+    g_mcp3564r.queue_tail = (uint8_t)((g_mcp3564r.queue_tail + 1U) % MCP3564R_SAMPLE_QUEUE_DEPTH);
+    g_mcp3564r.queue_count--;
+
+    sample->sample_valid = 1U;
+    sample->code = entry.code;
+    sample->voltage_v = entry.voltage_v;
+    sample->loadcell_kg1000 = entry.loadcell_kg1000;
+    sample->temperature_c = entry.temp_c;
+    sample->queued_samples = g_mcp3564r.queue_count;
+  }
+  else
+  {
+    sample->sample_valid = 0U;
+    sample->code = g_mcp3564r.latest_code;
+    sample->voltage_v = g_mcp3564r.latest_voltage_v;
+    sample->loadcell_kg1000 = g_mcp3564r.latest_loadcell_kg1000;
+    sample->temperature_c = g_mcp3564r.latest_temp_c;
+  }
+
+  if (primask == 0U)
+  {
+    __enable_irq();
+  }
 
   return TX_SUCCESS;
 }

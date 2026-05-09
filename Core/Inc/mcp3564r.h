@@ -26,10 +26,12 @@ typedef struct
 {
   uint8_t sample_valid;
   uint8_t dma_busy;
+  uint8_t queued_samples;
   int32_t code;
   float voltage_v;
   float loadcell_kg1000;
   float temperature_c;
+  uint32_t overrun_count;
 } mcp3564r_sample_t;
 
 extern const mcp3564r_config_t MCP3564R_DEFAULT_CONFIG;
