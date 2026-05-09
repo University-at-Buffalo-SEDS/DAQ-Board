@@ -108,6 +108,8 @@ void daq_thread_entry(ULONG initial_input)
     daq_store_snapshot_csv(&snapshot);
     daq_publish_loadcell(&snapshot);
 
+    (void)daq_board_ext_adc_start_dma();
+
 #if (DISABLE_SD_CARD == 0U)
     (void)sd_card_request_flush();
 #endif
@@ -126,7 +128,6 @@ void daq_thread_entry(ULONG initial_input)
       continue;
     }
 
-    (void)daq_board_ext_adc_start_dma();
     tx_thread_sleep(DAQ_SAMPLE_PERIOD_TICKS);
   }
 }
