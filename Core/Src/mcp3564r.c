@@ -53,10 +53,10 @@ extern DCACHE_HandleTypeDef hdcache1;
 const mcp3564r_config_t MCP3564R_DEFAULT_CONFIG = {
   .config0_reg = 0b10100010,
   .config1_reg = 0b00110100,
-  .config2_reg = 0b11101111,
+  .config2_reg = 0b11001111,
   .config3_reg = 0b10000000,
   .irq_reg = 0b00000011,
-  .mux_reg = 0b00100011,
+  .mux_reg = 0b00001000,
   .scan_reg = 0x000000,
   .timer_reg = 0x000000,
   .offsetCal_reg = 0x000000,
