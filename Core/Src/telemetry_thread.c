@@ -5,6 +5,7 @@
 #endif
 #include "tx_api.h"
 #include "telemetry.h"
+#include "ota_stream.h"
 #ifdef TELEMETRY_CAN_BUS
 #include "can_bus.h"
 #endif
@@ -47,6 +48,7 @@ void telemetry_thread_entry(ULONG initial_input)
         board_link_uart_process();
 #endif
         (void)telemetry_poll_timesync();
+        ota_stream_poll();
 
         tx_thread_sleep(1);
     }

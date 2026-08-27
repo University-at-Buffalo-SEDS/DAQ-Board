@@ -7,8 +7,8 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
 set(SEDSNET_FORCE_RELEASE ON CACHE BOOL
     "Build SEDSNet in release mode for embedded firmware" FORCE)
 set(SEDSNET_EMBEDDED_BUILD ON CACHE BOOL "Build SEDSNet for an embedded target" FORCE)
-set(SEDSNET_ENABLE_CRYPTOGRAPHY OFF CACHE BOOL
-    "Keep the current unencrypted embedded transport" FORCE)
+set(SEDSNET_ENABLE_CRYPTOGRAPHY ON CACHE BOOL
+    "Enable the board HASH-backed SEDSNet cryptography provider" FORCE)
 
 FetchContent_Declare(
     sedsnet

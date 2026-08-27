@@ -41,7 +41,7 @@ ENTRY(Reset_Handler)
 MEMORY
 {
   RAM	(xrw)	: ORIGIN = 0x20000000,	LENGTH = 768K
-  ROM	(rx)	: ORIGIN = 0x08008100,	LENGTH = 0x1EFF00
+  ROM	(rx)	: ORIGIN = 0x08008100,	LENGTH = 0x1CFF00
   SRAM4 (xrw)   : ORIGIN = 0x28000000,  LENGTH = 16K
 }
 /* Highest address of the user mode stack */

@@ -141,8 +141,18 @@ set(LAUNCHCORE_SYSTEM_SOURCE "${CMAKE_SOURCE_DIR}/Core/Src/system_stm32u5xx.c")
 set(LAUNCHCORE_STARTUP_SOURCE "${CMAKE_SOURCE_DIR}/startup_stm32u585xx.s")
 set(LAUNCHCORE_FLASH_SOURCES
     "${CMAKE_SOURCE_DIR}/Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_flash.c"
-    "${CMAKE_SOURCE_DIR}/Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_flash_ex.c")
+    "${CMAKE_SOURCE_DIR}/Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_flash_ex.c"
+    "${CMAKE_SOURCE_DIR}/Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_hash.c"
+    "${CMAKE_SOURCE_DIR}/Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_hash_ex.c")
+set(LAUNCHCORE_HARDWARE_SHA256_SOURCE
+    "${CMAKE_SOURCE_DIR}/Bootloader/sha256_hardware.c")
 set(LAUNCHCORE_APP_SLOT_BASE 0x08008000)
 set(LAUNCHCORE_APP_VECTOR_TABLE 0x08008100)
 set(LAUNCHCORE_METADATA0_BASE 0x081F8000)
+set(LAUNCHCORE_DELTA_SIZE 0x00020000)
 include(cmake/launchcore_stm32.cmake)
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+    "${CMAKE_SOURCE_DIR}/Core/Src/sedsnet_hardware_crypto.c"
+    "${CMAKE_SOURCE_DIR}/Bootloader/sha256_hardware.c"
+    "${CMAKE_SOURCE_DIR}/Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_hash.c"
+    "${CMAKE_SOURCE_DIR}/Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_hash_ex.c")

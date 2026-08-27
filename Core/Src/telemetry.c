@@ -1,5 +1,7 @@
 // telemetry.c
 #include "telemetry.h"
+#include "ota_stream.h"
+#include "sedsnet_hardware_crypto.h"
 
 #include "app_threadx.h"
 #include "main.h"
@@ -424,6 +426,12 @@ SedsResult init_telemetry_router(void) {
       },
   };
 
+  result = sedsnet_hardware_crypto_init();
+  if (result != SEDS_OK) {
+    printf("Error: failed to register hardware crypto: %d\r\n", (int)result);
+    return result;
+  }
+
   r = seds_router_new(Seds_RM_Relay, node_now_since_ms, NULL, locals,
                       sizeof(locals) / sizeof(locals[0]));
   if (!r) {
@@ -489,6 +497,15 @@ SedsResult init_telemetry_router(void) {
 #ifdef TELEMETRY_BOARD_LINK_UART
     g_board_link_side_id = -1;
 #endif
+    return result;
+  }
+
+  result = ota_stream_init(r);
+  if (result != SEDS_OK) {
+    printf("Error: failed to bind OTA stream: %d\r\n", (int)result);
+    seds_router_free(r);
+    g_router.r = NULL;
+    g_router.created = 0U;
     return result;
   }
 
