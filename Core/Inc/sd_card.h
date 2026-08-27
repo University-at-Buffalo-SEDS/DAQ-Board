@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-#include "sedsprintf.h"
+#include "sedsnet_config.h"
 #include "tx_api.h"
 
 typedef enum

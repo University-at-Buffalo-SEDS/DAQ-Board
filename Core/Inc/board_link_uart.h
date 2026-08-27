@@ -1,6 +1,6 @@
 #pragma once
 
-#include "sedsprintf.h"
+#include "sedsnet_config.h"
 #include "stm32u5xx_hal.h"
 #include <stddef.h>
 #include <stdint.h>
