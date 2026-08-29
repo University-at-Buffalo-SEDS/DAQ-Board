@@ -70,7 +70,10 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined symbols
+    # The application vector table follows the LaunchCore image header.  Keep
+    # early HAL interrupts on the application table before ThreadX relocates
+    # VTOR in tx_initialize_low_level.
+    VECT_TAB_OFFSET=0x00008200UL
 )
 
 # Remove wrong libob.a library dependency when using cpp files

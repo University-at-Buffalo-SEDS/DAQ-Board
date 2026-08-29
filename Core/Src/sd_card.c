@@ -50,6 +50,7 @@ static TX_SEMAPHORE g_sd_dma_semaphore;
 static sd_line_slot_t g_sd_slots[SD_QUEUE_DEPTH];
 
 static uint8_t g_sd_ready = 0U;
+static uint8_t g_sd_hardware_ready = 0U;
 static uint8_t g_power_loss_mode = 0U;
 static uint8_t g_sd_dma_error = 0U;
 static uint32_t g_next_sequence = 1U;
@@ -378,6 +379,11 @@ UINT sd_card_init(TX_BYTE_POOL *byte_pool)
 {
   (void)byte_pool;
 
+  if (g_sd_hardware_ready == 0U)
+  {
+    return TX_NOT_DONE;
+  }
+
   if (g_sd_ready != 0U)
   {
     return TX_SUCCESS;
@@ -415,6 +421,11 @@ UINT sd_card_init(TX_BYTE_POOL *byte_pool)
 
   g_sd_ready = 1U;
   return TX_SUCCESS;
+}
+
+void sd_card_set_hardware_ready(uint8_t ready)
+{
+  g_sd_hardware_ready = (ready != 0U) ? 1U : 0U;
 }
 
 sd_card_status_t sd_card_log_packet(const SedsPacketView *pkt)

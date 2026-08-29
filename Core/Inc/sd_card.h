@@ -17,6 +17,7 @@ typedef enum
 } sd_card_status_t;
 
 UINT sd_card_init(TX_BYTE_POOL *byte_pool);
+void sd_card_set_hardware_ready(uint8_t ready);
 void sd_card_writer_thread_entry(ULONG initial_input);
 sd_card_status_t sd_card_log_packet(const SedsPacketView *pkt);
 sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,

@@ -80,14 +80,13 @@ UINT App_ThreadX_Init(VOID *memory_ptr)
   telemetry_init_lock();
 #if (DISABLE_SD_CARD == 0U)
   ret = sd_card_init(byte_pool);
-  if (ret != TX_SUCCESS)
+  if (ret == TX_SUCCESS)
   {
-    Error_Handler();
-  }
-  ret = create_sd_writer_thread();
-  if (ret != TX_SUCCESS)
-  {
-    Error_Handler();
+    ret = create_sd_writer_thread();
+    if (ret != TX_SUCCESS)
+    {
+      Error_Handler();
+    }
   }
 #endif
   ret = create_telemetry_thread(byte_pool);
