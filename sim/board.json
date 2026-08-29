@@ -1,0 +1,49 @@
+{
+  "name": "DAQ-Board",
+  "architecture": "stm32u5",
+  "memory": {
+    "flash_base": 134217728,
+    "flash_size": 2097152,
+    "ram_size": 786432,
+    "bootloader_size": 32768,
+    "slot_a_base": 134250496,
+    "slot_a_size": 1900544,
+    "erase_size": 8192,
+    "write_alignment": 16,
+    "sedsnet_pool": 4096,
+    "delta_base": 136151040,
+    "delta_size": 131072
+  },
+  "artifacts": {
+    "firmware": "build/Release_Script/DAQ-Board.launchcore.img",
+    "bootloader": "build/Release_Script/DAQ-BoardBootloader.bin",
+    "factory": "build/Release_Script/DAQ-Board.factory.bin",
+    "ota": "build/Release_Script/DAQ-Board.seds"
+  },
+  "traffic": {
+    "iterations": 100000,
+    "max_payload": 512,
+    "queue_depth": 0,
+    "immediate_dispatch": true
+  },
+  "ota": {
+    "chunk_size": 512
+  },
+  "peripherals": [
+    {
+      "type": "adc",
+      "name": "adc1",
+      "bits": 14,
+      "channels": 8,
+      "failure_every": 997
+    },
+    {
+      "type": "adc",
+      "name": "adc4",
+      "bits": 14,
+      "channels": 8,
+      "disconnect_after": 950
+    }
+  ]
+}
+
