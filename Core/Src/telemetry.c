@@ -13,7 +13,7 @@
 #include "can_bus.h"
 #endif
 #include "sedsnet_config.h"
-#include "stm32U5xx_hal.h"
+#include "stm32u5xx_hal.h"
 
 #include <stdarg.h>
 #include <stdbool.h>
