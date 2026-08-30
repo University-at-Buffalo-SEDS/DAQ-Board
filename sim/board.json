@@ -69,7 +69,8 @@
       "type": "storage",
       "name": "sd_card",
       "model": "sd_card",
-      "bus": "sdmmc1"
+      "bus": "sdmmc1",
+      "capacity_bytes": 4194304
     }
   ],
   "execution": {
