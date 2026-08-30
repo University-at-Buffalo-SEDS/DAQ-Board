@@ -76,6 +76,12 @@
   "execution": {
     "virtual_time_ms": 50,
     "hal_tick_address": 536871132,
-    "hal_tick_step": 100
+    "hal_tick_step": 100,
+    "memory_probes": [
+      {"name": "allocation_failures", "symbol": "g_telemetry_alloc_fail", "maximum": 0},
+      {"name": "panics", "symbol": "g_telemetry_panic_count", "maximum": 0},
+      {"name": "mutex_get_failures", "symbol": "g_telemetry_lock_get_fail", "maximum": 0},
+      {"name": "mutex_put_failures", "symbol": "g_telemetry_lock_put_fail", "maximum": 0}
+    ]
   }
 }
