@@ -41,6 +41,10 @@
 #define CAN_BUS_MAX_SUBSCRIBERS 8
 #endif
 
+#ifndef CAN_BUS_POLLING
+#define CAN_BUS_POLLING 1
+#endif
+
 // =========================
 // FD DLC helpers
 // =========================
@@ -138,7 +142,7 @@ static inline void can_bus_notify_rx(const uint8_t *data, size_t len) {
 // We mark fragment frames by a magic header at the start of payload.
 // You can use a dedicated CAN ID range too, but magic is simplest.
 
-#define CAN_BUS_FRAG_MAGIC 0x5344u // 'S''D' (arbitrary)
+#define CAN_BUS_FRAG_MAGIC ((uint16_t)('S') | ((uint16_t)('D') << 8))
 #define CAN_BUS_FRAG_WIRE_LEN 64   // always send 64B payload frames for frags
 #define CAN_BUS_REASM_TIMEOUT_MS 250u // drop partial message after this many ms
 
@@ -273,8 +277,8 @@ static HAL_StatusTypeDef can_bus_configure_filters(FDCAN_HandleTypeDef *hfdcan) 
   }
 
   return HAL_FDCAN_ConfigGlobalFilter(hfdcan,
-                                      FDCAN_ACCEPT_IN_RX_FIFO1,
-                                      FDCAN_ACCEPT_IN_RX_FIFO1,
+                                      FDCAN_ACCEPT_IN_RX_FIFO0,
+                                      FDCAN_ACCEPT_IN_RX_FIFO0,
                                       FDCAN_REJECT_REMOTE,
                                       FDCAN_REJECT_REMOTE);
 }
@@ -463,8 +467,10 @@ void can_bus_init(FDCAN_HandleTypeDef *hfdcan) {
   if (hfdcan != NULL) {
     (void)HAL_FDCAN_Stop(hfdcan);
     (void)can_bus_configure_filters(hfdcan);
+#if !CAN_BUS_POLLING
     (void)HAL_FDCAN_ActivateNotification(
         hfdcan, FDCAN_IT_RX_FIFO0_NEW_MESSAGE | FDCAN_IT_RX_FIFO1_NEW_MESSAGE, 0);
+#endif
     (void)HAL_FDCAN_Start(hfdcan);
   }
 
@@ -535,7 +541,7 @@ HAL_StatusTypeDef can_bus_send_bytes(const uint8_t *bytes, size_t len,
   txHeader.DataLength = dlc; // DLC code (HAL expects this)
   txHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
   txHeader.BitRateSwitch = FDCAN_BRS_OFF;
-  txHeader.FDFormat = FDCAN_FD_CAN;
+  txHeader.FDFormat = (wire_len <= 8U) ? FDCAN_CLASSIC_CAN : FDCAN_FD_CAN;
   txHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
   txHeader.MessageMarker = 0;
 
@@ -615,6 +621,13 @@ HAL_StatusTypeDef can_bus_send_large(const uint8_t *bytes, size_t len,
 void can_bus_process_rx(void) {
   uint32_t now = HAL_GetTick();
   reasm_expire_old(now);
+
+#if CAN_BUS_POLLING
+  if (g_hfdcan != NULL) {
+    can_bus_drain_rx_fifo(g_hfdcan, FDCAN_RX_FIFO0);
+    can_bus_drain_rx_fifo(g_hfdcan, FDCAN_RX_FIFO1);
+  }
+#endif
 
   can_bus_rx_frame_t f;
   while (rb_pop(&f)) {

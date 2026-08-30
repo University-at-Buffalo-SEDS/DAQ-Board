@@ -12,7 +12,12 @@ class MemoryProbeContractTests(unittest.TestCase):
             for probe in layout["execution"]["memory_probes"]
         }
         self.assertEqual(
-            probes,
+            {key: probes[key] for key in (
+                "g_telemetry_alloc_fail",
+                "g_telemetry_panic_count",
+                "g_telemetry_lock_get_fail",
+                "g_telemetry_lock_put_fail",
+            )},
             {
                 "g_telemetry_alloc_fail": 0,
                 "g_telemetry_panic_count": 0,
@@ -20,12 +25,14 @@ class MemoryProbeContractTests(unittest.TestCase):
                 "g_telemetry_lock_put_fail": 0,
             },
         )
+        self.assertIn("g_telemetry_pool_available", probes)
+        self.assertIn("g_telemetry_network_ready", probes)
 
         hooks = (root / "Core" / "Src" / "telemetry_hooks.c").read_text()
+        telemetry = (root / "Core" / "Src" / "telemetry.c").read_text()
         for symbol in probes:
-            self.assertIn(symbol, hooks)
+            self.assertIn(symbol, hooks + telemetry)
 
 
 if __name__ == "__main__":
     unittest.main()
-

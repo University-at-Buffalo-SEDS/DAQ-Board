@@ -179,6 +179,16 @@ def _test_failure_help(stage: str) -> str:
             "Confirm the ARM GNU toolchain, CMake, Ninja, Rust, and Cargo are on PATH.\n"
             "Remove only this board's selected build directory if its CMake cache is stale."
         )
+    if stage == "Long-duration memory profile":
+        return (
+            "Inspect the memory-probe table for pool loss, low-water, allocation failures, "
+            "or stack errors. A falling reserve usually indicates a missing free or queue drain."
+        )
+    if stage == "Network discovery and time sync":
+        return (
+            "Check that this board and its RF/Power peer export network_ready, use the configured "
+            "FDCAN peripheral, and reach discovery plus a valid SEDSNet network clock."
+        )
     return (
         "Review the simulator matrix above for the failing row. Check missing ELF symbols, "
         "memory thresholds, peripheral configuration, and boot/OTA artifact paths.\n"
@@ -827,7 +837,12 @@ def main() -> None:
             lambda: run_gtests(ui, cfg.repo_root),
         )
         if args.all_tests:
-            from sim.run_full import require_docker, run_full_simulation
+            from sim.run_full import (
+                require_docker,
+                run_full_simulation,
+                run_memory_profile,
+                run_network_simulation,
+            )
             _run_test_stage(ui, results, "Docker readiness", require_docker)
             _run_test_stage(
                 ui, results, "Factory firmware build",
@@ -844,6 +859,18 @@ def main() -> None:
             _run_test_stage(
                 ui, results, "Firmware simulation",
                 lambda: run_full_simulation(
+                    ui, cfg.repo_root, "stm32u5", cfg.build_subdir
+                ),
+            )
+            _run_test_stage(
+                ui, results, "Long-duration memory profile",
+                lambda: run_memory_profile(
+                    ui, cfg.repo_root, "stm32u5", cfg.build_subdir
+                ),
+            )
+            _run_test_stage(
+                ui, results, "Network discovery and time sync",
+                lambda: run_network_simulation(
                     ui, cfg.repo_root, "stm32u5", cfg.build_subdir
                 ),
             )
