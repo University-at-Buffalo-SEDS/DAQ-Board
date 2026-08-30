@@ -1,12 +1,12 @@
 {
   "name": "DAQ-Board",
   "architecture": "stm32u5",
+  "mcu": "stm32u585",
   "memory": {
     "flash_base": 134217728,
     "flash_size": 2097152,
     "ram_regions": [
-      {"name": "sram", "base": 536870912, "size": 786432},
-      {"name": "sram4", "base": 671088640, "size": 16384}
+      {"name": "sram", "base": 536870912, "size": 786432}
     ],
     "bootloader_size": 32768,
     "slot_a_base": 134250496,
@@ -25,6 +25,14 @@
     "factory": "build/Release_Script/DAQ-Board.factory.bin",
     "ota": "build/Release_Script/DAQ-Board.seds"
   },
+  "board": {
+    "strict_mmio": false,
+    "clocks": [],
+    "connections": [],
+    "pins": [],
+    "dma_routes": [],
+    "security": {"trustzone": false, "secure_regions": []}
+  },
   "traffic": {
     "iterations": 100000,
     "max_payload": 512,
@@ -41,7 +49,9 @@
       "model": "stm32_adc",
       "bus": "adc1",
       "bits": 14,
-      "channels": 6,
+      "channels": 3,
+      "channel_samples": [4096, 8192, 12288],
+      "noise_lsb": 4,
       "failure_every": 997
     },
     {
@@ -51,6 +61,8 @@
       "bus": "adc4",
       "bits": 12,
       "channels": 4,
+      "channel_samples": [512, 1536, 2560, 3584],
+      "noise_lsb": 2,
       "disconnect_after": 950
     },
     {
