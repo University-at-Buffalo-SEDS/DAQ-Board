@@ -17,7 +17,7 @@ endforeach()
 FetchContent_Declare(
     sedslaunchcore
     GIT_REPOSITORY https://github.com/University-at-Buffalo-SEDS/SEDSLaunchCore.git
-    GIT_TAG 1ab6cd3dcddb7acaacb9dbfc16159f36f19363a8
+    GIT_TAG 5e5c9d52f91e53b0113aaee7355bc354118538a6
     GIT_SHALLOW FALSE
 )
 FetchContent_GetProperties(sedslaunchcore)
