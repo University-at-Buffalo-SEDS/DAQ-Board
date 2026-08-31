@@ -64,5 +64,11 @@ class QualificationContractTests(unittest.TestCase):
         self.assertIn('SEDSNET_MAX_QUEUE_BUDGET "12288"', cmake)
 
 
+    def test_periodic_health_check_does_not_serialize_topology(self):
+        root = Path(build.__file__).resolve().parent
+        telemetry = (root / "Core" / "Src" / "telemetry.c").read_text(encoding="utf-8")
+        self.assertNotIn("seds_router_export_topology_len", telemetry)
+        self.assertIn("g_telemetry_discovery_seen = 1U", telemetry)
+
 if __name__ == "__main__":
     unittest.main()
