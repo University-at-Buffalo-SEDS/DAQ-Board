@@ -1,4 +1,6 @@
 import json
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -17,6 +19,8 @@ class QualificationContractTests(unittest.TestCase):
         self.assertIn('"bay"', runner)
         self.assertIn('"activity_probe": "network_ready"', runner)
         self.assertIn('simulation_env["SEDS_FIRMWARE_SIM_TEST"] = "1"', runner)
+        self.assertIn('run_live(command, "firmware simulation")', runner)
+        self.assertIn('running ({int(now - started)}s elapsed)', runner)
         self.assertIn("Long-duration memory profile", script)
         self.assertIn("Network discovery and time sync", script)
 
@@ -39,6 +43,18 @@ class QualificationContractTests(unittest.TestCase):
             "g_telemetry_timesync_valid",
         ):
             self.assertIn(symbol, telemetry)
+
+    def test_hal_tick_injection_matches_linked_elf_when_available(self):
+        root = Path(build.__file__).resolve().parent
+        layout = json.loads((root / "sim" / "board.json").read_text(encoding="utf-8"))
+        elf = root / layout["artifacts"]["elf"]
+        nm = shutil.which("arm-none-eabi-nm")
+        if nm is None or not elf.is_file():
+            self.skipTest("linked ELF or arm-none-eabi-nm is unavailable")
+        output = subprocess.check_output([nm, "-n", str(elf)], text=True)
+        address = next(int(line.split()[0], 16) for line in output.splitlines()
+                       if line.split()[-1:] == ["uwTick"])
+        self.assertEqual(layout["execution"]["hal_tick_address"], address)
 
     def test_shared_can_avoids_hop_retry_storms(self):
         root = Path(build.__file__).resolve().parent
