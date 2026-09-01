@@ -1,5 +1,6 @@
 // telemetry.c
 #include "telemetry.h"
+#include "sim_network_probe.h"
 #include "ota_stream.h"
 #include "sedsnet_hardware_crypto.h"
 
@@ -79,6 +80,11 @@ RouterState g_router = {.r = NULL, .created = 0U, .start_time = 0ULL};
 volatile uint32_t g_telemetry_discovery_seen = 0U;
 volatile uint32_t g_telemetry_timesync_valid = 0U;
 volatile uint32_t g_telemetry_network_ready = 0U;
+volatile uint32_t g_telemetry_peer_mask = 0U;
+volatile uint32_t g_sim_heartbeat_attempts = 0U;
+volatile uint32_t g_sim_heartbeat_ok = 0U;
+volatile uint32_t g_sim_heartbeat_fail = 0U;
+volatile uint32_t g_sim_heartbeat_wire_tx = 0U;
 
 static uint64_t tx_raw_now_ms_locked(void) {
   const uint32_t ticks32 = (uint32_t)tx_time_get();
@@ -194,6 +200,7 @@ static SedsResult telemetry_configure_timesync_locked(SedsRouter *router) {
 }
 
 static SedsResult telemetry_heartbeat_handler(const SedsPacketView *pkt, void *user) {
+  (void)sim_probe_heartbeat_handler(pkt, user);
   (void)pkt;
   (void)user;
   return SEDS_OK;
@@ -249,7 +256,15 @@ SedsResult tx_send(const uint8_t *bytes, size_t len, void *user) {
     return SEDS_BAD_ARG;
   }
   HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
-  return (can_bus_send_large(bytes, len, 0x03) == HAL_OK) ? SEDS_OK : SEDS_IO;
+  const uint32_t can_id =
+      sim_probe_packed_data_type(bytes, len) == (uint32_t)SEDS_DT_HEARTBEAT
+          ? 0x007U
+          : 0x107U;
+  if (can_bus_send_large(bytes, len, can_id) == HAL_OK) {
+    sim_probe_observe_can_tx(bytes, len);
+    return SEDS_OK;
+  }
+  return SEDS_IO;
 }
 #endif
 #ifdef TELEMETRY_BOARD_LINK_UART
@@ -261,6 +276,7 @@ static SedsResult board_link_tx_send(const uint8_t *bytes, size_t len, void *use
 #ifdef TELEMETRY_CAN_BUS
 static void telemetry_can_rx(const uint8_t *data, size_t len, void *user) {
   (void)user;
+  sim_probe_observe_packed(data, len);
   rx_asynchronous(data, len);
 }
 #endif
@@ -400,7 +416,11 @@ SedsResult telemetry_poll_discovery(void) {
     return SEDS_ERR;
   }
 
-  const SedsResult result = seds_router_poll_discovery(g_router.r, NULL);
+  bool did_queue = false;
+  const SedsResult result = seds_router_poll_discovery(g_router.r, &did_queue);
+  if (result == SEDS_OK) {
+    sim_probe_emit_heartbeat(g_router.r, telemetry_now_ms());
+  }
   telemetry_update_network_health(g_router.r);
   return result;
 #endif

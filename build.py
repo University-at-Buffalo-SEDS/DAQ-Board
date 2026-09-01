@@ -372,6 +372,7 @@ def configure_and_build(ui: UI, cfg: BuildConfig, target: str | None = None) -> 
     cfg.build_dir.mkdir(parents=True, exist_ok=True)
 
     telemetry_flag = f"-DENABLE_TELEMETRY={'ON' if cfg.telemetry else 'OFF'}"
+    simulator_flag = f"-DSEDS_FIRMWARE_SIM_TEST={'ON' if os.environ.get('SEDS_FIRMWARE_SIM_TEST') == '1' else 'OFF'}"
 
     run(ui, [
         "cmake",
@@ -380,6 +381,7 @@ def configure_and_build(ui: UI, cfg: BuildConfig, target: str | None = None) -> 
         f"-DCMAKE_TOOLCHAIN_FILE={str(cfg.toolchain_file)}",
         "-DCMAKE_COMMAND=cmake",
         telemetry_flag,
+        simulator_flag,
         "-DENABLE_TELEMETRY_CAN_BUS=ON",
         "-DENABLE_TELEMETRY_BOARD_LINK_UART=OFF",
         "-S", str(cfg.repo_root),

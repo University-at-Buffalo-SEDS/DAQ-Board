@@ -30,8 +30,9 @@ class MemoryProbeContractTests(unittest.TestCase):
 
         hooks = (root / "Core" / "Src" / "telemetry_hooks.c").read_text()
         telemetry = (root / "Core" / "Src" / "telemetry.c").read_text()
+        can_bus = (root / "Core" / "Src" / "can_bus.c").read_text()
         for symbol in probes:
-            self.assertIn(symbol, hooks + telemetry)
+            self.assertIn(symbol, hooks + telemetry + can_bus)
 
 
 if __name__ == "__main__":

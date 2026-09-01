@@ -30,6 +30,10 @@ message("Build type: " ${CMAKE_BUILD_TYPE})
 
 # Enable CMake support for ASM and C languages
 enable_language(C ASM)
+option(SEDS_FIRMWARE_SIM_TEST "Enable simulator-only network observability" OFF)
+if(SEDS_FIRMWARE_SIM_TEST)
+    add_compile_definitions(SEDS_FIRMWARE_SIM_TEST=1)
+endif()
 
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})

@@ -46,7 +46,7 @@
 #endif
 
 #ifndef CAN_BUS_TX_ENQUEUE_TIMEOUT_MS
-#define CAN_BUS_TX_ENQUEUE_TIMEOUT_MS 5U
+#define CAN_BUS_TX_ENQUEUE_TIMEOUT_MS 50U
 #endif
 
 // =========================
@@ -147,11 +147,13 @@ static inline void can_bus_notify_rx(const uint8_t *data, size_t len) {
 // You can use a dedicated CAN ID range too, but magic is simplest.
 
 #define CAN_BUS_FRAG_MAGIC ((uint16_t)('S') | ((uint16_t)('D') << 8))
+#define CAN_BUS_NODE_ID 7U
 #define CAN_BUS_FRAG_WIRE_LEN 64   // always send 64B payload frames for frags
-#define CAN_BUS_REASM_TIMEOUT_MS 250u // drop partial message after this many ms
+#define CAN_BUS_REASM_TIMEOUT_MS 1000u // tolerate interleaved multi-sender v4 packets
 
 typedef struct __attribute__((packed)) {
   uint16_t magic;     // CAN_BUS_FRAG_MAGIC
+  uint8_t source;     // stable sender token; disambiguates concurrent senders
   uint8_t seq;        // message sequence (wrap OK)
   uint8_t frag_idx;   // 0..frag_cnt-1
   uint8_t frag_cnt;   // total fragments
@@ -182,6 +184,9 @@ static volatile uint16_t g_rx_head = 0;
 static volatile uint16_t g_rx_tail = 0;
 volatile uint32_t g_fdcan_bus_off_count = 0;
 volatile uint32_t g_fdcan_recovery_count = 0;
+volatile uint32_t g_fdcan_rx_count = 0;
+volatile uint32_t g_fdcan_tx_ok_count = 0;
+volatile uint32_t g_fdcan_tx_fail_count = 0;
 
 static HAL_StatusTypeDef can_bus_recover_if_bus_off(void) {
   FDCAN_ProtocolStatusTypeDef status;
@@ -292,6 +297,7 @@ static inline int rb_pop(can_bus_rx_frame_t *out) {
 typedef struct {
   uint8_t active;
   uint32_t std_id; // which CAN ID this slot is for
+  uint8_t source;
   uint8_t seq;
   uint8_t frag_cnt;
   uint16_t total_len;
@@ -324,6 +330,7 @@ static void can_bus_drain_rx_fifo(FDCAN_HandleTypeDef *hfdcan, uint32_t rx_fifo)
     if (HAL_FDCAN_GetRxMessage(hfdcan, rx_fifo, &hdr, data) != HAL_OK) {
       break;
     }
+    g_fdcan_rx_count++;
 
     rb_push_drop_oldest(hdr.Identifier & 0x7FFu, data,
                         (uint8_t)can_bus_dlc_to_len(hdr.DataLength));
@@ -333,6 +340,7 @@ static void can_bus_drain_rx_fifo(FDCAN_HandleTypeDef *hfdcan, uint32_t rx_fifo)
 static void reasm_reset(can_bus_reasm_slot_t *s) {
   s->active = 0;
   s->std_id = 0;
+  s->source = 0;
   s->seq = 0;
   s->frag_cnt = 0;
   s->total_len = 0;
@@ -342,14 +350,19 @@ static void reasm_reset(can_bus_reasm_slot_t *s) {
   memset(s->got_mask, 0, sizeof(s->got_mask));
 }
 
-static can_bus_reasm_slot_t *reasm_get_slot(uint32_t std_id, uint8_t seq,
-                                            uint32_t now_ms) {
-  // First try to find existing active slot for std_id
+static can_bus_reasm_slot_t *reasm_get_slot(uint32_t std_id, uint8_t source,
+                                            uint8_t seq, uint32_t now_ms) {
+  // First try to find an in-flight message from this bus sender.
   for (unsigned i = 0; i < CAN_BUS_REASM_SLOTS; i++) {
-    if (g_reasm[i].active && g_reasm[i].std_id == std_id) {
+    if (g_reasm[i].active && g_reasm[i].std_id == std_id &&
+        g_reasm[i].source == source) {
       // If sequence changed, drop partial and reuse slot
       if (g_reasm[i].seq != seq) {
         reasm_reset(&g_reasm[i]);
+        g_reasm[i].active = 1;
+        g_reasm[i].std_id = std_id;
+        g_reasm[i].source = source;
+        g_reasm[i].seq = seq;
       }
       g_reasm[i].last_tick_ms = now_ms;
       return &g_reasm[i];
@@ -362,6 +375,7 @@ static can_bus_reasm_slot_t *reasm_get_slot(uint32_t std_id, uint8_t seq,
       reasm_reset(&g_reasm[i]);
       g_reasm[i].active = 1;
       g_reasm[i].std_id = std_id;
+      g_reasm[i].source = source;
       g_reasm[i].seq = seq;
       g_reasm[i].last_tick_ms = now_ms;
       return &g_reasm[i];
@@ -381,6 +395,7 @@ static can_bus_reasm_slot_t *reasm_get_slot(uint32_t std_id, uint8_t seq,
   reasm_reset(&g_reasm[stalest]);
   g_reasm[stalest].active = 1;
   g_reasm[stalest].std_id = std_id;
+  g_reasm[stalest].source = source;
   g_reasm[stalest].seq = seq;
   g_reasm[stalest].last_tick_ms = now_ms;
   return &g_reasm[stalest];
@@ -434,7 +449,8 @@ static void handle_rx_frame(const can_bus_rx_frame_t *f, uint32_t now_ms) {
 
       // We expect fixed 64B wire frames for frags by default.
       // But tolerate smaller frames as long as consistent.
-      can_bus_reasm_slot_t *s = reasm_get_slot(f->std_id, hdr.seq, now_ms);
+      can_bus_reasm_slot_t *s =
+          reasm_get_slot(f->std_id, hdr.source, hdr.seq, now_ms);
 
       // If slot was newly created (or reset), initialize message params
       if (s->frag_cnt == 0) {
@@ -585,7 +601,14 @@ HAL_StatusTypeDef can_bus_send_bytes(const uint8_t *bytes, size_t len,
   uint8_t txData[64] = {0};
   memcpy(txData, bytes, len);
 
-  return HAL_FDCAN_AddMessageToTxFifoQ(g_hfdcan, &txHeader, txData);
+  const HAL_StatusTypeDef status =
+      HAL_FDCAN_AddMessageToTxFifoQ(g_hfdcan, &txHeader, txData);
+  if (status == HAL_OK) {
+    g_fdcan_tx_ok_count++;
+  } else {
+    g_fdcan_tx_fail_count++;
+  }
+  return status;
 }
 
 // Send an arbitrarily large buffer by fragmenting into multiple CAN FD frames.
@@ -625,6 +648,7 @@ HAL_StatusTypeDef can_bus_send_large(const uint8_t *bytes, size_t len,
 
     can_bus_frag_hdr_t hdr;
     hdr.magic = CAN_BUS_FRAG_MAGIC;
+    hdr.source = CAN_BUS_NODE_ID;
     hdr.seq = seq;
     hdr.frag_idx = idx;
     hdr.frag_cnt = frag_cnt;
