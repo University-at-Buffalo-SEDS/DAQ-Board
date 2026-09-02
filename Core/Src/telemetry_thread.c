@@ -13,6 +13,20 @@
 
 TX_THREAD telemetry_thread;
 #define TELEMETRY_THREAD_STACK_SIZE (32U * 1024U)
+
+volatile uint32_t g_telemetry_stack_remaining = TELEMETRY_THREAD_STACK_SIZE;
+
+static void sample_telemetry_stack(void)
+{
+    const uint32_t *cursor = (const uint32_t *)telemetry_thread.tx_thread_stack_start;
+    const uint32_t *const end = (const uint32_t *)telemetry_thread.tx_thread_stack_end;
+    if (cursor == NULL || end == NULL || cursor >= end) return;
+    while (cursor < end && *cursor == 0xEFEFEFEFUL) ++cursor;
+    const uint32_t remaining = (uint32_t)((uintptr_t)cursor -
+        (uintptr_t)telemetry_thread.tx_thread_stack_start);
+    if (remaining < g_telemetry_stack_remaining)
+        g_telemetry_stack_remaining = remaining;
+}
 #ifdef TELEMETRY_CAN_BUS
 extern FDCAN_HandleTypeDef hfdcan1;
 #endif
@@ -49,6 +63,8 @@ void telemetry_thread_entry(ULONG initial_input)
 #endif
         (void)telemetry_poll_timesync();
         ota_stream_poll();
+
+        sample_telemetry_stack();
 
         tx_thread_sleep(1);
     }

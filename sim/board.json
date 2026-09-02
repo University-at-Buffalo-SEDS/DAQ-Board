@@ -77,6 +77,7 @@
     "virtual_time_ms": 50,
     "sample_count": 5,
     "memory_probe_warmup_samples": 3,
+    "require_stack_probe": true,
     "hal_tick_address": 536871164,
     "hal_tick_step": 100,
     "memory_probes": [
@@ -92,6 +93,7 @@
       {"name": "fdcan_tx_ok", "symbol": "g_fdcan_tx_ok_count"},
       {"name": "fdcan_tx_fail", "symbol": "g_fdcan_tx_fail_count", "maximum": 0},
       {"name": "pool_available", "symbol": "g_telemetry_pool_available", "max_end_drop": 2048},
+      {"name": "telemetry_stack_remaining", "symbol": "g_telemetry_stack_remaining", "minimum": 2048},
       {"name": "pool_low_water", "symbol": "g_telemetry_pool_low_water", "minimum": 1024},
       {"name": "pool_fragments", "symbol": "g_telemetry_pool_fragments"},
       {"name": "allocations", "symbol": "g_telemetry_alloc_count"},
