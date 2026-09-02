@@ -18,11 +18,19 @@ volatile uint32_t g_telemetry_stack_remaining = TELEMETRY_THREAD_STACK_SIZE;
 
 static void sample_telemetry_stack(void)
 {
-    const uint32_t *cursor = (const uint32_t *)telemetry_thread.tx_thread_stack_start;
-    const uint32_t *const end = (const uint32_t *)telemetry_thread.tx_thread_stack_end;
-    if (cursor == NULL || end == NULL || cursor >= end) return;
-    while (cursor < end && *cursor == 0xEFEFEFEFUL) ++cursor;
-    const uint32_t remaining = (uint32_t)((uintptr_t)cursor -
+    const volatile uint32_t *const start =
+        (const volatile uint32_t *)telemetry_thread.tx_thread_stack_start;
+    const volatile uint32_t *const end =
+        (const volatile uint32_t *)telemetry_thread.tx_thread_stack_end;
+    static const volatile uint32_t *high_water;
+    if (start == NULL || end == NULL || start >= end) return;
+    if (high_water == NULL || high_water < start || high_water > end) {
+        high_water = start;
+        while (high_water < end && *high_water == 0xEFEFEFEFUL) ++high_water;
+    } else {
+        while (high_water > start && high_water[-1] != 0xEFEFEFEFUL) --high_water;
+    }
+    const uint32_t remaining = (uint32_t)((uintptr_t)high_water -
         (uintptr_t)telemetry_thread.tx_thread_stack_start);
     if (remaining < g_telemetry_stack_remaining)
         g_telemetry_stack_remaining = remaining;
