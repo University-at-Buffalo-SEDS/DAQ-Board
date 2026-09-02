@@ -360,7 +360,7 @@
       "endpoints": [
         "ActuatorGroundStation"
       ],
-      "priority": 0
+      "priority": 200
     },
     {
       "rust": "ActuatorKG1000",
