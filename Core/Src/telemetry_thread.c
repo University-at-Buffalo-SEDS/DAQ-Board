@@ -65,7 +65,7 @@ void telemetry_thread_entry(ULONG initial_input)
         can_bus_process_rx();
 #endif
         (void)telemetry_poll_discovery();
-        (void)process_all_queues_timeout(50);
+        (void)process_all_queues_timeout(1);
 #ifdef TELEMETRY_BOARD_LINK_UART
         board_link_uart_process();
 #endif

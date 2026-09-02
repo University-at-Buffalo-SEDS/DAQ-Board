@@ -48,6 +48,7 @@ if(DEFINED LAUNCHCORE_DELTA_SIZE)
         "${CMAKE_SOURCE_DIR}/Core/Src/launchcore_delta_format.c"
         "${sedslaunchcore_SOURCE_DIR}/bootloader/src/crc32.c"
         "${sedslaunchcore_SOURCE_DIR}/bootloader/src/metadata.c"
+        "${sedslaunchcore_SOURCE_DIR}/bootloader/src/persist.c"
         "${sedslaunchcore_SOURCE_DIR}/update_lib/src/delta_update.c"
         "${sedslaunchcore_SOURCE_DIR}/update_lib/src/confirm_boot.c"
         "${sedslaunchcore_SOURCE_DIR}/update_lib/src/update_status.c"

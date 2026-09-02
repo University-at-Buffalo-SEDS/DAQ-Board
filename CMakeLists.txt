@@ -56,6 +56,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/board_link_uart.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry_thread.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry.c 
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/flight_state_cache.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/persistent_store.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry_hooks.c 
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/sd_card.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_adc1.c

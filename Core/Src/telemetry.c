@@ -1,5 +1,6 @@
 // telemetry.c
 #include "telemetry.h"
+#include "flight_state_cache.h"
 #include "sim_network_probe.h"
 #include "ota_stream.h"
 #include "sedsnet_hardware_crypto.h"
@@ -417,6 +418,7 @@ SedsResult telemetry_poll_discovery(void) {
   }
 
   bool did_queue = false;
+  (void)flight_state_cache_poll(g_router.r);
   const SedsResult result = seds_router_poll_discovery(g_router.r, &did_queue);
   if (result == SEDS_OK) {
     sim_probe_emit_heartbeat(g_router.r, telemetry_now_ms());
@@ -555,6 +557,7 @@ SedsResult init_telemetry_router(void) {
   /* Discovery begins from the normal poll loop after link startup. */
 
   g_router.r = r;
+  (void)flight_state_cache_init(r);
   g_router.created = 1U;
   g_router.start_time = tx_raw_now_ms_locked();
   return SEDS_OK;

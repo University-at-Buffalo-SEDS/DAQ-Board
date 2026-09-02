@@ -101,7 +101,12 @@
       {"name": "allocation_failures", "symbol": "g_telemetry_alloc_fail", "maximum": 0},
       {"name": "panics", "symbol": "g_telemetry_panic_count", "maximum": 0},
       {"name": "mutex_get_failures", "symbol": "g_telemetry_lock_get_fail", "maximum": 0},
-      {"name": "mutex_put_failures", "symbol": "g_telemetry_lock_put_fail", "maximum": 0}
+      {"name": "mutex_put_failures", "symbol": "g_telemetry_lock_put_fail", "maximum": 0},
+      {"name": "flight_state_cache", "symbol": "g_flight_state_cache_value", "maximum": 15},
+      {"name": "flight_state_restores", "symbol": "g_flight_state_cache_restores"},
+      {"name": "flight_state_writes", "symbol": "g_flight_state_cache_writes"},
+      {"name": "flight_state_updates", "symbol": "g_flight_state_cache_updates"},
+      {"name": "flight_state_errors", "symbol": "g_flight_state_cache_errors", "maximum": 0}
     ]
   }
 }
