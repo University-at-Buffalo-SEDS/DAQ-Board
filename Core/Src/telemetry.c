@@ -530,6 +530,35 @@ SedsResult init_telemetry_router(void) {
     return SEDS_ERR;
   }
 
+  /* Address summaries retain discovery-based routing; detailed topology is
+   * diagnostic data and should remain hosted rather than consume MCU RAM. */
+#ifdef TELEMETRY_CAN_BUS
+  if (seds_router_set_typed_route(r, -1, SEDS_DT_DISCOVERY_TOPOLOGY,
+                                  g_can_side_id, false) != SEDS_OK) {
+    seds_router_free(r);
+    g_router.r = NULL;
+    g_router.created = 0U;
+    g_can_side_id = -1;
+#ifdef TELEMETRY_BOARD_LINK_UART
+    g_board_link_side_id = -1;
+#endif
+    return SEDS_ERR;
+  }
+#endif
+#ifdef TELEMETRY_BOARD_LINK_UART
+  if (seds_router_set_typed_route(r, -1, SEDS_DT_DISCOVERY_TOPOLOGY,
+                                  g_board_link_side_id, false) != SEDS_OK) {
+    seds_router_free(r);
+    g_router.r = NULL;
+    g_router.created = 0U;
+#ifdef TELEMETRY_CAN_BUS
+    g_can_side_id = -1;
+#endif
+    g_board_link_side_id = -1;
+    return SEDS_ERR;
+  }
+#endif
+
   result = telemetry_configure_timesync_locked(r);
   if (result != SEDS_OK) {
     printf("Error: failed to configure telemetry timesync: %d\r\n", (int)result);
