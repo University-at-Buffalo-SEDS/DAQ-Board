@@ -74,6 +74,7 @@
     }
   ],
   "execution": {
+    "factory_boot_success_symbol": "_tx_thread_schedule",
     "virtual_time_ms": 50,
     "sample_count": 5,
     "memory_probe_warmup_samples": 3,
