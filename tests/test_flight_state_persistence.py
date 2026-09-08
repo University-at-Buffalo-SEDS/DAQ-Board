@@ -19,6 +19,7 @@ class FlightStatePersistenceContract(unittest.TestCase):
         self.assertIn("seds_router_on_network_variable_update", source)
         self.assertIn("seds_router_seed_managed_variable_packed", source)
         self.assertIn("seds_router_request_managed_variable", source)
+        self.assertIn("if (g_network_value_seen) return SEDS_OK;", source)
         self.assertNotIn("seds_router_get_network_variable_packed_len", source)
         self.assertLess(
             main.index("flight_state_cache_restore();"),
