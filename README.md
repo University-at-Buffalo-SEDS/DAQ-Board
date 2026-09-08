@@ -1,7 +1,7 @@
 # DAQ Board firmware
 
 The DAQ Board targets the STM32U585 and samples fill-system instrumentation for
-publication over the SEDSNet CAN-FD network. The board uses SEDSNet v4.0.19 and
+publication over the SEDSNet CAN-FD network. The board uses SEDSNet v4.0.20 and
 SEDS LaunchCore v1.0.0, fetched by CMake without submodules.
 
 LaunchCore derives the 2 MiB flash layout, linker scripts, Slot A, OTA staging,
