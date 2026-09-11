@@ -27,6 +27,7 @@ typedef struct
   uint8_t sample_valid;
   uint8_t dma_busy;
   uint8_t queued_samples;
+  uint64_t monotonic_ms;
   int32_t code;
   float voltage_v;
   float loadcell_kg1000;
@@ -43,6 +44,7 @@ void mcp3564r_dma_complete(void);
 void mcp3564r_dma_error(void);
 void mcp3564r_timer_elapsed_callback(TIM_HandleTypeDef *htim);
 UINT mcp3564r_get_sample(mcp3564r_sample_t *sample);
+uint8_t mcp3564r_pending_samples(void);
 
 #ifdef __cplusplus
 }

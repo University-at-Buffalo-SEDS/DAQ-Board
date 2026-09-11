@@ -18,6 +18,10 @@ static const uint32_t g_adc1_channels[] = {
 };
 
 static uint8_t g_adc1_calibrated = 0U;
+volatile uint32_t g_daq_adc1_read_status = UINT32_MAX;
+volatile uint32_t g_daq_adc1_cr_on_error = 0U;
+volatile uint32_t g_daq_adc1_isr_on_error = 0U;
+volatile uint32_t g_daq_adc1_hal_state_on_error = 0U;
 
 static HAL_StatusTypeDef daq_adc1_read_raw(uint32_t channel, uint32_t *raw)
 {
@@ -36,21 +40,28 @@ static HAL_StatusTypeDef daq_adc1_read_raw(uint32_t channel, uint32_t *raw)
 
   if (HAL_ADC_ConfigChannel(&hadc1, &cfg) != HAL_OK)
   {
+    g_daq_adc1_read_status = 1U;
     return HAL_ERROR;
   }
 
   if (HAL_ADC_Start(&hadc1) != HAL_OK)
   {
+    g_daq_adc1_read_status = 2U;
+    g_daq_adc1_cr_on_error = hadc1.Instance->CR;
+    g_daq_adc1_isr_on_error = hadc1.Instance->ISR;
+    g_daq_adc1_hal_state_on_error = hadc1.State;
     return HAL_ERROR;
   }
 
   if (HAL_ADC_PollForConversion(&hadc1, 10U) != HAL_OK)
   {
+    g_daq_adc1_read_status = 3U;
     (void)HAL_ADC_Stop(&hadc1);
     return HAL_TIMEOUT;
   }
 
   *raw = HAL_ADC_GetValue(&hadc1);
+  g_daq_adc1_read_status = 0U;
   (void)HAL_ADC_Stop(&hadc1);
   return HAL_OK;
 }

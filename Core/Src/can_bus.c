@@ -46,7 +46,7 @@
 #endif
 
 #ifndef CAN_BUS_TX_ENQUEUE_TIMEOUT_MS
-#define CAN_BUS_TX_ENQUEUE_TIMEOUT_MS 50U
+#define CAN_BUS_TX_ENQUEUE_TIMEOUT_MS 5U
 #endif
 
 // =========================
@@ -573,8 +573,10 @@ HAL_StatusTypeDef can_bus_send_bytes(const uint8_t *bytes, size_t len,
     return HAL_ERROR;
 
   const HAL_StatusTypeDef slot_status = can_bus_wait_for_tx_slot();
-  if (slot_status != HAL_OK)
+  if (slot_status != HAL_OK) {
+    g_fdcan_tx_fail_count++;
     return slot_status;
+  }
 
   if (len > 64)
     len = 64;

@@ -11,24 +11,38 @@
 
 extern SPI_HandleTypeDef hspi2;
 
+/* Zero means ready. Non-zero values identify the initialization stage that
+ * failed, which is readable by the firmware simulator and a debugger. */
+volatile uint32_t g_daq_board_init_status = UINT32_MAX;
+volatile uint32_t g_daq_board_sample_status = UINT32_MAX;
+
 UINT daq_board_init(void)
 {
   if (daq_adc1_init() != TX_SUCCESS)
   {
+    g_daq_board_init_status = 1U;
     return TX_NOT_DONE;
   }
 
   if (daq_adc4_init() != TX_SUCCESS)
   {
+    g_daq_board_init_status = 2U;
     return TX_NOT_DONE;
   }
 
   if (daq_dac_init() != TX_SUCCESS)
   {
+    g_daq_board_init_status = 3U;
     return TX_NOT_DONE;
   }
 
-  return mcp3564r_init(&hspi2);
+  if (mcp3564r_init(&hspi2) != TX_SUCCESS)
+  {
+    g_daq_board_init_status = 4U;
+    return TX_NOT_DONE;
+  }
+  g_daq_board_init_status = 0U;
+  return TX_SUCCESS;
 }
 
 UINT daq_board_sample(daq_snapshot_t *snapshot)
@@ -40,6 +54,7 @@ UINT daq_board_sample(daq_snapshot_t *snapshot)
 
   if (snapshot == NULL)
   {
+    g_daq_board_sample_status = 5U;
     return TX_PTR_ERROR;
   }
 
@@ -48,21 +63,25 @@ UINT daq_board_sample(daq_snapshot_t *snapshot)
 
   if (daq_adc1_sample(&adc1_sample) != TX_SUCCESS)
   {
+    g_daq_board_sample_status = 1U;
     return TX_NOT_DONE;
   }
 
   if (daq_adc4_sample(&adc4_sample) != TX_SUCCESS)
   {
+    g_daq_board_sample_status = 2U;
     return TX_NOT_DONE;
   }
 
   if (daq_dac_sample(&dac_sample) != TX_SUCCESS)
   {
+    g_daq_board_sample_status = 3U;
     return TX_NOT_DONE;
   }
 
   if (mcp3564r_get_sample(&ext_adc_sample) != TX_SUCCESS)
   {
+    g_daq_board_sample_status = 4U;
     return TX_NOT_DONE;
   }
 
@@ -73,11 +92,13 @@ UINT daq_board_sample(daq_snapshot_t *snapshot)
   memcpy(snapshot->analog_outputs_v, dac_sample.analog_outputs_v, sizeof(snapshot->analog_outputs_v));
   snapshot->ext_adc_sample_valid = ext_adc_sample.sample_valid;
   snapshot->ext_adc_dma_busy = ext_adc_sample.dma_busy;
+  snapshot->ext_adc_monotonic_ms = ext_adc_sample.monotonic_ms;
   snapshot->ext_adc_code = ext_adc_sample.code;
   snapshot->ext_adc_voltage_v = ext_adc_sample.voltage_v;
   snapshot->ext_adc_loadcell_kg1000 = ext_adc_sample.loadcell_kg1000;
   snapshot->ext_adc_temp_c = ext_adc_sample.temperature_c;
 
+  g_daq_board_sample_status = 0U;
   return TX_SUCCESS;
 }
 

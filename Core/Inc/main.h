@@ -68,7 +68,7 @@ void Error_Handler(void);
 
 /* USER CODE BEGIN Private defines */
 #ifndef DISABLE_SD_CARD
-#define DISABLE_SD_CARD 1U
+#define DISABLE_SD_CARD 0U
 #endif
 
 /* USER CODE END Private defines */

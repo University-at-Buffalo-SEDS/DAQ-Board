@@ -45,6 +45,9 @@ extern UART_HandleTypeDef huart1;
 void telemetry_thread_entry(ULONG initial_input)
 {
     (void)initial_input;
+    const ULONG poll_ticks = (TX_TIMER_TICKS_PER_SECOND + 999U) / 1000U;
+    const ULONG stack_sample_ticks = (TX_TIMER_TICKS_PER_SECOND + 3U) / 4U;
+    ULONG last_stack_sample = tx_time_get() - stack_sample_ticks;
 
 #ifdef TELEMETRY_CAN_BUS
     (void)can_bus_init(&hfdcan1);
@@ -72,9 +75,16 @@ void telemetry_thread_entry(ULONG initial_input)
         (void)telemetry_poll_timesync();
         ota_stream_poll();
 
-        sample_telemetry_stack();
+        /* The DAQ tick is 20 us, not 1 ms. Bound this higher-priority
+         * worker's polling and diagnostic cost so ADC/SD workers can run. */
+        const ULONG now = tx_time_get();
+        if ((now - last_stack_sample) >= stack_sample_ticks)
+        {
+            sample_telemetry_stack();
+            last_stack_sample = now;
+        }
 
-        tx_thread_sleep(1);
+        tx_thread_sleep(poll_ticks);
     }
 }
 

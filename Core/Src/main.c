@@ -458,6 +458,8 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Init.ClockDivider = FDCAN_CLOCK_DIV1;
   hfdcan1.Init.FrameFormat = FDCAN_FRAME_FD_NO_BRS;
   hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
+  /* FDCAN retries physical arbitration/ACK failures; SEDSNet supplies
+   * end-to-end reliability without blocking this non-blocking TX path. */
   hfdcan1.Init.AutoRetransmission = ENABLE;
   hfdcan1.Init.TransmitPause = DISABLE;
   hfdcan1.Init.ProtocolException = DISABLE;
@@ -655,7 +657,7 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 39;
+  htim2.Init.Prescaler = 159;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim2.Init.Period = 2047;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;

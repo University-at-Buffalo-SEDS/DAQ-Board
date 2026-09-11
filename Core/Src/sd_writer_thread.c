@@ -21,8 +21,8 @@ UINT create_sd_writer_thread(void)
                           0U,
                           g_sd_writer_thread_stack,
                           sizeof(g_sd_writer_thread_stack),
-                          4U,
-                          4U,
+                          8U,
+                          8U,
                           TX_NO_TIME_SLICE,
                           TX_AUTO_START);
 }

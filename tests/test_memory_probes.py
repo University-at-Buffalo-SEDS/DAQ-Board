@@ -34,8 +34,15 @@ class MemoryProbeContractTests(unittest.TestCase):
         telemetry_thread = (root / "Core" / "Src" / "telemetry_thread.c").read_text()
         can_bus = (root / "Core" / "Src" / "can_bus.c").read_text()
         flight_state_cache = (root / "Core" / "Src" / "flight_state_cache.c").read_text()
+        daq_thread = (root / "Core" / "Src" / "daq_thread.c").read_text()
+        daq_board = (root / "Core" / "Src" / "daq_board.c").read_text()
+        daq_adc1 = (root / "Core" / "Src" / "daq_adc1.c").read_text()
+        mcp3564r = (root / "Core" / "Src" / "mcp3564r.c").read_text()
+        sd_card = (root / "Core" / "Src" / "sd_card.c").read_text()
+        app_threadx = (root / "Core" / "Src" / "app_threadx.c").read_text()
+        sources = hooks + telemetry + telemetry_thread + can_bus + flight_state_cache + daq_thread + daq_board + daq_adc1 + mcp3564r + sd_card + app_threadx
         for symbol in probes:
-            self.assertIn(symbol, hooks + telemetry + telemetry_thread + can_bus + flight_state_cache)
+            self.assertIn(symbol, sources)
 
 
 if __name__ == "__main__":

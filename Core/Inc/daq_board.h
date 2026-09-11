@@ -20,6 +20,7 @@ typedef struct
   float analog_outputs_v[2];
   uint8_t ext_adc_sample_valid;
   uint8_t ext_adc_dma_busy;
+  uint64_t ext_adc_monotonic_ms;
   int32_t ext_adc_code;
   float ext_adc_voltage_v;
   float ext_adc_loadcell_kg1000;

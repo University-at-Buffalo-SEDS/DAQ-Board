@@ -1,5 +1,6 @@
 // telemetry.c
 #include "telemetry.h"
+#include "daq_calibration.h"
 #include "flight_state_cache.h"
 #include "sim_network_probe.h"
 #include "ota_stream.h"
@@ -67,6 +68,8 @@ static uint8_t g_board_link_rx_subscribed = 0U;
 #endif
 #ifdef TELEMETRY_CAN_BUS
 static int32_t g_can_side_id = -1;
+#define BOARD_CAN_MAX_FRAME_BYTES 128U
+#define BOARD_SIDE_TRANSPORT_TEMPLATES 4U
 #endif
 #ifdef TELEMETRY_BOARD_LINK_UART
 static int32_t g_board_link_side_id = -1;
@@ -256,12 +259,14 @@ SedsResult tx_send(const uint8_t *bytes, size_t len, void *user) {
   if (!bytes || len == 0U) {
     return SEDS_BAD_ARG;
   }
-  HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
   const uint32_t can_id =
       sim_probe_packed_data_type(bytes, len) == (uint32_t)SEDS_DT_HEARTBEAT
           ? 0x007U
           : 0x107U;
   if (can_bus_send_large(bytes, len, can_id) == HAL_OK) {
+    /* LED1 is the CAN egress activity indicator.  Toggle only after the
+     * complete SEDSNet packet has been accepted by the hardware transport. */
+    HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
     sim_probe_observe_can_tx(bytes, len);
     return SEDS_OK;
   }
@@ -277,6 +282,10 @@ static SedsResult board_link_tx_send(const uint8_t *bytes, size_t len, void *use
 #ifdef TELEMETRY_CAN_BUS
 static void telemetry_can_rx(const uint8_t *data, size_t len, void *user) {
   (void)user;
+  /* LED2 is the CAN ingress activity indicator.  This callback runs only for
+   * complete packets after CAN reassembly, so fragments do not exaggerate
+   * the visible receive rate. */
+  HAL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
   sim_probe_observe_packed(data, len);
   rx_asynchronous(data, len);
 }
@@ -419,6 +428,7 @@ SedsResult telemetry_poll_discovery(void) {
 
   bool did_queue = false;
   (void)flight_state_cache_poll(g_router.r);
+  (void)daq_calibration_poll(g_router.r);
   const SedsResult result = seds_router_poll_discovery(g_router.r, &did_queue);
   if (result == SEDS_OK) {
     sim_probe_emit_heartbeat(g_router.r, telemetry_now_ms());
@@ -477,7 +487,7 @@ SedsResult init_telemetry_router(void) {
     return result;
   }
 
-  r = seds_router_new(Seds_RM_Relay, node_now_since_ms, NULL, locals,
+  r = seds_router_new(node_now_since_ms, NULL, locals,
                       sizeof(locals) / sizeof(locals[0]));
   if (!r) {
     printf("Error: failed to create router\r\n");
@@ -492,8 +502,17 @@ SedsResult init_telemetry_router(void) {
     return SEDS_ERR;
   }
 
+  if (seds_router_set_preferred_discovery_master(r, "GS", 2U) != SEDS_OK) {
+    printf("Error: failed to prefer GroundStation discovery master\r\n");
+    seds_router_free(r);
+    return SEDS_ERR;
+  }
+
 #ifdef TELEMETRY_CAN_BUS
-  g_can_side_id = seds_router_add_side_packed(r, "can", 3U, tx_send, NULL, false);
+  g_can_side_id = seds_router_add_side_packed_profile(
+      r, "can", 3U, tx_send, NULL, false,
+      SEDS_SIDE_TRANSPORT_PROFILE_IPV6_LIKE, BOARD_CAN_MAX_FRAME_BYTES, 0U,
+      BOARD_SIDE_TRANSPORT_TEMPLATES);
   if (g_can_side_id < 0) {
     printf("Error: failed to add CAN side: %ld\r\n", (long)g_can_side_id);
     g_can_side_id = -1;
@@ -557,7 +576,13 @@ SedsResult init_telemetry_router(void) {
   /* Discovery begins from the normal poll loop after link startup. */
 
   g_router.r = r;
-  (void)flight_state_cache_init(r);
+  result = flight_state_cache_init(r);
+  if (result == SEDS_OK) result = daq_calibration_init(r);
+  if (result != SEDS_OK) {
+    seds_router_free(r);
+    g_router.r = NULL;
+    return result;
+  }
   g_router.created = 1U;
   g_router.start_time = tx_raw_now_ms_locked();
   return SEDS_OK;

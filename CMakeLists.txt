@@ -43,6 +43,23 @@ target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
 
+# FileX provides a real FAT filesystem for high-rate DAQ logging. Fetch the
+# released source at configure time, matching the dependency model used for
+# SEDSNet and LaunchCore while keeping generated/vendor trees out of this repo.
+include(FetchContent)
+if(NOT TARGET azrtos::threadx)
+    add_library(azrtos::threadx ALIAS ThreadX)
+endif()
+set(THREADX_ARCH cortex_m33 CACHE STRING "" FORCE)
+set(THREADX_TOOLCHAIN gnu CACHE STRING "" FORCE)
+set(FX_USER_FILE "${CMAKE_SOURCE_DIR}/Core/Inc/fx_user.h" CACHE FILEPATH "" FORCE)
+FetchContent_Declare(
+    filex
+    GIT_REPOSITORY https://github.com/eclipse-threadx/filex.git
+    GIT_TAG b93ac4ae77ee12196f15f341cffb0a9810d2484f
+    GIT_SHALLOW FALSE)
+FetchContent_MakeAvailable(filex)
+
 # Link directories setup
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined library search paths
@@ -58,6 +75,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry.c 
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/flight_state_cache.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/persistent_store.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_calibration.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry_hooks.c 
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/sd_card.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_adc1.c
@@ -88,6 +106,7 @@ list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 # Add linked libraries
 target_link_libraries(${CMAKE_PROJECT_NAME}
     stm32cubemx
+    azrtos::filex
 
     # Add user defined libraries
 )

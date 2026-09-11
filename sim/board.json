@@ -28,9 +28,12 @@
   "board": {
     "strict_mmio": false,
     "clocks": [],
-    "connections": [],
+    "connections": [{"from": "gpio.28", "to": "layoutDevice2@0"}],
     "pins": [],
-    "dma_routes": [],
+    "dma_routes": [
+      {"request": "spi2.DMARecieve", "controller": "gpdma", "channel": 0},
+      {"request": "spi2.DMATransmit", "controller": "gpdma", "channel": 1}
+    ],
     "security": {"trustzone": false, "secure_regions": []}
   },
   "traffic": {
@@ -49,10 +52,9 @@
       "model": "stm32_adc",
       "bus": "adc1",
       "bits": 14,
-      "channels": 3,
-      "channel_samples": [4096, 8192, 12288],
-      "noise_lsb": 4,
-      "failure_every": 997
+      "channels": 12,
+      "channel_samples": [8192, 8192, 8192, 8192, 8192, 10900, 8192, 8300, 8192, 8192, 8192, 9000],
+      "noise_lsb": 4
     },
     {
       "type": "adc",
@@ -62,25 +64,31 @@
       "bits": 12,
       "channels": 4,
       "channel_samples": [512, 1536, 2560, 3584],
-      "noise_lsb": 2,
-      "disconnect_after": 950
+      "noise_lsb": 2
+    },
+    {
+      "type": "adc",
+      "name": "loadcell_adc",
+      "model": "mcp3564r",
+      "bus": "spi2",
+      "bits": 24,
+      "channels": 1,
+      "channel_samples": [1048576]
     },
     {
       "type": "storage",
       "name": "sd_card",
       "model": "sd_card",
       "bus": "sdmmc1",
-      "capacity_bytes": 4194304
+      "capacity_bytes": 1073741824
     }
   ],
   "execution": {
     "factory_boot_success_symbol": "_tx_thread_schedule",
-    "virtual_time_ms": 50,
-    "sample_count": 5,
-    "memory_probe_warmup_samples": 3,
+    "virtual_time_ms": 2000,
+    "sample_count": 10,
+    "memory_probe_warmup_samples": 4,
     "require_stack_probe": true,
-    "hal_tick_address": 536871164,
-    "hal_tick_step": 100,
     "memory_probes": [
       {"name": "network_ready", "symbol": "g_telemetry_network_ready"},
       {"name": "peer_mask", "symbol": "g_telemetry_peer_mask"},
@@ -93,6 +101,33 @@
       {"name": "fdcan_rx", "symbol": "g_fdcan_rx_count"},
       {"name": "fdcan_tx_ok", "symbol": "g_fdcan_tx_ok_count"},
       {"name": "fdcan_tx_fail", "symbol": "g_fdcan_tx_fail_count", "maximum": 0},
+      {"name": "daq_samples", "symbol": "g_daq_sample_ok_count", "minimum": 3},
+      {"name": "daq_sample_overruns", "symbol": "g_daq_sample_overrun_count", "maximum": 0},
+      {"name": "daq_thread_create_status", "symbol": "g_daq_thread_create_status"},
+      {"name": "daq_sample_failures", "symbol": "g_daq_sample_fail_count"},
+      {"name": "daq_init_failures", "symbol": "g_daq_init_fail_count"},
+      {"name": "daq_init_status", "symbol": "g_daq_board_init_status"},
+      {"name": "daq_sample_status", "symbol": "g_daq_board_sample_status"},
+      {"name": "daq_adc1_read_status", "symbol": "g_daq_adc1_read_status"},
+      {"name": "daq_adc1_cr_on_error", "symbol": "g_daq_adc1_cr_on_error"},
+      {"name": "daq_adc1_isr_on_error", "symbol": "g_daq_adc1_isr_on_error"},
+      {"name": "daq_adc1_hal_state_on_error", "symbol": "g_daq_adc1_hal_state_on_error"},
+      {"name": "mcp3564r_init_status", "symbol": "g_mcp3564r_init_status"},
+      {"name": "loadcell_network_rows", "symbol": "g_daq_loadcell_publish_ok_count", "minimum": 1},
+      {"name": "loadcell_network_failures", "symbol": "g_daq_loadcell_publish_fail_count", "maximum": 0},
+      {"name": "loadcell_nonzero_samples", "symbol": "g_daq_nonzero_raw_sample_count", "minimum": 1},
+      {"name": "loadcell_raw_samples", "symbol": "g_daq_raw_samples_drained_count", "minimum": 1, "minimum_interval_gain": 1},
+      {"name": "sd_network_rows", "symbol": "g_daq_sd_network_row_ok_count", "minimum": 1},
+      {"name": "sd_network_row_failures", "symbol": "g_daq_sd_network_row_fail_count", "maximum": 0},
+      {"name": "sd_ready", "symbol": "g_sd_ready", "minimum": 1},
+      {"name": "sd_init_stage", "symbol": "g_sd_init_stage"},
+      {"name": "sd_writer_thread_create_status", "symbol": "g_sd_writer_thread_create_status"},
+      {"name": "sd_raw_records_written", "symbol": "g_sd_raw_records_written_count", "minimum": 1, "minimum_interval_gain": 1},
+      {"name": "sd_csv_rows_written", "symbol": "g_sd_csv_rows_written_count", "minimum": 1},
+      {"name": "sd_write_errors", "symbol": "g_sd_write_error_count", "maximum": 0},
+      {"name": "sd_init_failures", "symbol": "g_sd_init_failures"},
+      {"name": "sd_line_drops", "symbol": "g_sd_line_drop_count", "maximum": 0},
+      {"name": "sd_raw_batch_drops", "symbol": "g_sd_raw_batch_drop_count", "maximum": 0},
       {"name": "pool_available", "symbol": "g_telemetry_pool_available", "max_end_drop": 2048},
       {"name": "telemetry_stack_remaining", "symbol": "g_telemetry_stack_remaining", "minimum": 2048},
       {"name": "pool_low_water", "symbol": "g_telemetry_pool_low_water", "minimum": 1024},

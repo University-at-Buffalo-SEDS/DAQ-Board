@@ -53,6 +53,8 @@ extern void telemetry_init_lock(void);
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN PV */
+volatile uint32_t g_daq_thread_create_status = TX_NOT_DONE;
+volatile uint32_t g_sd_writer_thread_create_status = TX_NOT_DONE;
 
 /* USER CODE END PV */
 
@@ -83,6 +85,7 @@ UINT App_ThreadX_Init(VOID *memory_ptr)
   if (ret == TX_SUCCESS)
   {
     ret = create_sd_writer_thread();
+    g_sd_writer_thread_create_status = ret;
     if (ret != TX_SUCCESS)
     {
       Error_Handler();
@@ -95,6 +98,7 @@ UINT App_ThreadX_Init(VOID *memory_ptr)
     Error_Handler();
   }
   ret = create_daq_thread();
+  g_daq_thread_create_status = ret;
   if (ret != TX_SUCCESS)
   {
     Error_Handler();

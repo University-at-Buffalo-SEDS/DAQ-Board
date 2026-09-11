@@ -1,6 +1,7 @@
 #include "mcp3564r.h"
 
 #include "main.h"
+#include "daq_rates.h"
 
 #include <string.h>
 
@@ -24,9 +25,8 @@
 #define MCP3564R_WRITE_EXTENDED_CONFIG (1U)
 #define MCP3564R_SAMPLE_QUEUE_DEPTH (128U)
 
-#ifndef MCP3564R_DEFAULT_START_OFFSET_US
-#define MCP3564R_DEFAULT_START_OFFSET_US (200U)
-#endif
+#define MCP3564R_FIRST_CONVERSION_US DAQ_ADC_FIRST_CONVERSION_US
+#define MCP3564R_DEFAULT_START_OFFSET_US DAQ_ADC_READ_INTERVAL_US
 
 #define EN_12V HAL_GPIO_WritePin(EN_12V_GPIO_Port, EN_12V_Pin, GPIO_PIN_SET)
 
@@ -39,6 +39,7 @@
 typedef struct
 {
   uint32_t raw24;
+  uint32_t monotonic_ms;
 } mcp3564r_sample_entry_t;
 
 typedef struct
@@ -52,12 +53,14 @@ typedef struct
   volatile uint8_t queue_tail;
   volatile uint8_t queue_count;
   volatile uint32_t overrun_count;
+  volatile uint8_t first_conversion_pending;
   uint32_t start_offset_us;
   uint32_t latest_raw24;
   mcp3564r_sample_entry_t queue[MCP3564R_SAMPLE_QUEUE_DEPTH];
 } mcp3564r_context_t;
 
 static mcp3564r_context_t g_mcp3564r = {0};
+volatile uint32_t g_mcp3564r_init_status = UINT32_MAX;
 #if (MCP3564R_USE_DMA_READ != 0U)
 static uint8_t g_mcp3564r_tx_frame[MCP3564R_DCACHE_LINE_SIZE] MCP3564R_DMA_ALIGN;
 static uint8_t g_mcp3564r_rx_frame[MCP3564R_DCACHE_LINE_SIZE] MCP3564R_DMA_ALIGN;
@@ -67,7 +70,8 @@ extern TIM_HandleTypeDef htim2;
 
 const mcp3564r_config_t MCP3564R_DEFAULT_CONFIG = {
   .config0_reg = 0b10000010,
-  .config1_reg = 0b00011000,
+  /* PRE=MCLK/1; conversion filter selected in daq_rates.h. */
+  .config1_reg = (DAQ_ADC_OSR_BITS << 2U),
   .config2_reg = 0b11001111,
   .config3_reg = 0b11000000,
   .irq_reg = 0b00000011,
@@ -246,6 +250,7 @@ static void mcp3564r_store_raw24(uint32_t raw24)
   mcp3564r_sample_entry_t entry;
 
   entry.raw24 = raw24 & 0x00FFFFFFU;
+  entry.monotonic_ms = HAL_GetTick();
   g_mcp3564r.latest_raw24 = entry.raw24;
 
   if (g_mcp3564r.queue_count >= MCP3564R_SAMPLE_QUEUE_DEPTH)
@@ -373,14 +378,18 @@ static HAL_StatusTypeDef mcp3564r_start_read_dma(void)
 
 static HAL_StatusTypeDef mcp3564r_arm_start_offset_timer(void)
 {
-  if (g_mcp3564r.start_offset_us == 0U)
+  const uint32_t delay_us = (g_mcp3564r.first_conversion_pending != 0U)
+                                ? MCP3564R_FIRST_CONVERSION_US
+                                : g_mcp3564r.start_offset_us;
+
+  if (delay_us == 0U)
   {
     return mcp3564r_start_read_dma();
   }
 
   (void)HAL_TIM_Base_Stop_IT(&htim2);
   __HAL_TIM_SET_COUNTER(&htim2, 0U);
-  __HAL_TIM_SET_AUTORELOAD(&htim2, g_mcp3564r.start_offset_us - 1U);
+  __HAL_TIM_SET_AUTORELOAD(&htim2, delay_us - 1U);
   (void)HAL_TIM_GenerateEvent(&htim2, TIM_EVENTSOURCE_UPDATE);
   __HAL_TIM_SET_COUNTER(&htim2, 0U);
   __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_UPDATE);
@@ -416,25 +425,30 @@ UINT mcp3564r_init(SPI_HandleTypeDef *spi)
   memset(&g_mcp3564r, 0, sizeof(g_mcp3564r));
   g_mcp3564r.spi = spi;
   g_mcp3564r.start_offset_us = MCP3564R_DEFAULT_START_OFFSET_US;
+  g_mcp3564r.first_conversion_pending = 1U;
 
   EN_12V;
   HAL_Delay(10U);
 
   if (mcp3564r_reset_device() != HAL_OK)
   {
+    g_mcp3564r_init_status = 1U;
     return TX_NOT_DONE;
   }
 
   if (mcp3564r_write_config(&MCP3564R_DEFAULT_CONFIG) != HAL_OK)
   {
+    g_mcp3564r_init_status = 2U;
     return TX_NOT_DONE;
   }
 
   if (mcp3564r_start_cycle() != HAL_OK)
   {
+    g_mcp3564r_init_status = 3U;
     return TX_NOT_DONE;
   }
 
+  g_mcp3564r_init_status = 0U;
   return TX_SUCCESS;
 }
 
@@ -477,6 +491,7 @@ void mcp3564r_dma_complete(void)
                        | ((uint32_t)g_mcp3564r_rx_frame[2]);
 
   mcp3564r_store_raw24(raw24);
+  g_mcp3564r.first_conversion_pending = 0U;
   g_mcp3564r.dma_busy = 0U;
   mcp3564r_deselect();
   (void)mcp3564r_start_cycle();
@@ -507,6 +522,7 @@ UINT mcp3564r_get_sample(mcp3564r_sample_t *sample)
   uint8_t dma_busy;
   uint8_t queued_samples;
   uint32_t overrun_count;
+  uint32_t monotonic_ms = 0U;
 
   if (sample == NULL)
   {
@@ -532,6 +548,7 @@ UINT mcp3564r_get_sample(mcp3564r_sample_t *sample)
     g_mcp3564r.queue_count--;
 
     raw24 = entry.raw24;
+    monotonic_ms = entry.monotonic_ms;
     sample_valid = 1U;
     queued_samples = g_mcp3564r.queue_count;
   }
@@ -551,12 +568,26 @@ UINT mcp3564r_get_sample(mcp3564r_sample_t *sample)
   sample->dma_busy = dma_busy;
   sample->queued_samples = queued_samples;
   sample->overrun_count = overrun_count;
+  sample->monotonic_ms = monotonic_ms;
   sample->code = code;
   sample->voltage_v = mcp3564r_code_to_loadcell_kg1000(code);
   sample->loadcell_kg1000 = sample->voltage_v;
   sample->temperature_c = 0.0f;
 
   return TX_SUCCESS;
+}
+
+uint8_t mcp3564r_pending_samples(void)
+{
+  uint32_t primask = __get_PRIMASK();
+  uint8_t count;
+  __disable_irq();
+  count = g_mcp3564r.queue_count;
+  if (primask == 0U)
+  {
+    __enable_irq();
+  }
+  return count;
 }
 
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
