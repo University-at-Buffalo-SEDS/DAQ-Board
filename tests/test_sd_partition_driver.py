@@ -12,7 +12,7 @@ class SdPartitionDriverTests(unittest.TestCase):
         source = (ROOT / "Core/Src/sd_card.c").read_text()
         driver = "static VOID sd_filex_driver" + source.split(
             "static VOID sd_filex_driver", 1)[1].split(
-            "static UINT sd_open_timestamped_log", 1)[0]
+            "static UINT sd_open_log", 1)[0]
         code = r"""
 #include <assert.h>
 #include <stdint.h>
@@ -75,4 +75,3 @@ int main(void) {
                  "-", "-o", str(binary)], input=code, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             subprocess.run([str(binary)], check=True)
-

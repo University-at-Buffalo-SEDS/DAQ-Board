@@ -58,6 +58,10 @@ static sd_raw_slot_t g_sd_raw_slots[SD_RAW_QUEUE_DEPTH];
 
 static FX_MEDIA g_sd_media;
 static FX_FILE g_sd_file;
+static FX_FILE g_sd_telemetry_file;
+static uint8_t g_telemetry_file_open;
+static daq_calibration_t g_sd_telemetry_calibration;
+static char g_sd_telemetry_filename[64];
 static UCHAR g_sd_media_cache[SD_MEDIA_CACHE_SIZE] SD_ALIGN_32;
 static UCHAR g_sd_transfer_buffer[SD_TRANSFER_SECTORS * SD_SECTOR_SIZE] SD_ALIGN_32;
 static UCHAR g_sd_write_buffer[4096U];
@@ -224,7 +228,8 @@ static VOID sd_filex_driver(FX_MEDIA *media)
   media->fx_media_driver_status = status;
 }
 
-static UINT sd_open_timestamped_log(const daq_calibration_t *requested)
+static UINT sd_open_log(FX_FILE *file, char *g_sd_filename, size_t filename_size,
+                        const char *prefix, const daq_calibration_t *requested)
 {
   const uint64_t stamp = telemetry_unix_ms();
   daq_calibration_t calibration;
@@ -236,9 +241,9 @@ static UINT sd_open_timestamped_log(const daq_calibration_t *requested)
     const uint64_t name_stamp = (stamp != 0U) ? stamp : telemetry_now_ms();
     char stamp_text[21];
     sd_format_u64(stamp_text, name_stamp);
-    (void)snprintf(g_sd_filename, sizeof(g_sd_filename),
-                   "DAQ_%s_%03lu.CSV",
-                   stamp_text,
+    (void)snprintf(g_sd_filename, filename_size,
+                   "%s_%s_%03lu.CSV",
+                   prefix, stamp_text,
                    (unsigned long)suffix);
     const UINT create_status = fx_file_create(&g_sd_media, g_sd_filename);
     if (create_status == FX_SUCCESS)
@@ -257,17 +262,16 @@ static UINT sd_open_timestamped_log(const daq_calibration_t *requested)
     return FX_NO_MORE_SPACE;
   }
 
-  UINT status = fx_file_open(&g_sd_media, &g_sd_file, g_sd_filename,
+  UINT status = fx_file_open(&g_sd_media, file, g_sd_filename,
                              FX_OPEN_FOR_WRITE);
   if (status != FX_SUCCESS)
   {
     return status;
   }
-  g_file_open = 1U;
 
   static const char header[] =
       "network_unix_ms,monotonic_ms,sensor,value,raw_adc_code,raw_value,calibrated_value\r\n";
-  status = fx_file_write(&g_sd_file, (VOID *)header, sizeof(header) - 1U);
+  status = fx_file_write(file, (VOID *)header, sizeof(header) - 1U);
   if (status == FX_SUCCESS)
   {
     char calibration_line[192];
@@ -280,15 +284,55 @@ static UINT sd_open_timestamped_log(const daq_calibration_t *requested)
         calibration_line, sizeof(calibration_line),
         "# calibration,kg1000_slope=%s,kg1000_intercept=%s,iadc_slope=%s,iadc_intercept=%s\r\n",
         coefficients[0], coefficients[1], coefficients[2], coefficients[3]);
-    if (len <= 0 || (size_t)len >= sizeof(calibration_line)) return FX_IO_ERROR;
-    status = fx_file_write(&g_sd_file, calibration_line, (ULONG)len);
+    if (len <= 0 || (size_t)len >= sizeof(calibration_line))
+      status = FX_IO_ERROR;
+    else
+      status = fx_file_write(file, calibration_line, (ULONG)len);
   }
   if (status == FX_SUCCESS)
   {
     status = fx_media_flush(&g_sd_media);
+  }
+  if (status != FX_SUCCESS) (void)fx_file_close(file);
+  return status;
+}
+
+static UINT sd_open_timestamped_log(const daq_calibration_t *requested)
+{
+  daq_calibration_t calibration;
+  (void)sd_calibration_snapshot(&calibration);
+  if (requested != NULL) calibration = *requested;
+  const UINT status = sd_open_log(&g_sd_file, g_sd_filename,
+                                  sizeof(g_sd_filename), "DAQ", &calibration);
+  if (status == FX_SUCCESS)
+  {
+    g_file_open = 1U;
     g_sd_open_calibration = calibration;
   }
   return status;
+}
+
+/* Delayed telemetry rows rotate only their own file, never the raw log. */
+static UINT sd_write_telemetry_row(const sd_line_slot_t *slot)
+{
+  if (g_telemetry_file_open != 0U &&
+      memcmp(&g_sd_telemetry_calibration, &slot->calibration,
+             sizeof(slot->calibration)) != 0)
+  {
+    if (fx_media_flush(&g_sd_media) != FX_SUCCESS) return FX_IO_ERROR;
+    if (fx_file_close(&g_sd_telemetry_file) != FX_SUCCESS) return FX_IO_ERROR;
+    g_telemetry_file_open = 0U;
+  }
+  if (g_telemetry_file_open == 0U)
+  {
+    const UINT status = sd_open_log(&g_sd_telemetry_file,
+        g_sd_telemetry_filename, sizeof(g_sd_telemetry_filename),
+        "DAQ_TELEMETRY", &slot->calibration);
+    if (status != FX_SUCCESS) return status;
+    g_telemetry_file_open = 1U;
+    g_sd_telemetry_calibration = slot->calibration;
+  }
+  return fx_file_write(&g_sd_telemetry_file, (VOID *)slot->line, slot->len);
 }
 
 static UINT sd_marker_exists(void)
@@ -634,8 +678,7 @@ void sd_card_writer_thread_entry(ULONG initial_input)
       sd_line_slot_t *slot = (sd_line_slot_t *)(uintptr_t)message;
       if (slot != NULL)
       {
-        if (sd_select_calibration(&slot->calibration) == FX_SUCCESS &&
-            sd_write_bytes(slot->line, slot->len) == FX_SUCCESS)
+        if (sd_write_telemetry_row(slot) == FX_SUCCESS)
         {
           g_sd_csv_rows_written_count++;
         }

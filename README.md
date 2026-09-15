@@ -41,7 +41,12 @@ is created. Later reboots see the marker and **do not reformat the card**. Do no
 insert a card containing data you want to retain unless it was already prepared
 by this firmware and contains that marker.
 
-Firmware creates a new `DAQ_<network-time>_<sequence>.CSV` file on every boot.
+Firmware creates a new `DAQ_<network-time>_<sequence>.CSV` raw ADC file on every boot.
+Only `mcp3564r_raw` samples go into this file. Filtered `kg1000_network` rows,
+other telemetry snapshots, and packet diagnostics go into separate
+`DAQ_TELEMETRY_<network-time>_<sequence>.CSV` files. Each stream rotates
+independently when its queued records change calibration; delayed telemetry
+cannot mix into or rotate the raw ADC log.
 The CSV contains the
 network timestamp, local monotonic timestamp, sensor name, and value; the
 `mcp3564r_raw` rows retain every drained raw sigma-delta ADC conversion while
