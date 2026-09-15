@@ -339,6 +339,14 @@ static UINT sd_format_and_mark(void)
   {
     return status;
   }
+  /* Format supplies the boot-record label; also create the directory label
+   * used by desktop volume browsers before marking provisioning complete. */
+  status = fx_media_volume_set(&g_sd_media, "SEDS_DAQ");
+  if (status != FX_SUCCESS)
+  {
+    (void)fx_media_close(&g_sd_media);
+    return status;
+  }
   status = fx_file_create(&g_sd_media, SD_PROVISION_MARKER);
   if ((status != FX_SUCCESS) && (status != FX_ALREADY_CREATED))
   {
@@ -365,7 +373,12 @@ static UINT sd_mount_or_provision(void)
                               g_sd_media_cache, sizeof(g_sd_media_cache));
   if ((status == FX_SUCCESS) && (sd_marker_exists() == FX_SUCCESS))
   {
-    return FX_SUCCESS;
+    /* Upgrade cards provisioned before the directory label was added,
+     * preserving their files and provisioning marker. */
+    status = fx_media_volume_set(&g_sd_media, "SEDS_DAQ");
+    if (status == FX_SUCCESS) status = fx_media_flush(&g_sd_media);
+    if (status != FX_SUCCESS) (void)fx_media_close(&g_sd_media);
+    return status;
   }
   if (status == FX_SUCCESS)
   {

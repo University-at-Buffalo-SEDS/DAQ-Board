@@ -6,6 +6,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SdStartupTests(unittest.TestCase):
+    def test_provisioning_sets_directory_label_before_marker(self):
+        source = (ROOT / "Core/Src/sd_card.c").read_text()
+        provision = source.split("static UINT sd_format_and_mark(void)", 1)[1].split(
+            "static UINT sd_mount_or_provision(void)", 1)[0]
+        self.assertLess(provision.index("fx_media_volume_set"),
+                        provision.index("fx_file_create"))
+        self.assertIn("SEDS_DAQ", provision)
+        mounted = source.split("static UINT sd_mount_or_provision(void)", 1)[1].split(
+            "static UINT sd_flush_pending", 1)[0]
+        marked = mounted.split("sd_marker_exists() == FX_SUCCESS", 1)[1].split(
+            "return status;", 1)[0]
+        self.assertIn("fx_media_volume_set", marked)
+        self.assertNotIn("sd_format_and_mark", marked)
+
     def test_card_negotiation_is_deferred_to_worker(self):
         main = (ROOT / "Core/Src/main.c").read_text()
         init = main.split("static void MX_SDMMC1_SD_Init(void)\n{", 1)[1].split(
