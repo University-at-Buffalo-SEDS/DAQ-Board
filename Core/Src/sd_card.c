@@ -100,6 +100,19 @@ static uint32_t sd_calibration_snapshot(daq_calibration_t *calibration)
   return g_sd_calibration_generation;
 }
 
+static UINT sd_wait_ready(void)
+{
+  const uint32_t started = HAL_GetTick();
+  while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER)
+  {
+    if ((uint32_t)(HAL_GetTick() - started) >= 2000U) return FX_IO_ERROR;
+    /* Card programming is asynchronous even for HAL polling writes. Yield
+     * while it completes so logging cannot monopolize the networking CPU. */
+    tx_thread_sleep(1U);
+  }
+  return FX_SUCCESS;
+}
+
 static UINT sd_hal_read(UCHAR *destination, ULONG sector, ULONG sector_count)
 {
   while (sector_count != 0U)
@@ -109,7 +122,8 @@ static UINT sd_hal_read(UCHAR *destination, ULONG sector, ULONG sector_count)
                             : sector_count;
     const size_t bytes = (size_t)count * SD_SECTOR_SIZE;
 
-    if (HAL_SD_ReadBlocks(&hsd1, g_sd_transfer_buffer, sector, count, 2000U) != HAL_OK)
+    if ((sd_wait_ready() != FX_SUCCESS) ||
+        (HAL_SD_ReadBlocks(&hsd1, g_sd_transfer_buffer, sector, count, 2000U) != HAL_OK))
     {
       return FX_IO_ERROR;
     }
@@ -134,7 +148,9 @@ static UINT sd_hal_write(const UCHAR *source, ULONG sector, ULONG sector_count)
 
     memcpy(g_sd_transfer_buffer, source, bytes);
     /* Polling HAL consumes this buffer with CPU loads; no DMA handoff. */
-    if (HAL_SD_WriteBlocks(&hsd1, g_sd_transfer_buffer, sector, count, 2000U) != HAL_OK)
+    if ((sd_wait_ready() != FX_SUCCESS) ||
+        (HAL_SD_WriteBlocks(&hsd1, g_sd_transfer_buffer, sector, count, 2000U) != HAL_OK) ||
+        (sd_wait_ready() != FX_SUCCESS))
     {
       return FX_IO_ERROR;
     }
@@ -184,7 +200,7 @@ static VOID sd_filex_driver(FX_MEDIA *media)
       break;
 
     case FX_DRIVER_BOOT_WRITE:
-      status = sd_hal_write(media->fx_media_driver_buffer, 0U,
+      status = sd_hal_write(media->fx_media_driver_buffer, media->fx_media_hidden_sectors,
                             media->fx_media_driver_sectors);
       break;
 

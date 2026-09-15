@@ -57,9 +57,9 @@ int main(void) {
 
     def test_chunking_data_integrity_and_errors(self):
         source = (ROOT / "Core/Src/sd_card.c").read_text()
-        adapter = source.split("static UINT sd_hal_read", 1)[1].split(
+        adapter = source.split("static UINT sd_wait_ready", 1)[1].split(
             "static VOID sd_filex_driver", 1)[0]
-        adapter = "static UINT sd_hal_read" + adapter
+        adapter = "static UINT sd_wait_ready" + adapter
         # No cache APIs are supplied: DMA cache maintenance is invalid for
         # these CPU-only transfers and must not creep back into the adapter.
         code = r'''
@@ -73,16 +73,26 @@ typedef unsigned char UCHAR;
 #define SD_TRANSFER_SECTORS 8U
 #define SD_SECTOR_SIZE 512U
 #define HAL_OK 0
+#define HAL_SD_CARD_TRANSFER 4U
 #define FX_SUCCESS 0U
 #define FX_IO_ERROR 1U
 static int hsd1;
+static unsigned tick, busy, program_ticks = 2U;
+static unsigned HAL_GetTick(void) { return tick; }
+static void tx_thread_sleep(unsigned n) { tick += n; }
+static unsigned HAL_SD_GetCardState(int *h) {
+  assert(h == &hsd1);
+  if (busy) { --busy; return 7U; }
+  return HAL_SD_CARD_TRANSFER;
+}
 static UCHAR g_sd_transfer_buffer[8*512];
 static UCHAR disk[20*512];
 static unsigned calls, fail_call;
 static int transfer(UCHAR *buffer, ULONG sector, ULONG count, int write) {
+  assert(busy == 0U); /* No command may interrupt card programming. */
   assert(count > 0 && count <= 8 && sector + count <= 20);
   if (++calls == fail_call) return 1;
-  if (write) memcpy(disk + sector*512, buffer, count*512);
+  if (write) { memcpy(disk + sector*512, buffer, count*512); busy = program_ticks; }
   else memcpy(buffer, disk + sector*512, count*512);
   return HAL_OK;
 }
@@ -107,6 +117,12 @@ int main(void) {
   calls=0;
   assert(sd_hal_read(output, 2, 0) == FX_SUCCESS && calls == 0);
   assert(sd_hal_write(input, 2, 0) == FX_SUCCESS && calls == 0);
+  fail_call=0; busy=5000; tick=0;
+  assert(sd_hal_read(output, 2, 1) == FX_IO_ERROR && calls == 0);
+  assert(tick == 2000U);
+  busy=0; tick=0; program_ticks=5000;
+  assert(sd_hal_write(input, 2, 1) == FX_IO_ERROR && calls == 1);
+  assert(tick == 2000U); /* Returning HAL_OK is not durable completion. */
 }
 '''
         with tempfile.TemporaryDirectory() as tmp:
