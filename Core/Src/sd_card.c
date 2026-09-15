@@ -592,8 +592,6 @@ void sd_card_writer_thread_entry(ULONG initial_input)
             g_sd_ready = 1U;
             g_sd_init_stage = 5U;
             failed_retries = 0U;
-            (void)log_telemetry_string_asynchronous(
-                SEDS_DT_WARNING, "DAQ SD card is available; logging started");
           }
         }
 

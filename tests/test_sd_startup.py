@@ -6,6 +6,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SdStartupTests(unittest.TestCase):
+    def test_successful_logging_does_not_publish_a_warning(self):
+        source = (ROOT / "Core/Src/sd_card.c").read_text()
+        success = source.split("g_sd_ready = 1U;", 1)[1].split(
+            "if (g_sd_ready == 0U)", 1)[0]
+        self.assertNotIn("log_telemetry_string_asynchronous", success)
+        self.assertNotIn("DAQ SD card is available; logging started", source)
+        self.assertIn("DAQ SD card unavailable; acquisition continues without logging", source)
+
     def test_provisioning_sets_directory_label_before_marker(self):
         source = (ROOT / "Core/Src/sd_card.c").read_text()
         provision = source.split("static UINT sd_format_and_mark(void)", 1)[1].split(
