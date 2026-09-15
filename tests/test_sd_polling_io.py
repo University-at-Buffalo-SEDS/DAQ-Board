@@ -55,6 +55,12 @@ int main(void) {
             self.assertEqual(result.returncode, 0, result.stderr)
             subprocess.run([str(binary)], check=True)
 
+    def test_polling_transfers_enable_hardware_flow_control(self):
+        self.assertIn("hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_ENABLE;",
+                      (ROOT / "Core/Src/main.c").read_text())
+        self.assertIn("SDMMC1.HardwareFlowControl=SDMMC_HARDWARE_FLOW_CONTROL_ENABLE",
+                      (ROOT / "DAQ-Board.ioc").read_text())
+
     def test_chunking_data_integrity_and_errors(self):
         source = (ROOT / "Core/Src/sd_card.c").read_text()
         adapter = source.split("static UINT sd_wait_ready", 1)[1].split(

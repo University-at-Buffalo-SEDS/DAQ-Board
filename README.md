@@ -173,6 +173,11 @@ See Microchip MCP3561/2/4R datasheet DS20006391C, conversion-time table.
 
 The SDMMC kernel runs at 80 MHz; divider 2 limits card transfers to 20 MHz
 without requiring UHS negotiation. Keep `SDMMC1.ClockDiv=2` in CubeMX.
+Keep SDMMC hardware flow control enabled in both CubeMX and the generated
+handle configuration: polling transfers share CPU time with acquisition and
+networking. The block adapter waits for card programming to complete between
+writes, with a bounded timeout and RTOS yields. Partition boot-sector writes
+use the mounted partition offset rather than overwriting the partition table.
 The board CMake applies `sd_hal_limits.h` to HAL sources, limiting software
 status waits to 2 seconds rather than the vendor's effectively infinite wait.
 The FileX block adapter uses polling HAL transfers, not DMA. Its CPU-written
