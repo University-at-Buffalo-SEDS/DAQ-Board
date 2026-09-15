@@ -43,6 +43,10 @@ target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
 
+# Keep SD status waits bounded without modifying CubeMX's vendor sources.
+target_compile_options(STM32_Drivers PRIVATE
+    "$<$<COMPILE_LANGUAGE:C>:-include${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/sd_hal_limits.h>")
+
 # FileX provides a real FAT filesystem for high-rate DAQ logging. Fetch the
 # released source at configure time, matching the dependency model used for
 # SEDSNet and LaunchCore while keeping generated/vendor trees out of this repo.

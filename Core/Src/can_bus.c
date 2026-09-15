@@ -12,7 +12,7 @@
 //  - Uses CAN FD frames for fragmentation (default payload 64 bytes).
 //  - Fragment frames are distinguished by a small "magic" header in the
 //  payload.
-//  - Reassembly is bounded (no malloc). Oldest RX frames are dropped on ring
+//  - Reassembly is bounded (no malloc). New RX frames are dropped on ring
 //  overflow.
 //  - One producer (ISR) and one consumer (thread calling can_bus_process_rx()).
 //  - You can call can_bus_process_rx() from a ThreadX thread, or main
@@ -26,6 +26,8 @@
 
 #include "can_bus.h"
 #include "main.h"
+#include "tx_api.h"
+#include "tx_thread.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -42,7 +44,7 @@
 #endif
 
 #ifndef CAN_BUS_POLLING
-#define CAN_BUS_POLLING 1
+#define CAN_BUS_POLLING 0
 #endif
 
 #ifndef CAN_BUS_TX_ENQUEUE_TIMEOUT_MS
@@ -185,6 +187,8 @@ static volatile uint16_t g_rx_tail = 0;
 volatile uint32_t g_fdcan_bus_off_count = 0;
 volatile uint32_t g_fdcan_recovery_count = 0;
 volatile uint32_t g_fdcan_rx_count = 0;
+volatile uint32_t g_fdcan_rx_hw_overflow_count = 0;
+volatile uint32_t g_fdcan_rx_ring_drop_count = 0;
 volatile uint32_t g_fdcan_tx_ok_count = 0;
 volatile uint32_t g_fdcan_tx_fail_count = 0;
 
@@ -212,6 +216,12 @@ static HAL_StatusTypeDef can_bus_wait_for_tx_slot(void) {
       return HAL_OK;
     if ((uint32_t)(HAL_GetTick() - started_ms) >= CAN_BUS_TX_ENQUEUE_TIMEOUT_MS)
       return HAL_TIMEOUT;
+    /* An unacknowledged bus must not spend the whole timeout spinning at
+     * telemetry priority: lower-priority ADC/SD work must keep draining.
+     * Retain the deadline and never sleep in interrupt/startup context. */
+    if (__get_IPSR() == 0U && TX_THREAD_GET_SYSTEM_STATE() == 0U &&
+        tx_thread_identify() != TX_NULL)
+      (void)tx_thread_sleep(1U);
   }
 }
 static can_bus_rx_frame_t g_rx_ring[CAN_BUS_RX_RING_DEPTH];
@@ -229,20 +239,20 @@ static inline int __attribute__((unused)) rb_is_empty(void) {
 
 static inline int rb_is_full(void) { return rb_next(g_rx_head) == g_rx_tail; }
 
-// Push frame from ISR. Drop-oldest on overflow (hybrid “stay current”
-// behavior).
+// Only the consumer writes tail. Drop-newest on overflow so an interrupt
+// cannot overwrite the slot the consumer is copying or race its tail update.
 //
 // Memory ordering:
 //  - We must ensure slot writes are visible before publishing head.
 //  - `__DMB()` acts as a release barrier here.
-static inline void rb_push_drop_oldest(uint32_t std_id, const uint8_t *data,
+static inline void rb_push_drop_newest(uint32_t std_id, const uint8_t *data,
                                        uint8_t len) {
   if (len > 64)
     len = 64;
 
   if (rb_is_full()) {
-    // drop oldest
-    g_rx_tail = rb_next(g_rx_tail);
+    g_fdcan_rx_ring_drop_count++;
+    return;
   }
 
   uint16_t h = g_rx_head;
@@ -332,7 +342,7 @@ static void can_bus_drain_rx_fifo(FDCAN_HandleTypeDef *hfdcan, uint32_t rx_fifo)
     }
     g_fdcan_rx_count++;
 
-    rb_push_drop_oldest(hdr.Identifier & 0x7FFu, data,
+    rb_push_drop_newest(hdr.Identifier & 0x7FFu, data,
                         (uint8_t)can_bus_dlc_to_len(hdr.DataLength));
   }
 }
@@ -512,23 +522,26 @@ static void handle_rx_frame(const can_bus_rx_frame_t *f, uint32_t now_ms) {
 
 void can_bus_init(FDCAN_HandleTypeDef *hfdcan) {
   g_hfdcan = hfdcan;
-  // subscribers static-zeroed
-  if (hfdcan != NULL) {
-    (void)HAL_FDCAN_Stop(hfdcan);
-    (void)can_bus_configure_filters(hfdcan);
-#if !CAN_BUS_POLLING
-    (void)HAL_FDCAN_ActivateNotification(
-        hfdcan, FDCAN_IT_RX_FIFO0_NEW_MESSAGE | FDCAN_IT_RX_FIFO1_NEW_MESSAGE, 0);
-#endif
-    (void)HAL_FDCAN_Start(hfdcan);
-  }
-
-  // reset rings + reasm
   g_rx_head = 0;
   g_rx_tail = 0;
   for (unsigned i = 0; i < CAN_BUS_REASM_SLOTS; i++) {
     reasm_reset(&g_reasm[i]);
   }
+  // subscribers static-zeroed
+  if (hfdcan != NULL) {
+    (void)HAL_FDCAN_Stop(hfdcan);
+    (void)can_bus_configure_filters(hfdcan);
+    /* HAL only permits RX reads in BUSY state. Start before enabling an
+     * interrupt that may already be pending from a retained RX FIFO. */
+    if (HAL_FDCAN_Start(hfdcan) != HAL_OK)
+      return;
+#if !CAN_BUS_POLLING
+    (void)HAL_FDCAN_ActivateNotification(
+        hfdcan, FDCAN_IT_RX_FIFO0_NEW_MESSAGE | FDCAN_IT_RX_FIFO1_NEW_MESSAGE |
+                    FDCAN_IT_RX_FIFO0_MESSAGE_LOST | FDCAN_IT_RX_FIFO1_MESSAGE_LOST, 0);
+#endif
+  }
+
 }
 
 HAL_StatusTypeDef can_bus_subscribe_rx(can_bus_rx_cb_t cb, void *user) {
@@ -714,7 +727,13 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan,
     return;
   }
 
-  if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == 0U) {
+  if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_MESSAGE_LOST) != 0U)
+    g_fdcan_rx_hw_overflow_count++;
+
+  /* Overflow may be the only remaining event after NEW_MESSAGE was cleared.
+   * Drain retained frames then too, or a full FIFO can stay wedged forever. */
+  if ((RxFifo0ITs & (FDCAN_IT_RX_FIFO0_NEW_MESSAGE |
+                    FDCAN_IT_RX_FIFO0_MESSAGE_LOST)) == 0U) {
     return;
   }
 
@@ -727,7 +746,11 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan,
     return;
   }
 
-  if ((RxFifo1ITs & FDCAN_IT_RX_FIFO1_NEW_MESSAGE) == 0U) {
+  if ((RxFifo1ITs & FDCAN_IT_RX_FIFO1_MESSAGE_LOST) != 0U)
+    g_fdcan_rx_hw_overflow_count++;
+
+  if ((RxFifo1ITs & (FDCAN_IT_RX_FIFO1_NEW_MESSAGE |
+                    FDCAN_IT_RX_FIFO1_MESSAGE_LOST)) == 0U) {
     return;
   }
 

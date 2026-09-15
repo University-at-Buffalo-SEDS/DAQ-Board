@@ -16,6 +16,30 @@ TX_THREAD telemetry_thread;
 
 volatile uint32_t g_telemetry_stack_remaining = TELEMETRY_THREAD_STACK_SIZE;
 
+/* ST-Link requests a snapshot by setting request to 1. Export in the owning
+ * thread, never by calling Rust/router functions from a halted debugger.
+ * Idle in normal operation; buffers remain stable until the next request. */
+volatile uint32_t g_telemetry_diag_request = 0U;
+volatile uint32_t g_telemetry_diag_sequence = 0U;
+volatile int32_t g_telemetry_diag_runtime_result = SEDS_OK;
+volatile int32_t g_telemetry_diag_topology_result = SEDS_OK;
+char g_telemetry_diag_runtime[12288];
+char g_telemetry_diag_topology[8192];
+
+static void sample_router_diagnostics(void)
+{
+    if (g_telemetry_diag_request == 0U || g_router.r == NULL) return;
+    g_telemetry_diag_runtime[0] = '\0';
+    g_telemetry_diag_topology[0] = '\0';
+    g_telemetry_diag_runtime_result = seds_router_export_runtime_stats(
+        g_router.r, g_telemetry_diag_runtime, sizeof(g_telemetry_diag_runtime));
+    g_telemetry_diag_topology_result = seds_router_export_topology(
+        g_router.r, g_telemetry_diag_topology, sizeof(g_telemetry_diag_topology));
+    __DMB();
+    g_telemetry_diag_sequence++;
+    g_telemetry_diag_request = 0U;
+}
+
 static void sample_telemetry_stack(void)
 {
     const volatile uint32_t *const start =
@@ -74,6 +98,7 @@ void telemetry_thread_entry(ULONG initial_input)
 #endif
         (void)telemetry_poll_timesync();
         ota_stream_poll();
+        sample_router_diagnostics();
 
         /* The DAQ tick is 20 us, not 1 ms. Bound this higher-priority
          * worker's polling and diagnostic cost so ADC/SD workers can run. */

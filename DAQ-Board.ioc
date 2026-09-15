@@ -1,4 +1,6 @@
 #MicroXplorer Configuration settings - do not modify
+SDMMC1.ClockDiv=2
+SDMMC1.IPParameters=ClockDiv
 ADC1.CommonPathInternal=null|null|null|null
 ADC1.IPParameters=NbrOfConversion,master,CommonPathInternal
 ADC1.NbrOfConversion=1

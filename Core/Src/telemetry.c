@@ -253,6 +253,8 @@ static uint64_t node_now_since_ms(void *user) {
 }
 
 #ifdef TELEMETRY_CAN_BUS
+volatile uint32_t g_daq_loadcell_wire_tx_count = 0U;
+volatile uint32_t g_daq_loadcell_wire_fail_count = 0U;
 SedsResult tx_send(const uint8_t *bytes, size_t len, void *user) {
   (void)user;
 
@@ -264,12 +266,16 @@ SedsResult tx_send(const uint8_t *bytes, size_t len, void *user) {
           ? 0x007U
           : 0x107U;
   if (can_bus_send_large(bytes, len, can_id) == HAL_OK) {
+    if (sim_probe_packed_data_type(bytes, len) == (uint32_t)SEDS_DT_KG1000)
+      g_daq_loadcell_wire_tx_count++;
     /* LED1 is the CAN egress activity indicator.  Toggle only after the
      * complete SEDSNet packet has been accepted by the hardware transport. */
     HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
     sim_probe_observe_can_tx(bytes, len);
     return SEDS_OK;
   }
+  if (sim_probe_packed_data_type(bytes, len) == (uint32_t)SEDS_DT_KG1000)
+    g_daq_loadcell_wire_fail_count++;
   return SEDS_IO;
 }
 #endif
@@ -549,6 +555,18 @@ SedsResult init_telemetry_router(void) {
     return SEDS_ERR;
   }
 
+#ifdef TELEMETRY_CAN_BUS
+  /* This board's live load-cell stream must remain on CAN while discovery
+   * loses/relearns GroundStation. Other types retain discovered routing. */
+  result = seds_router_set_typed_route(r, -1, (uint32_t)SEDS_DT_KG1000,
+                                       g_can_side_id, true);
+  if (result != SEDS_OK) {
+    seds_router_free(r);
+    g_can_side_id = -1;
+    return result;
+  }
+#endif
+
   result = telemetry_configure_timesync_locked(r);
   if (result != SEDS_OK) {
     printf("Error: failed to configure telemetry timesync: %d\r\n", (int)result);
@@ -718,6 +736,8 @@ SedsResult process_rx_queue_timeout(uint32_t timeout_ms) {
 #endif
 }
 
+volatile uint32_t g_daq_queue_service_error_count = 0U;
+volatile int32_t g_daq_queue_service_last_result = SEDS_OK;
 SedsResult process_all_queues_timeout(uint32_t timeout_ms) {
 #ifndef TELEMETRY_ENABLED
   (void)timeout_ms;
@@ -727,7 +747,10 @@ SedsResult process_all_queues_timeout(uint32_t timeout_ms) {
     return SEDS_ERR;
   }
 
-  return seds_router_process_all_queues_with_timeout(g_router.r, timeout_ms);
+  const SedsResult result = seds_router_process_all_queues_with_timeout(g_router.r, timeout_ms);
+  g_daq_queue_service_last_result = result;
+  if (result != SEDS_OK) g_daq_queue_service_error_count++;
+  return result;
 #endif
 }
 

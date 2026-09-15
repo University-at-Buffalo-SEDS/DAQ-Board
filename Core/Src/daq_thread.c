@@ -127,10 +127,10 @@ static void daq_publish_loadcell(const daq_snapshot_t *snapshot, const daq_calib
     return;
   }
 
-  /* Use one calibrated 50 Hz aggregate for both live telemetry and the SD
-   * replay row. Raw 3.90625 ksps conversions remain in mcp3564r_raw rows. */
-  loadcell_kg1000 =
-      (calibration->kg1000_slope * snapshot->ext_adc_loadcell_kg1000 + calibration->kg1000_intercept);
+  /* CAN carries the uncalibrated window average. GroundStation owns display
+   * calibration; SD raw records separately retain calibrated values and the
+   * coefficients. Never apply calibration twice along the network path. */
+  loadcell_kg1000 = snapshot->ext_adc_loadcell_kg1000;
 
 #if (DISABLE_SD_CARD == 0U)
   if (sd_card_enqueue_csv_row("kg1000_network",
@@ -256,11 +256,9 @@ void daq_thread_entry(ULONG initial_input)
 #endif
     }
 
-    if (power_loss_latched != 0U)
-    {
-      tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 10U);
-      continue;
-    }
+    /* A power-loss notification asks the SD worker to flush. It must not
+     * permanently throttle acquisition/network reporting to 10 Hz after
+     * one low-voltage observation, including a startup transient. */
 
     /* Include acquisition/publish work in the 20 ms period. Sleeping for a
      * whole period after doing that work silently reduces the sample rate. */

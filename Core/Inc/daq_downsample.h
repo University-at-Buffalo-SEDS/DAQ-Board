@@ -14,7 +14,12 @@ static inline bool daq_downsample_add(daq_downsample_t *state, float mean,
     if (count && isfinite(mean)) { state->sum += (double)mean * count; state->count += count; }
     if ((uint32_t)(now_ms - state->started_ms) < period_ms || !state->count) return false;
     *output = (float)(state->sum / state->count);
-    state->sum = 0; state->count = 0; state->started_ms = now_ms;
+    state->sum = 0; state->count = 0;
+    /* Retain the reporting phase across scheduler jitter. Starting a new
+     * period at each late observation progressively lowers the report rate.
+     * Skip missed windows rather than emitting stale catch-up bursts. */
+    const uint32_t elapsed = now_ms - state->started_ms;
+    state->started_ms += period_ms ? (elapsed / period_ms) * period_ms : elapsed;
     return true;
 }
 #endif

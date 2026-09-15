@@ -10,7 +10,6 @@
 #include <string.h>
 
 extern SD_HandleTypeDef hsd1;
-extern DCACHE_HandleTypeDef hdcache1;
 UINT _fx_partition_offset_calculate(void *partition_sector, UINT partition,
                                     ULONG *partition_start,
                                     ULONG *partition_size);
@@ -114,9 +113,8 @@ static UINT sd_hal_read(UCHAR *destination, ULONG sector, ULONG sector_count)
     {
       return FX_IO_ERROR;
     }
-    (void)HAL_DCACHE_InvalidateByAddr(&hdcache1,
-                                      (const uint32_t *)g_sd_transfer_buffer,
-                                      (uint32_t)bytes);
+    /* Polling HAL reads the FIFO with CPU stores, not DMA. Invalidating
+     * here could discard those fresh stores before FileX sees them. */
     memcpy(destination, g_sd_transfer_buffer, bytes);
     destination += bytes;
     sector += count;
@@ -135,9 +133,7 @@ static UINT sd_hal_write(const UCHAR *source, ULONG sector, ULONG sector_count)
     const size_t bytes = (size_t)count * SD_SECTOR_SIZE;
 
     memcpy(g_sd_transfer_buffer, source, bytes);
-    (void)HAL_DCACHE_CleanByAddr(&hdcache1,
-                                 (const uint32_t *)g_sd_transfer_buffer,
-                                 (uint32_t)bytes);
+    /* Polling HAL consumes this buffer with CPU loads; no DMA handoff. */
     if (HAL_SD_WriteBlocks(&hsd1, g_sd_transfer_buffer, sector, count, 2000U) != HAL_OK)
     {
       return FX_IO_ERROR;
@@ -503,6 +499,13 @@ void sd_card_writer_thread_entry(ULONG initial_input)
         last_retry = now;
         g_sd_retry_count++;
         g_sd_init_stage = 1U;
+        /* Init clears ErrorCode only after success, while wide-bus setup
+         * checks it earlier. Reset stale errors and controller state first. */
+        (void)HAL_SD_DeInit(&hsd1);
+        /* Clock gating in MSP deinit does not reset a stuck data-path state
+         * machine. Reset the peripheral before the next card initialization. */
+        __HAL_RCC_SDMMC1_FORCE_RESET();
+        __HAL_RCC_SDMMC1_RELEASE_RESET();
         if ((HAL_SD_Init(&hsd1) == HAL_OK) &&
             ((g_sd_init_stage = 2U) != 0U) &&
             (HAL_SD_ConfigWideBusOperation(&hsd1, SDMMC_BUS_WIDE_4B) == HAL_OK))
@@ -760,7 +763,11 @@ sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,
                                          float value,
                                          const daq_calibration_t *calibration)
 {
-  if ((g_sd_ready == 0U) || (sensor_name == NULL) || (g_power_loss_mode != 0U))
+  /* The bounded row queue can accept startup records while the writer mounts
+   * the card. Do not discard the first network row merely because mounting
+   * runs in another task. A missing/slow card still produces backpressure
+   * when the fixed pool fills; no memory is allocated dynamically. */
+  if ((g_sd_services_initialized == 0U) || (sensor_name == NULL) || (g_power_loss_mode != 0U))
   {
     return SD_CARD_STATUS_BUSY;
   }

@@ -6,6 +6,32 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 class DaqRateTests(unittest.TestCase):
+    def test_can_report_is_uncalibrated(self):
+        source = (ROOT / 'Core/Src/daq_thread.c').read_text()
+        publish = source.split('static void daq_publish_loadcell(', 1)[1].split('#if (DAQ_ENABLE_DUMMY', 1)[0]
+        self.assertIn('loadcell_kg1000 = snapshot->ext_adc_loadcell_kg1000;', publish)
+        self.assertNotIn('calibration->kg1000_slope', publish)
+        self.assertNotIn('calibration->kg1000_intercept', publish)
+        self.assertIn('records[count].calibrated_value', source)
+
+    def test_sd_uses_default_speed_clock_and_bounded_status_wait(self):
+        import re
+        main = (ROOT / 'Core/Src/main.c').read_text()
+        ioc = (ROOT / 'DAQ-Board.ioc').read_text()
+        divider = int(re.search(r'hsd1.Init.ClockDiv = (\d+);', main).group(1))
+        clock = int(re.search(r'RCC.SDMMCFreq_Value=(\d+)', ioc).group(1))
+        self.assertGreater(divider, 0)
+        self.assertLessEqual(clock // (2 * divider), 25_000_000)
+        self.assertIn(f'SDMMC1.ClockDiv={divider}', ioc)
+        limits = (ROOT / 'Core/Inc/sd_hal_limits.h').read_text()
+        self.assertIn('#define SDMMC_SWDATATIMEOUT 2000U', limits)
+        self.assertIn('Core/Inc/sd_hal_limits.h', (ROOT / 'CMakeLists.txt').read_text())
+        retry = (ROOT / 'Core/Src/sd_card.c').read_text().split('g_sd_retry_count++;', 1)[1]
+        self.assertLess(retry.index('HAL_SD_DeInit'), retry.index('HAL_SD_Init'))
+        self.assertLess(retry.index('HAL_SD_DeInit'), retry.index('__HAL_RCC_SDMMC1_FORCE_RESET'))
+        self.assertLess(retry.index('__HAL_RCC_SDMMC1_FORCE_RESET'), retry.index('__HAL_RCC_SDMMC1_RELEASE_RESET'))
+        self.assertLess(retry.index('__HAL_RCC_SDMMC1_RELEASE_RESET'), retry.index('HAL_SD_Init'))
+
     def compile(self, code, defines=(), valid=True):
         with tempfile.TemporaryDirectory() as tmp:
             binary = pathlib.Path(tmp) / "test"
@@ -30,6 +56,24 @@ class DaqRateTests(unittest.TestCase):
                         ['DAQ_BROADCAST_RATE_HZ=1000'], ['DAQ_ADC_OSR=123']]:
             with self.subTest(defines=defines):
                 self.compile('#include "daq_rates.h"\nint main(void) {}', defines, False)
+
+    def test_report_phase_survives_scheduler_jitter(self):
+        self.compile(r'''#include "daq_downsample.h"
+#include <assert.h>
+int main(void) {
+  daq_downsample_t s = {0}; float out;
+  assert(!daq_downsample_add(&s, 1, 1, 0, 20, &out));
+  for (unsigned i = 1; i <= 50; ++i)
+    assert(daq_downsample_add(&s, 1, 1, i*20 + (i%2), 20, &out));
+  assert(daq_downsample_add(&s, 1, 1, 2000, 20, &out));
+  assert(!daq_downsample_add(&s, 1, 1, 2001, 20, &out));
+}''')
+
+    def test_power_loss_does_not_throttle_reporting(self):
+        source = (ROOT / "Core/Src/daq_thread.c").read_text()
+        self.assertIn("sd_card_notify_power_loss()", source)
+        self.assertNotIn("tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 10U)", source)
+        self.assertIn("tx_thread_sleep(DAQ_SAMPLE_PERIOD_TICKS - elapsed)", source)
 
     def test_weighting_noise_rejection_and_clock_wrap(self):
         self.compile(r'''#include "daq_downsample.h"

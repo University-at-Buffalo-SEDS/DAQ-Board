@@ -11,6 +11,8 @@ static UINT g_telemetry_mutex_ready = 0U;
 volatile uint32_t g_telemetry_lock_get_fail = 0U;
 volatile uint32_t g_telemetry_lock_put_fail = 0U;
 volatile uint32_t g_telemetry_alloc_fail = 0U;
+volatile UINT g_telemetry_alloc_last_error = TX_SUCCESS;
+volatile size_t g_telemetry_alloc_failed_size = 0U;
 volatile uint32_t g_telemetry_panic_count = 0U;
 volatile uint32_t g_telemetry_alloc_count = 0U;
 volatile uint32_t g_telemetry_free_count = 0U;
@@ -190,12 +192,13 @@ void *telemetryMalloc(size_t xSize)
         xSize = 1U;
     }
 
-    /*
-     * Allow a brief wait so telemetry bursts don't immediately fail allocator
-     * requests and trigger panic paths in Rust.
-     */
-    if (tx_byte_allocate(rust_byte_pool_external, &ptr, xSize, 5) != TX_SUCCESS)
+    /* Allocation runs under router locks. Sleeping here cannot let another
+     * router caller release memory and delays acquisition behind that lock. */
+    const UINT status = tx_byte_allocate(rust_byte_pool_external, &ptr, xSize, TX_NO_WAIT);
+    if (status != TX_SUCCESS)
     {
+        g_telemetry_alloc_last_error = status;
+        g_telemetry_alloc_failed_size = xSize;
         g_telemetry_alloc_fail++;
         return NULL;
     }
