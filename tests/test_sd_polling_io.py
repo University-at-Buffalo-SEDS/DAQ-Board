@@ -18,6 +18,8 @@ class SdPollingTests(unittest.TestCase):
 #include <stdint.h>
 #include <stdio.h>
 #include <stddef.h>
+#include <string.h>
+#include "daq_timestamp.h"
 typedef int sd_card_status_t;
 typedef struct { float slope; } daq_calibration_t;
 typedef struct { daq_calibration_t calibration; char line[384]; uint16_t len; } sd_line_slot_t;
@@ -30,7 +32,9 @@ static void sd_free_slot(sd_line_slot_t *s) { (void)s; }
 static unsigned sd_calibration_snapshot(daq_calibration_t *c) { c->slope=1; return 0; }
 static void sd_format_float(char *s, float v) { snprintf(s,24,"%.3f",(double)v); }
 static void sd_format_u64(char *s, uint64_t v) { snprintf(s,21,"%llu",(unsigned long long)v); }
-static uint64_t telemetry_unix_ms(void) { return 1234; }
+static uint64_t network_ms = 1234;
+static uint64_t telemetry_unix_ms(void) { return network_ms; }
+static uint64_t telemetry_now_ms(void) { return 30; }
 static int sd_enqueue_line(sd_line_slot_t *s) { assert(s->len); enqueued++; return SD_CARD_STATUS_OK; }
 ''' + adapter + r'''
 int main(void) {
@@ -40,6 +44,11 @@ int main(void) {
    * must be usable before mounting completes. */
   assert(sd_card_enqueue_csv_row("kg1000_network", 20, 0.25f, NULL)==SD_CARD_STATUS_OK);
   assert(enqueued==1);
+  assert(strcmp(slot.line, "1224,20,kg1000_network,0.250,,,,network\r\n")==0);
+  network_ms=0;
+  assert(sd_card_enqueue_csv_row("kg1000_network", 25, 0.25f, NULL)==SD_CARD_STATUS_OK);
+  assert(strcmp(slot.line, "25,25,kg1000_network,0.250,,,,local\r\n")==0);
+  enqueued=1;
   full=1;
   assert(sd_card_enqueue_csv_row("kg1000_network", 40, 0.25f, NULL)==SD_CARD_STATUS_BACKPRESSURE);
   assert(g_sd_line_drop_count==1 && enqueued==1);
@@ -51,7 +60,7 @@ int main(void) {
             binary = pathlib.Path(tmp) / "queue-test"
             result = subprocess.run(
                 ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-x", "c",
-                 "-", "-o", str(binary)], input=code, text=True, capture_output=True)
+                 "-", "-I", str(ROOT / "Core/Inc"), "-o", str(binary)], input=code, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             subprocess.run([str(binary)], check=True)
 

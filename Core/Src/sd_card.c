@@ -5,6 +5,7 @@
 #include "main.h"
 #include "telemetry.h"
 #include "sd_float_format.h"
+#include "daq_timestamp.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -270,7 +271,7 @@ static UINT sd_open_log(FX_FILE *file, char *g_sd_filename, size_t filename_size
   }
 
   static const char header[] =
-      "network_unix_ms,monotonic_ms,sensor,value,raw_adc_code,raw_value,calibrated_value\r\n";
+      "timestamp_ms,monotonic_ms,sensor,value,raw_adc_code,raw_value,calibrated_value,time_source\r\n";
   status = fx_file_write(file, (VOID *)header, sizeof(header) - 1U);
   if (status == FX_SUCCESS)
   {
@@ -652,12 +653,13 @@ void sd_card_writer_thread_entry(ULONG initial_input)
           sd_format_float(raw_text, sample->raw_value);
           sd_format_float(calibrated_text, sample->calibrated_value);
           char stamp_text[21];
-          sd_format_u64(stamp_text, sample->network_unix_ms);
-          const int len = snprintf(line, sizeof(line), "%s,%lu,mcp3564r_raw,,%ld,%s,%s\r\n",
+          sd_format_u64(stamp_text, daq_timestamp_ms(sample->network_unix_ms, sample->monotonic_ms));
+          const int len = snprintf(line, sizeof(line), "%s,%lu,mcp3564r_raw,,%ld,%s,%s,%s\r\n",
                                    stamp_text,
                                    (unsigned long)sample->monotonic_ms,
                                    (long)sample->raw_adc_code,
-                                   raw_text, calibrated_text);
+                                   raw_text, calibrated_text,
+                                   sample->network_unix_ms != 0U ? "network" : "local");
           if ((len <= 0) || ((size_t)len >= sizeof(line)) ||
               (sd_write_bytes(line, (size_t)len) != FX_SUCCESS))
           {
@@ -796,12 +798,14 @@ sd_card_status_t sd_card_log_packet(const SedsPacketView *pkt)
     return SD_CARD_STATUS_BACKPRESSURE;
   }
   char unix_text[21], monotonic_text[21];
-  sd_format_u64(unix_text, telemetry_unix_ms());
-  sd_format_u64(monotonic_text, telemetry_now_ms());
+  const uint64_t local_ms = telemetry_now_ms();
+  const uint64_t network_ms = telemetry_unix_ms();
+  sd_format_u64(unix_text, daq_timestamp_ms(network_ms, local_ms));
+  sd_format_u64(monotonic_text, local_ms);
   (void)sd_calibration_snapshot(&slot->calibration);
   const int prefix = snprintf(slot->line, sizeof(slot->line), "%s,%s,seds_packet,",
                               unix_text, monotonic_text);
-  if ((prefix <= 0) || ((size_t)prefix >= sizeof(slot->line) - 3U))
+  if ((prefix <= 0) || ((size_t)prefix >= sizeof(slot->line) - 16U))
   {
     sd_free_slot(slot);
     return SD_CARD_STATUS_IO_ERROR;
@@ -812,7 +816,7 @@ sd_card_status_t sd_card_log_packet(const SedsPacketView *pkt)
     sd_free_slot(slot);
     return SD_CARD_STATUS_IO_ERROR;
   }
-  const size_t available = sizeof(slot->line) - (size_t)prefix - 3U;
+  const size_t available = sizeof(slot->line) - (size_t)prefix - 16U;
   if ((size_t)want > available)
   {
     want = (int32_t)available;
@@ -822,6 +826,15 @@ sd_card_status_t sd_card_log_packet(const SedsPacketView *pkt)
     sd_free_slot(slot);
     return SD_CARD_STATUS_IO_ERROR;
   }
+  const int suffix = snprintf(&slot->line[prefix + want],
+      sizeof(slot->line) - (size_t)(prefix + want), ",,,,%s",
+      network_ms != 0U ? "network" : "local");
+  if (suffix <= 0 || (size_t)suffix + 2U >= sizeof(slot->line) - (size_t)(prefix + want))
+  {
+    sd_free_slot(slot);
+    return SD_CARD_STATUS_IO_ERROR;
+  }
+  want += suffix;
   slot->line[prefix + want] = '\r';
   slot->line[prefix + want + 1] = '\n';
   slot->len = (uint16_t)(prefix + want + 2);
@@ -852,11 +865,13 @@ sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,
   char value_text[24];
   sd_format_float(value_text, value);
   char unix_text[21], monotonic_text[21];
-  sd_format_u64(unix_text, telemetry_unix_ms());
+  const uint64_t network_ms = daq_sample_network_ms(
+      telemetry_unix_ms(), telemetry_now_ms(), timestamp_ms);
+  sd_format_u64(unix_text, daq_timestamp_ms(network_ms, timestamp_ms));
   sd_format_u64(monotonic_text, timestamp_ms);
-  const int len = snprintf(slot->line, sizeof(slot->line), "%s,%s,%s,%s,,,\r\n",
+  const int len = snprintf(slot->line, sizeof(slot->line), "%s,%s,%s,%s,,,,%s\r\n",
                            unix_text, monotonic_text,
-                           sensor_name, value_text);
+                           sensor_name, value_text, network_ms != 0U ? "network" : "local");
   if ((len <= 0) || ((size_t)len >= sizeof(slot->line)))
   {
     sd_free_slot(slot);

@@ -174,7 +174,7 @@ class QualificationContractTests(unittest.TestCase):
         self.assertIn("g_sd_csv_rows_written_count", sd)
         self.assertIn("HAL_SD_Init(&hsd1)", sd)
         self.assertNotIn("return TX_NOT_DONE;", sd[sd.index("UINT sd_card_init") :])
-        self.assertIn("network_unix_ms,monotonic_ms,sensor,value,raw_adc_code,raw_value,calibrated_value", sd)
+        self.assertIn("timestamp_ms,monotonic_ms,sensor,value,raw_adc_code,raw_value,calibrated_value,time_source", sd)
         self.assertIn("# calibration,kg1000_slope=", sd)
         self.assertIn("sd_calibration_snapshot", sd)
         drain = sd.index("if (tx_queue_receive(&g_sd_raw_queue")

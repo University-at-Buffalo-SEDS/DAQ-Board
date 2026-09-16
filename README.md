@@ -1,7 +1,7 @@
 # DAQ Board firmware
 
 The DAQ Board targets the STM32U585 and samples fill-system instrumentation for
-publication over the SEDSNet CAN-FD network. The board uses SEDSNet v4.0.29 and
+publication over the SEDSNet CAN-FD network. The board uses SEDSNet v4.0.31 and
 SEDS LaunchCore v1.0.0, fetched by CMake without submodules.
 
 LaunchCore derives the 2 MiB flash layout, linker scripts, Slot A, OTA staging,
@@ -48,7 +48,12 @@ other telemetry snapshots, and packet diagnostics go into separate
 independently when its queued records change calibration; delayed telemetry
 cannot mix into or rotate the raw ADC log.
 The CSV contains the
-network timestamp, local monotonic timestamp, sensor name, and value; the
+primary `timestamp_ms`, local `monotonic_ms`, sensor name, and value. Before
+network synchronization the primary timestamp uses local milliseconds since
+boot; afterward it uses network Unix milliseconds adjusted to acquisition time.
+The final `time_source` column identifies `local` versus `network`. Use the
+monotonic column across this clock-domain transition. Buffered raw records keep
+their captured time even if synchronization changes before writing. The
 `mcp3564r_raw` rows retain every drained raw sigma-delta ADC conversion while
 the network receives a 50 Hz average. Every file begins with the four active
 load-cell calibration coefficients and contains both raw and calibrated sample

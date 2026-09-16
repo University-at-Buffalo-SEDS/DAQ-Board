@@ -9,6 +9,7 @@
 #include "daq_calibration.h"
 #include "daq_rates.h"
 #include "daq_downsample.h"
+#include "daq_timestamp.h"
 TX_THREAD daq_thread;
 
 #define DAQ_THREAD_STACK_SIZE (32U * 1024U)
@@ -47,11 +48,9 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
 
   if ((snapshot->ext_adc_sample_valid != 0U) && (capacity != 0U))
   {
-    const uint64_t age_ms = (mono_now >= snapshot->ext_adc_monotonic_ms)
-                                ? mono_now - snapshot->ext_adc_monotonic_ms
-                                : 0U;
     if (records != NULL) records[count].monotonic_ms = (uint32_t)snapshot->ext_adc_monotonic_ms;
-    if (records != NULL) records[count].network_unix_ms = (unix_now >= age_ms) ? unix_now - age_ms : 0U;
+    if (records != NULL) records[count].network_unix_ms =
+        daq_sample_network_ms(unix_now, mono_now, snapshot->ext_adc_monotonic_ms);
     if (records != NULL) records[count].raw_adc_code = snapshot->ext_adc_code;
     if (records != NULL) records[count].raw_value = snapshot->ext_adc_loadcell_kg1000;
     if (records != NULL) records[count].calibrated_value =
@@ -66,10 +65,8 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
          (mcp3564r_get_sample(&sample) == TX_SUCCESS) &&
          (sample.sample_valid != 0U))
   {
-    const uint64_t age_ms = (mono_now >= sample.monotonic_ms)
-                                ? mono_now - sample.monotonic_ms
-                                : 0U;
-    if (records != NULL) records[count].network_unix_ms = (unix_now >= age_ms) ? unix_now - age_ms : 0U;
+    if (records != NULL) records[count].network_unix_ms =
+        daq_sample_network_ms(unix_now, mono_now, sample.monotonic_ms);
     if (records != NULL) records[count].monotonic_ms = (uint32_t)sample.monotonic_ms;
     if (records != NULL) records[count].raw_adc_code = sample.code;
     if (records != NULL) records[count].raw_value = sample.loadcell_kg1000;
