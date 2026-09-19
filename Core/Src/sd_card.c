@@ -75,7 +75,7 @@ volatile uint32_t g_sd_init_stage = 0U;
 static uint8_t g_sd_hardware_ready = 0U;
 static uint8_t g_power_loss_mode = 0U;
 static uint8_t g_file_open = 0U;
-static daq_calibration_t g_sd_calibration = {1.0f, 0.0f, 1.0f, 0.0f};
+static daq_calibration_t g_sd_calibration = {1.0f, 0.0f, 1.0f, 0.0f, {0.0f, 1.0f}};
 static volatile uint32_t g_sd_calibration_generation = 1U;
 static daq_calibration_t g_sd_open_calibration;
 static uint8_t g_sd_services_initialized = 0U;
@@ -275,16 +275,20 @@ static UINT sd_open_log(FX_FILE *file, char *g_sd_filename, size_t filename_size
   status = fx_file_write(file, (VOID *)header, sizeof(header) - 1U);
   if (status == FX_SUCCESS)
   {
-    char calibration_line[192];
-    char coefficients[4][24];
+    char calibration_line[512];
+    char coefficients[11][24];
     sd_format_float(coefficients[0], calibration.kg1000_slope);
     sd_format_float(coefficients[1], calibration.kg1000_intercept);
     sd_format_float(coefficients[2], calibration.iadc_slope);
     sd_format_float(coefficients[3], calibration.iadc_intercept);
+    for (unsigned i = 0; i < 7; ++i)
+      sd_format_float(coefficients[4 + i], calibration.kg50[i]);
     const int len = snprintf(
         calibration_line, sizeof(calibration_line),
-        "# calibration,kg1000_slope=%s,kg1000_intercept=%s,iadc_slope=%s,iadc_intercept=%s\r\n",
-        coefficients[0], coefficients[1], coefficients[2], coefficients[3]);
+        "# calibration,kg1000_slope=%s,kg1000_intercept=%s,iadc_slope=%s,iadc_intercept=%s,kg50_c0=%s,kg50_c1=%s,kg50_c2=%s,kg50_c3=%s,kg50_c4=%s,kg50_x0=%s,kg50_tare=%s\r\n",
+        coefficients[0], coefficients[1], coefficients[2], coefficients[3],
+        coefficients[4], coefficients[5], coefficients[6], coefficients[7],
+        coefficients[8], coefficients[9], coefficients[10]);
     if (len <= 0 || (size_t)len >= sizeof(calibration_line))
       status = FX_IO_ERROR;
     else
@@ -654,9 +658,10 @@ void sd_card_writer_thread_entry(ULONG initial_input)
           sd_format_float(calibrated_text, sample->calibrated_value);
           char stamp_text[21];
           sd_format_u64(stamp_text, daq_timestamp_ms(sample->network_unix_ms, sample->monotonic_ms));
-          const int len = snprintf(line, sizeof(line), "%s,%lu,mcp3564r_raw,,%ld,%s,%s,%s\r\n",
+          const int len = snprintf(line, sizeof(line), "%s,%lu,%s,,%ld,%s,%s,%s\r\n",
                                    stamp_text,
                                    (unsigned long)sample->monotonic_ms,
+                                   sample->channel == 1U ? "kg50_raw" : "mcp3564r_raw",
                                    (long)sample->raw_adc_code,
                                    raw_text, calibrated_text,
                                    sample->network_unix_ms != 0U ? "network" : "local");

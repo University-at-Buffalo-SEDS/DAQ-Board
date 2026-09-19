@@ -72,8 +72,8 @@
       "model": "mcp3564r",
       "bus": "spi2",
       "bits": 24,
-      "channels": 1,
-      "channel_samples": [1048576]
+      "channels": 2,
+      "channel_samples": [1048576, 2097152]
     },
     {
       "type": "storage",
@@ -114,6 +114,8 @@
       {"name": "daq_adc1_hal_state_on_error", "symbol": "g_daq_adc1_hal_state_on_error"},
       {"name": "mcp3564r_init_status", "symbol": "g_mcp3564r_init_status"},
       {"name": "loadcell_network_rows", "symbol": "g_daq_loadcell_publish_ok_count", "minimum": 1},
+      {"name": "kg50_network_rows", "symbol": "g_daq_kg50_publish_ok_count", "minimum": 1},
+      {"name": "kg50_network_failures", "symbol": "g_daq_kg50_publish_fail_count", "maximum": 0},
       {"name": "loadcell_network_failures", "symbol": "g_daq_loadcell_publish_fail_count", "maximum": 0},
       {"name": "loadcell_nonzero_samples", "symbol": "g_daq_nonzero_raw_sample_count", "minimum": 1},
       {"name": "loadcell_raw_samples", "symbol": "g_daq_raw_samples_drained_count", "minimum": 1, "minimum_interval_gain": 1},

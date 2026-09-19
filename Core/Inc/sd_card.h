@@ -24,6 +24,7 @@ typedef struct
   int32_t raw_adc_code;
   float raw_value;
   float calibrated_value;
+  uint8_t channel;
 } sd_raw_adc_record_t;
 
 UINT sd_card_init(TX_BYTE_POOL *byte_pool);

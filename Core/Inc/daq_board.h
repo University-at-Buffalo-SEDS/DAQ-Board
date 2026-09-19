@@ -18,6 +18,7 @@ typedef struct
   float adc1_aux_v;
   float analog_inputs_v[4];
   float analog_outputs_v[2];
+  uint8_t ext_adc_channel;
   uint8_t ext_adc_sample_valid;
   uint8_t ext_adc_dma_busy;
   uint64_t ext_adc_monotonic_ms;

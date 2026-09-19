@@ -7,6 +7,7 @@ extern "C" {
 
 #include "stm32u5xx_hal.h"
 #include "tx_api.h"
+#include "mcp3564r_board_config.h"
 
 typedef struct
 {
@@ -24,13 +25,14 @@ typedef struct
 
 typedef struct
 {
+  uint8_t channel; /* 0: KG1000, 1: KG50 (single-ended against AGND). */
   uint8_t sample_valid;
   uint8_t dma_busy;
   uint8_t queued_samples;
   uint64_t monotonic_ms;
   int32_t code;
-  float voltage_v;
-  float loadcell_kg1000;
+  float voltage_v; /* ADC-pin voltage, using the nominal internal reference. */
+  float raw_value; /* Historical calibration input, for either load cell. */
   float temperature_c;
   uint32_t overrun_count;
 } mcp3564r_sample_t;

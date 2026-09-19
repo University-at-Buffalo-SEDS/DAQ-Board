@@ -57,3 +57,4 @@
 #define SEDS_DT_RESERVED_135 ((SedsDataType)135U)
 #define SEDS_DT_RESERVED_136 ((SedsDataType)136U)
 #define SEDS_DT_DAQ_LOADCELL_CALIBRATION ((SedsDataType)137U)
+#define SEDS_DT_DAQ_KG50_CALIBRATION ((SedsDataType)138U)

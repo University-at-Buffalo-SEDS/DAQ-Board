@@ -146,7 +146,7 @@ For transport diagnosis, compare it with `g_daq_loadcell_wire_tx_count`,
 `g_daq_loadcell_wire_fail_count`, and `g_daq_queue_service_error_count`.
 Only GroundStation receipt confirms end-to-end delivery.
 
-Locally generated `KG1000` has an explicit CAN route so loss of the discovered
+Locally generated `KG1000` and `KG50` have explicit CAN routes so loss of the discovered
 GroundStation endpoint does not suppress its 50 Hz stream while other peers
 remain discovered. The exception applies only to local load-cell data; other
 traffic continues to use discovery routing.
@@ -165,7 +165,9 @@ counts, and topology JSON includes each announcer's last-seen time and age.
 
 For a requested 12 kHz read ceiling, select OSR 256 and drain every 5 ms.
 This is not an exact 12 kHz conversion clock: with the physical 16 MHz MCO,
-OSR 256 produces 15.625 ksps internally; reads are paced at rounded microsecond
+OSR 256 has a 15.625 ksps continuous single-channel rate. Two-channel SCAN
+mode settles the filter at each channel change, reducing the conversion rate;
+reads are paced at rounded microsecond
 intervals plus SPI/interrupt overhead. Only acquired readings are recorded.
 Do not claim lossless capture of every ADC conversion with this timer-driven
 driver. The compile-time checks reject settings exceeding conversion speed or
@@ -199,3 +201,46 @@ writer mounts the card. This retains early network rows without blocking
 acquisition; a slow or absent card still causes explicit bounded backpressure.
 An unavailable card must not prevent network telemetry. Automatic provisioning
 can erase a card when the DAQ marker is absent; back up existing files first.
+
+## 50 kg load cell
+
+The MCP3564R scans CH0 (1000 kg) and CH1 (50 kg), each single-ended against
+AGND. The schematic maps P7 through AMP1 to CH0 and P8 through AMP2 to CH1;
+the onboard amplifiers already convert each bridge's differential signal to
+a ground-referenced voltage. See [load-cell wiring and diagnostics](docs/loadcell-inputs.md).
+The ADC's 32-bit tagged output identifies the channel; only data-ready readings
+are queued. Both cells have independent sample-weighted 50 Hz raw telemetry
+(`KG1000`, ID 118; `KG50`, ID 119). The configured 3700 Hz timer is a polling
+ceiling shared by both channels, not the per-cell sample rate. SCAN settling
+and SPI overhead reduce the acquired rate.
+
+SD raw records identify CH1 as `kg50_raw` and retain its ADC code, historical
+raw calibration value, calibrated kg, and acquisition timestamp. CH0 retains
+the `mcp3564r_raw` name. Raw calibration values preserve the existing scaling;
+they are not ADC-pin volts. Separate slow diagnostic rows `mcp3564r_voltage_v`
+(CH0) and `mcp3564r_ch1_voltage_v` (CH1) use the nominal internal 2.4 V reference
+and the configured ADC gain of 1.
+The replay file records `kg50_network`, identical to the raw `KG50` payload.
+Every file header includes the 50 kg polynomial coefficients, input shift, and
+tare offset; calibration changes rotate files as for the original channel.
+
+GroundStation has a separate **50kg** load-cell tab and calibration sensor.
+With the cell unloaded, capture zero; then capture one or more known masses
+in kg, fit the calibration, and save it. Confirm zero and a known mass again.
+Until calibrated, the identity defaults are raw values, not measured kg.
+GroundStation records `KG50` and `LOADCELL_50_WEIGHT_KG` separately, and test-fire
+CSV exports include timestamped 50 kg raw/calibrated rows. This channel does
+not change the existing 1000 kg fill-control input.
+
+`DAQ_KG50_CALIBRATION` (ID 138) carries seven float32 values
+`[c0,c1,c2,c3,c4,x0,tare]`, evaluated as
+`c0+c1*x+c2*x^2+c3*x^3+c4*x^4-tare`, where `x=raw-x0`.
+GroundStation publishes this managed variable on save and serves it after
+reconnect. DAQ persists it alongside the original calibration, migrating older
+four-float stored records without changing their coefficients. The existing
+ID 137 payload remains four floats. Actual coefficients require unloaded and
+known-weight measurements; they cannot be inferred from the 50 kg rating.
+
+ADC format and scan configuration follow the
+[Microchip MCP3561/2/4R datasheet](https://www.microchip.com/content/dam/mchp/documents/APID/ProductDocuments/DataSheets/MCP3561_2_4R-Data-Sheet-DS200006391C.pdf),
+sections 5.6, 5.15, and 8.8.

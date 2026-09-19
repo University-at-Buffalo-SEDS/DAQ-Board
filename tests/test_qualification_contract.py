@@ -149,7 +149,7 @@ class QualificationContractTests(unittest.TestCase):
         self.assertIn("daq_drain_ext_adc", daq)
         self.assertIn("sd_card_enqueue_raw_adc_samples", daq)
         self.assertIn('sd_card_enqueue_csv_row("kg1000_network"', daq)
-        self.assertIn("calibration->kg1000_slope * snapshot->ext_adc_loadcell_kg1000", daq)
+        self.assertIn("calibration->kg1000_slope * raw", daq)
         self.assertIn("const daq_calibration_t calibration = daq_calibration_current();", daq)
         self.assertLess(
             daq.index('sd_card_enqueue_csv_row("kg1000_network"'),

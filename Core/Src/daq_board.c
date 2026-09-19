@@ -90,12 +90,13 @@ UINT daq_board_sample(daq_snapshot_t *snapshot)
   snapshot->adc1_aux_v = adc1_sample.aux_voltage_v;
   memcpy(snapshot->analog_inputs_v, adc4_sample.analog_inputs_v, sizeof(snapshot->analog_inputs_v));
   memcpy(snapshot->analog_outputs_v, dac_sample.analog_outputs_v, sizeof(snapshot->analog_outputs_v));
+  snapshot->ext_adc_channel = ext_adc_sample.channel;
   snapshot->ext_adc_sample_valid = ext_adc_sample.sample_valid;
   snapshot->ext_adc_dma_busy = ext_adc_sample.dma_busy;
   snapshot->ext_adc_monotonic_ms = ext_adc_sample.monotonic_ms;
   snapshot->ext_adc_code = ext_adc_sample.code;
   snapshot->ext_adc_voltage_v = ext_adc_sample.voltage_v;
-  snapshot->ext_adc_loadcell_kg1000 = ext_adc_sample.loadcell_kg1000;
+  snapshot->ext_adc_loadcell_kg1000 = ext_adc_sample.raw_value;
   snapshot->ext_adc_temp_c = ext_adc_sample.temperature_c;
 
   g_daq_board_sample_status = 0U;

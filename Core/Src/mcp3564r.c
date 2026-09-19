@@ -15,10 +15,6 @@
 #define MCP3564R_OFFSETCAL_ADDR (0x09U)
 #define MCP3564R_GAINCAL_ADDR (0x0AU)
 
-#define MCP3564R_VREF_V (2.2104f)
-#define MCP3564R_FULL_SCALE_COUNTS (16777216.0f)
-#define MCP3564R_INPUT_DIVIDER_GAIN (2.0f)
-#define MCP3564R_PGA_GAIN (16.0f)
 #define MCP3564R_DMA_FRAME_SIZE (4U)
 #define MCP3564R_DCACHE_LINE_SIZE (32U)
 #define MCP3564R_USE_DMA_READ (1U)
@@ -38,7 +34,7 @@
 
 typedef struct
 {
-  uint32_t raw24;
+  uint32_t raw32;
   uint32_t monotonic_ms;
 } mcp3564r_sample_entry_t;
 
@@ -55,7 +51,7 @@ typedef struct
   volatile uint32_t overrun_count;
   volatile uint8_t first_conversion_pending;
   uint32_t start_offset_us;
-  uint32_t latest_raw24;
+  uint32_t latest_raw32;
   mcp3564r_sample_entry_t queue[MCP3564R_SAMPLE_QUEUE_DEPTH];
 } mcp3564r_context_t;
 
@@ -69,14 +65,14 @@ extern DCACHE_HandleTypeDef hdcache1;
 extern TIM_HandleTypeDef htim2;
 
 const mcp3564r_config_t MCP3564R_DEFAULT_CONFIG = {
-  .config0_reg = 0b10000010,
+  .config0_reg = MCP3564R_BOARD_CONFIG0,
   /* PRE=MCLK/1; conversion filter selected in daq_rates.h. */
   .config1_reg = (DAQ_ADC_OSR_BITS << 2U),
-  .config2_reg = 0b11001111,
-  .config3_reg = 0b11000000,
+  .config2_reg = MCP3564R_BOARD_CONFIG2,
+  .config3_reg = 0b11110000, /* 32-bit output with channel ID and signed 25-bit code. */
   .irq_reg = 0b00000011,
-  .mux_reg = 0b00001000,
-  .scan_reg = 0x000000,
+  .mux_reg = 0b00001000, /* Ignored while SCAN is enabled (datasheet 5.15.1). */
+  .scan_reg = MCP3564R_BOARD_SCAN,
   .timer_reg = 0x000000,
   .offsetCal_reg = 0x000000,
   .gainCal_reg = 0x000000,
@@ -228,30 +224,23 @@ static HAL_StatusTypeDef mcp3564r_send_start_once(void)
   return status;
 }
 
-static int32_t mcp3564r_sign_extend_24(uint32_t raw24)
+/* DATA_FORMAT=11: CH_ID in bits 31:28, sign in bit 24. */
+static int32_t mcp3564r_decode_code(uint32_t raw32)
 {
-  if ((raw24 & 0x800000U) != 0U)
-  {
-    raw24 |= 0xFF000000U;
-  }
-
-  return (int32_t)raw24;
+  uint32_t code = raw32 & 0x01FFFFFFU;
+  if ((code & 0x01000000U) != 0U) code |= 0xFE000000U;
+  return (int32_t)code;
 }
 
-static float mcp3564r_code_to_loadcell_kg1000(int32_t code)
-{
-  return (((float)code * MCP3564R_VREF_V) / MCP3564R_FULL_SCALE_COUNTS)
-       * MCP3564R_INPUT_DIVIDER_GAIN
-       / MCP3564R_PGA_GAIN;
-}
-
-static void mcp3564r_store_raw24(uint32_t raw24)
+static void mcp3564r_store_raw32(uint32_t raw32)
 {
   mcp3564r_sample_entry_t entry;
 
-  entry.raw24 = raw24 & 0x00FFFFFFU;
+  /* Never route a diagnostic/unconfigured channel as a load cell. */
+  if ((raw32 >> 28U) > 1U) return;
+  entry.raw32 = raw32;
   entry.monotonic_ms = HAL_GetTick();
-  g_mcp3564r.latest_raw24 = entry.raw24;
+  g_mcp3564r.latest_raw32 = entry.raw32;
 
   if (g_mcp3564r.queue_count >= MCP3564R_SAMPLE_QUEUE_DEPTH)
   {
@@ -271,8 +260,8 @@ static HAL_StatusTypeDef mcp3564r_read_data_blocking(void)
 {
   uint8_t dummy_data = 0U;
   uint8_t read_cmd = MCP3564R_CMD_READ;
-  uint8_t tx_buf24[3] = {0x00U, 0x00U, 0x00U};
-  uint8_t rx_buf24[3] = {0x00U, 0x00U, 0x00U};
+  uint8_t tx_buf32[4] = {0};
+  uint8_t rx_buf32[4] = {0};
   HAL_StatusTypeDef status;
 
   status = mcp3564r_send_start_once();
@@ -288,17 +277,18 @@ static HAL_StatusTypeDef mcp3564r_read_data_blocking(void)
   status = HAL_SPI_TransmitReceive(g_mcp3564r.spi, &read_cmd, &dummy_data, 1U, 1000U);
   if (status == HAL_OK)
   {
-    status = HAL_SPI_TransmitReceive(g_mcp3564r.spi, tx_buf24, rx_buf24, 3U, 1000U);
+    status = HAL_SPI_TransmitReceive(g_mcp3564r.spi, tx_buf32, rx_buf32, 4U, 1000U);
   }
 
   mcp3564r_deselect();
 
-  if (status == HAL_OK)
+  if (status == HAL_OK && (dummy_data & 0x04U) == 0U)
   {
-    const uint32_t raw24 = ((uint32_t)rx_buf24[0] << 16)
-                         | ((uint32_t)rx_buf24[1] << 8)
-                         | ((uint32_t)rx_buf24[2]);
-    mcp3564r_store_raw24(raw24);
+    const uint32_t raw32 = ((uint32_t)rx_buf32[0] << 24)
+                         | ((uint32_t)rx_buf32[1] << 16)
+                         | ((uint32_t)rx_buf32[2] << 8)
+                         | ((uint32_t)rx_buf32[3]);
+    mcp3564r_store_raw32(raw32);
   }
 
   return status;
@@ -326,6 +316,8 @@ static void mcp3564r_dcache_invalidate(const void *data, size_t len)
   (void)HAL_DCACHE_InvalidateByAddr(&hdcache1, (const uint32_t *)data, (uint32_t)len);
 }
 #endif
+
+static HAL_StatusTypeDef mcp3564r_arm_start_offset_timer(void);
 
 static HAL_StatusTypeDef mcp3564r_start_read_dma(void)
 {
@@ -355,6 +347,15 @@ static HAL_StatusTypeDef mcp3564r_start_read_dma(void)
     return command_status;
   }
 
+  /* STATUS DR_STATUS is active-low. Polling faster than the scan conversion
+   * rate must not enqueue the previous conversion again. */
+  if ((dummy_data & 0x04U) != 0U)
+  {
+    mcp3564r_deselect();
+    g_mcp3564r.first_conversion_pending = 0U;
+    return mcp3564r_arm_start_offset_timer();
+  }
+
   g_mcp3564r.dma_busy = 1U;
   g_mcp3564r.conversion_active = 0U;
   mcp3564r_dcache_clean(g_mcp3564r_tx_frame, sizeof(g_mcp3564r_tx_frame));
@@ -363,7 +364,7 @@ static HAL_StatusTypeDef mcp3564r_start_read_dma(void)
   const HAL_StatusTypeDef status = HAL_SPI_TransmitReceive_DMA(g_mcp3564r.spi,
                                                                g_mcp3564r_tx_frame,
                                                                g_mcp3564r_rx_frame,
-                                                               3U);
+                                                               4U);
   if (status != HAL_OK)
   {
     mcp3564r_deselect();
@@ -486,11 +487,12 @@ void mcp3564r_dma_complete(void)
 #if (MCP3564R_USE_DMA_READ != 0U)
   mcp3564r_dcache_invalidate(g_mcp3564r_rx_frame, sizeof(g_mcp3564r_rx_frame));
 
-  const uint32_t raw24 = ((uint32_t)g_mcp3564r_rx_frame[0] << 16)
-                       | ((uint32_t)g_mcp3564r_rx_frame[1] << 8)
-                       | ((uint32_t)g_mcp3564r_rx_frame[2]);
+  const uint32_t raw32 = ((uint32_t)g_mcp3564r_rx_frame[0] << 24)
+                       | ((uint32_t)g_mcp3564r_rx_frame[1] << 16)
+                       | ((uint32_t)g_mcp3564r_rx_frame[2] << 8)
+                       | ((uint32_t)g_mcp3564r_rx_frame[3]);
 
-  mcp3564r_store_raw24(raw24);
+  mcp3564r_store_raw32(raw32);
   g_mcp3564r.first_conversion_pending = 0U;
   g_mcp3564r.dma_busy = 0U;
   mcp3564r_deselect();
@@ -510,14 +512,15 @@ void mcp3564r_timer_elapsed_callback(TIM_HandleTypeDef *htim)
   if (htim->Instance == TIM2)
   {
     (void)HAL_TIM_Base_Stop_IT(&htim2);
-    (void)mcp3564r_start_read_dma();
+    if (mcp3564r_start_read_dma() != HAL_OK)
+      g_mcp3564r.conversion_active = 0U;
   }
 }
 
 UINT mcp3564r_get_sample(mcp3564r_sample_t *sample)
 {
   uint32_t primask;
-  uint32_t raw24;
+  uint32_t raw32;
   uint8_t sample_valid;
   uint8_t dma_busy;
   uint8_t queued_samples;
@@ -530,7 +533,7 @@ UINT mcp3564r_get_sample(mcp3564r_sample_t *sample)
   }
 
   memset(sample, 0, sizeof(*sample));
-  raw24 = 0U;
+  raw32 = 0U;
   sample_valid = 0U;
 
   primask = __get_PRIMASK();
@@ -547,14 +550,14 @@ UINT mcp3564r_get_sample(mcp3564r_sample_t *sample)
     g_mcp3564r.queue_tail = (uint8_t)((g_mcp3564r.queue_tail + 1U) % MCP3564R_SAMPLE_QUEUE_DEPTH);
     g_mcp3564r.queue_count--;
 
-    raw24 = entry.raw24;
+    raw32 = entry.raw32;
     monotonic_ms = entry.monotonic_ms;
     sample_valid = 1U;
     queued_samples = g_mcp3564r.queue_count;
   }
   else
   {
-    raw24 = g_mcp3564r.latest_raw24;
+    raw32 = g_mcp3564r.latest_raw32;
   }
 
   if (primask == 0U)
@@ -562,16 +565,17 @@ UINT mcp3564r_get_sample(mcp3564r_sample_t *sample)
     __enable_irq();
   }
 
-  const int32_t code = mcp3564r_sign_extend_24(raw24);
+  const int32_t code = mcp3564r_decode_code(raw32);
 
+  sample->channel = (uint8_t)(raw32 >> 28U);
   sample->sample_valid = sample_valid;
   sample->dma_busy = dma_busy;
   sample->queued_samples = queued_samples;
   sample->overrun_count = overrun_count;
   sample->monotonic_ms = monotonic_ms;
   sample->code = code;
-  sample->voltage_v = mcp3564r_code_to_loadcell_kg1000(code);
-  sample->loadcell_kg1000 = sample->voltage_v;
+  sample->voltage_v = mcp3564r_code_to_voltage(code);
+  sample->raw_value = mcp3564r_code_to_raw_value(code);
   sample->temperature_c = 0.0f;
 
   return TX_SUCCESS;
