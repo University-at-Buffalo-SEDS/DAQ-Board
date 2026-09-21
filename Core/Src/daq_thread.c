@@ -301,7 +301,7 @@ void daq_thread_entry(ULONG initial_input)
      * permanently throttle acquisition/network reporting to 10 Hz after
      * one low-voltage observation, including a startup transient. */
 
-    /* Include acquisition/publish work in the 20 ms period. Sleeping for a
+    /* Include acquisition/publish work in the configured period. Sleeping for a
      * whole period after doing that work silently reduces the sample rate. */
     const ULONG elapsed = tx_time_get() - cycle_started;
     if (elapsed < DAQ_SAMPLE_PERIOD_TICKS)

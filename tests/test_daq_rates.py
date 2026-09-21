@@ -46,13 +46,13 @@ class DaqRateTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
 
     def test_default_and_fast_settings(self):
-        self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_ADC_OSR_BITS == 5); assert(DAQ_ADC_READ_INTERVAL_US == 271); assert(DAQ_BROADCAST_PERIOD_MS == 20);}')
+        self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_ADC_OSR_BITS == 5); assert(DAQ_ADC_READ_INTERVAL_US == 271); assert(DAQ_BROADCAST_PERIOD_MS == 2); assert(DAQ_ACQUISITION_PERIOD_MS == 2); assert(DAQ_SD_RAW_QUEUE_DEPTH == 101); assert(DAQ_RAW_BATCH_CAPACITY == 12);}')
         self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_ADC_OSR_BITS == 3); assert(DAQ_ADC_READ_INTERVAL_US == 84); assert(DAQ_BROADCAST_PERIOD_MS == 100);}',
                      ['DAQ_ADC_OSR=256', 'DAQ_ADC_READ_RATE_HZ=12000', 'DAQ_ACQUISITION_PERIOD_MS=5', 'DAQ_BROADCAST_RATE_HZ=10'])
 
     def test_unsafe_configurations_fail_compilation(self):
         for defines in [['DAQ_ADC_READ_RATE_HZ=0'], ['DAQ_ADC_READ_RATE_HZ=12000'],
-                        ['DAQ_ADC_OSR=256', 'DAQ_ADC_READ_RATE_HZ=12000'],
+                        ['DAQ_SD_RAW_BUFFER_MS=1000'],
                         ['DAQ_BROADCAST_RATE_HZ=1000'], ['DAQ_ADC_OSR=123']]:
             with self.subTest(defines=defines):
                 self.compile('#include "daq_rates.h"\nint main(void) {}', defines, False)
@@ -67,6 +67,19 @@ int main(void) {
     assert(daq_downsample_add(&s, 1, 1, i*20 + (i%2), 20, &out));
   assert(daq_downsample_add(&s, 1, 1, 2000, 20, &out));
   assert(!daq_downsample_add(&s, 1, 1, 2001, 20, &out));
+}''')
+
+    def test_500_hz_reports_each_second_without_catchup_bursts(self):
+        self.compile(r'''#include "daq_downsample.h"
+#include "daq_rates.h"
+#include <assert.h>
+int main(void) {
+  daq_downsample_t state = {0}; float out; unsigned reports = 0;
+  for (unsigned ms=0; ms<=1000; ms+=DAQ_ACQUISITION_PERIOD_MS)
+    reports += daq_downsample_add(&state, 1, 1, ms, DAQ_BROADCAST_PERIOD_MS, &out);
+  assert(reports == 500);
+  assert(daq_downsample_add(&state, 1, 1, 2000, DAQ_BROADCAST_PERIOD_MS, &out));
+  assert(!daq_downsample_add(&state, 1, 1, 2001, DAQ_BROADCAST_PERIOD_MS, &out));
 }''')
 
     def test_power_loss_does_not_throttle_reporting(self):
