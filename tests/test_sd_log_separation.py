@@ -15,7 +15,7 @@ class LogSeparationTests(unittest.TestCase):
             "static UINT sd_marker_exists", 1)[0]
         raw = "static UINT sd_select_calibration" + source.split(
             "static UINT sd_select_calibration", 1)[1].split(
-            "void sd_card_writer_thread_entry", 1)[0]
+            "static uint8_t sd_service_telemetry_rows", 1)[0]
         harness = r"""
 #include <assert.h>
 #include <stdint.h>
@@ -24,19 +24,21 @@ typedef unsigned UINT;
 typedef void VOID;
 typedef struct { unsigned id; } FX_FILE;
 typedef struct { float slope, offset; } daq_calibration_t;
-typedef struct { daq_calibration_t calibration; char line[64]; unsigned len; } sd_line_slot_t;
+typedef struct { daq_calibration_t calibration; char line[64]; unsigned len; uint64_t session; } sd_line_slot_t;
 #define FX_SUCCESS 0U
 #define FX_IO_ERROR 1U
 static FX_FILE g_sd_file={1}, g_sd_telemetry_file={2};
 static unsigned g_sd_media, g_telemetry_file_open, g_file_open=1;
+static uint64_t g_sd_telemetry_session;
 static daq_calibration_t g_sd_telemetry_calibration, g_sd_open_calibration={1,0};
-static char g_sd_telemetry_filename[64];
+static char g_sd_telemetry_filename[64], g_sd_filename[64];
 static unsigned raw_opens, telemetry_opens, raw_closes, telemetry_closes, writes, fail_write;
 static UINT fx_media_flush(void *m) { (void)m; return 0; }
 static UINT fx_file_close(FX_FILE *f) {
   if (f==&g_sd_file) raw_closes++; else telemetry_closes++;
   return 0;
 }
+static UINT sd_close_log(FX_FILE *f, char *name) { (void)name; return fx_file_close(f); }
 static UINT sd_flush_pending(void) { return 0; }
 static UINT sd_open_timestamped_log(const daq_calibration_t *c) {
   raw_opens++; g_file_open=1; g_sd_open_calibration=*c; return 0;
@@ -44,7 +46,8 @@ static UINT sd_open_timestamped_log(const daq_calibration_t *c) {
 static UINT sd_open_log(FX_FILE *f, char *n, size_t size, const char *prefix,
                         const daq_calibration_t *c) {
   (void)n; (void)size; (void)c;
-  assert(f==&g_sd_telemetry_file && strcmp(prefix,"DAQ_TELEMETRY")==0);
+  assert(f==&g_sd_telemetry_file && (strcmp(prefix,"DAQ_TELEMETRY")==0 ||
+                                  strcmp(prefix,"DAQ_LAUNCH_TELEMETRY")==0));
   telemetry_opens++; return 0;
 }
 static UINT fx_file_write(FX_FILE *f, VOID *data, unsigned len) {
@@ -53,7 +56,7 @@ static UINT fx_file_write(FX_FILE *f, VOID *data, unsigned len) {
 }
 """ + telemetry + raw + r"""
 int main(void) {
-  sd_line_slot_t row={{1,0},"kg1000_network",14};
+  sd_line_slot_t row={{1,0},"kg1000_network",14,0};
   assert(sd_write_telemetry_row(&row)==0);
   assert(sd_write_telemetry_row(&row)==0 && telemetry_opens==1);
   daq_calibration_t next={2,3};
@@ -66,6 +69,18 @@ int main(void) {
   fail_write=1;
   assert(sd_write_telemetry_row(&row)==FX_IO_ERROR);
   assert(writes==5 && g_sd_open_calibration.slope==2);
+  fail_write=0;
+  row.session=123;
+  assert(sd_write_telemetry_row(&row)==0 && telemetry_opens==3);
+  /* Ten minutes at 500 Hz, with duplicate retained launch/calibration updates:
+   * keep appending to the same file instead of creating startup fragments. */
+  for (unsigned i=0; i<600U*500U; ++i) {
+    assert(sd_write_telemetry_row(&row)==0);
+    assert(sd_select_calibration(&next)==0);
+  }
+  assert(telemetry_opens==3 && raw_opens==1);
+  row.session=456;
+  assert(sd_write_telemetry_row(&row)==0 && telemetry_opens==4);
 }
 """
         with tempfile.TemporaryDirectory() as tmp:

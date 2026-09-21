@@ -16,6 +16,7 @@ TX_THREAD daq_thread;
 #define DAQ_SAMPLE_PERIOD_MS DAQ_ACQUISITION_PERIOD_MS
 #define DAQ_SAMPLE_PERIOD_TICKS ((DAQ_SAMPLE_PERIOD_MS * TX_TIMER_TICKS_PER_SECOND) / 1000U)
 #define DAQ_INPUT_VOLTAGE_LOW_V 8.5f
+#define DAQ_INPUT_VOLTAGE_RECOVERED_V 9.0f
 #define DAQ_ENABLE_DUMMY_CAN_TELEMETRY 0U
 #define DAQ_RAW_BATCH_MAX DAQ_RAW_BATCH_CAPACITY
 #define DAQ_SLOW_SENSOR_LOG_DIVIDER ((1000U + DAQ_SAMPLE_PERIOD_MS - 1U) / DAQ_SAMPLE_PERIOD_MS)
@@ -295,6 +296,10 @@ void daq_thread_entry(ULONG initial_input)
 #if (DISABLE_SD_CARD == 0U)
       (void)sd_card_notify_power_loss();
 #endif
+    }
+    else if (snapshot.input_voltage_v >= DAQ_INPUT_VOLTAGE_RECOVERED_V)
+    {
+      power_loss_latched = 0U; /* Re-arm after recovery, with hysteresis. */
     }
 
     /* A power-loss notification asks the SD worker to flush. It must not

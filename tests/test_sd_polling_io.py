@@ -22,14 +22,16 @@ class SdPollingTests(unittest.TestCase):
 #include "daq_timestamp.h"
 typedef int sd_card_status_t;
 typedef struct { float slope; } daq_calibration_t;
-typedef struct { daq_calibration_t calibration; char line[384]; uint16_t len; } sd_line_slot_t;
+typedef struct { daq_calibration_t calibration; char line[384]; uint16_t len; uint64_t session; } sd_line_slot_t;
 enum { SD_CARD_STATUS_OK, SD_CARD_STATUS_BUSY, SD_CARD_STATUS_BACKPRESSURE, SD_CARD_STATUS_IO_ERROR };
-static unsigned g_sd_services_initialized, g_power_loss_mode, g_sd_line_drop_count;
+static unsigned g_sd_services_initialized, g_sd_line_drop_count;
 static sd_line_slot_t slot;
 static int full, enqueued;
 static sd_line_slot_t *sd_alloc_slot(void) { return full ? NULL : &slot; }
 static void sd_free_slot(sd_line_slot_t *s) { (void)s; }
 static unsigned sd_calibration_snapshot(daq_calibration_t *c) { c->slope=1; return 0; }
+static uint64_t sd_run_snapshot(void) { return 0; }
+static unsigned sd_launch_finished(void) { return 0; }
 static void sd_format_float(char *s, float v) { snprintf(s,24,"%.3f",(double)v); }
 static void sd_format_u64(char *s, uint64_t v) { snprintf(s,21,"%llu",(unsigned long long)v); }
 static uint64_t network_ms = 1234;
@@ -52,8 +54,8 @@ int main(void) {
   full=1;
   assert(sd_card_enqueue_csv_row("kg1000_network", 40, 0.25f, NULL)==SD_CARD_STATUS_BACKPRESSURE);
   assert(g_sd_line_drop_count==1 && enqueued==1);
-  g_power_loss_mode=1;
-  assert(sd_card_enqueue_csv_row("kg1000_network", 60, 0.25f, NULL)==SD_CARD_STATUS_BUSY);
+  full=0;
+  assert(sd_card_enqueue_csv_row("kg1000_network", 60, 0.25f, NULL)==SD_CARD_STATUS_OK);
 }
 '''
         with tempfile.TemporaryDirectory() as tmp:

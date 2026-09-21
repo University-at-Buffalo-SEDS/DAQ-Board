@@ -185,9 +185,11 @@ class QualificationContractTests(unittest.TestCase):
         # Raw acquisition is continuous: an unbounded drain can prevent CSV
         # rows, flushes and calibration rotation from ever being serviced.
         self.assertNotIn("while (tx_queue_receive(&g_sd_raw_queue", sd)
-        csv = sd.index("if (tx_queue_receive(&g_sd_queue", drain)
-        self.assertIn("TX_NO_WAIT", sd[csv:csv + 90])
-        self.assertIn("else if (serviced_work == 0U)", sd[csv:])
+        csv = sd.index("serviced_work |= sd_service_telemetry_rows()", drain)
+        service = sd[sd.index("static uint8_t sd_service_telemetry_rows"):drain]
+        self.assertIn("TX_NO_WAIT", service)
+        self.assertIn("budget < 4U", service)
+        self.assertIn("if (serviced_work == 0U)", sd[csv:])
         calibration = (root / "Core" / "Src" / "daq_calibration.c").read_text(
             encoding="utf-8"
         )

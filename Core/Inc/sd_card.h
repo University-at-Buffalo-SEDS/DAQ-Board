@@ -42,6 +42,7 @@ UINT sd_card_request_flush(void);
 UINT sd_card_notify_power_loss(void);
 UINT sd_card_is_ready(void);
 void sd_card_set_calibration(const daq_calibration_t *calibration);
+void sd_card_set_launch_clock(uint64_t session, uint64_t close_unix_ms);
 
 #ifdef __cplusplus
 }

@@ -1,6 +1,7 @@
 // telemetry.c
 #include "telemetry.h"
 #include "daq_calibration.h"
+#include "daq_log_clock.h"
 #include "flight_state_cache.h"
 #include "sim_network_probe.h"
 #include "ota_stream.h"
@@ -218,7 +219,9 @@ uint64_t telemetry_unix_ms(void) {
 #else
   uint64_t unix_ms = 0ULL;
 
-  if (g_router.r && seds_router_get_network_time_ms(g_router.r, &unix_ms) == SEDS_OK) {
+  /* An uptime-only network estimate is not a calendar date. */
+  if (g_router.r && seds_router_get_network_time_ms(g_router.r, &unix_ms) == SEDS_OK &&
+      unix_ms >= 315532800000ULL && unix_ms < 4354819200000ULL) {
     return unix_ms;
   }
 
@@ -435,6 +438,7 @@ SedsResult telemetry_poll_discovery(void) {
   bool did_queue = false;
   (void)flight_state_cache_poll(g_router.r);
   (void)daq_calibration_poll(g_router.r);
+  (void)daq_log_clock_poll(g_router.r);
   const SedsResult result = seds_router_poll_discovery(g_router.r, &did_queue);
   if (result == SEDS_OK) {
     sim_probe_emit_heartbeat(g_router.r, telemetry_now_ms());
@@ -599,6 +603,7 @@ SedsResult init_telemetry_router(void) {
   g_router.r = r;
   result = flight_state_cache_init(r);
   if (result == SEDS_OK) result = daq_calibration_init(r);
+  if (result == SEDS_OK) result = daq_log_clock_init(r);
   if (result != SEDS_OK) {
     seds_router_free(r);
     g_router.r = NULL;
