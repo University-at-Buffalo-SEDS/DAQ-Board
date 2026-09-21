@@ -128,6 +128,30 @@ state. Both publish raw float32 values and retain their own GS calibration.
 
 ## Checking a flat reading
 
+### Live plot without reflashing
+
+Run `python3 tools/loadcell_plot.py` with the ST-Link attached to the DAQ.
+Python 3 and OpenOCD must be installed. The script opens a browser GUI at
+`http://127.0.0.1:8765`, verifies the running firmware against
+`build/Release_Script/DAQ-Board.elf`, and reads the ADC ring buffer while the
+processor keeps running. Use `--elf PATH` if a different ELF was flashed.
+If OpenOCD is already serving the DAQ on TCL port 6666, add `--attach`.
+Avoid starting a second debugger against the same probe.
+
+The GUI shows separate CH0/P7 and CH1/P8 traces, with selectable ADC counts,
+nominal volts, raw calibration input, and calibrated kg. **Set plot baseline**
+subtracts the displayed starting value without changing firmware calibration.
+Stale samples are marked. CSV files are recorded under `build/loadcell-plots/`;
+**Download visible CSV** exports the current time window. Ctrl+C stops the
+script and any OpenOCD process it started. With `--attach`, the existing
+debugger is left running.
+
+This is a sampled debug capture, not a lossless substitute for the SD logs.
+The firmware's saved calibration is used to calculate kg; identity defaults
+must be calibrated using GroundStation before treating that display as mass.
+
+### Analog measurements
+
 Sheet 10 gives AMP1 a nominal 2.4/11 V bias (about 0.218 V) and AMP2 a
 nominal 2.4/4 V bias (0.600 V). Each input has a 1 MΩ pull-down. With the
 cell disconnected, an output near its bias with noise is plausible; this
