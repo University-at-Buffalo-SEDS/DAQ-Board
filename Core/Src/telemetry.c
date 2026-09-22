@@ -567,6 +567,9 @@ SedsResult init_telemetry_router(void) {
   if (result == SEDS_OK)
     result = seds_router_set_typed_route(r, -1, (uint32_t)SEDS_DT_KG50,
                                        g_can_side_id, true);
+  if (result == SEDS_OK)
+    result = seds_router_set_typed_route(r, -1, (uint32_t)SEDS_DT_DAQ_ADC_TEMPERATURE,
+                                       g_can_side_id, true);
   if (result != SEDS_OK) {
     seds_router_free(r);
     g_can_side_id = -1;

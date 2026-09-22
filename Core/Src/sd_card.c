@@ -368,24 +368,29 @@ static UINT sd_open_log(FX_FILE *file, char *g_sd_filename, size_t filename_size
   }
 
   static const char header[] =
-      "timestamp_ms,monotonic_ms,sensor,value,raw_adc_code,raw_value,calibrated_value,time_source\r\n";
+      "timestamp_ms,monotonic_ms,sensor,value,raw_adc_code,raw_value,calibrated_value,time_source,adc_temperature_c,adc_temperature_code\r\n";
   status = fx_file_write(file, (VOID *)header, sizeof(header) - 1U);
   if (status == FX_SUCCESS)
   {
-    char calibration_line[512];
-    char coefficients[11][24];
+    char calibration_line[768];
+    char coefficients[17][24];
     sd_format_float(coefficients[0], calibration.kg1000_slope);
     sd_format_float(coefficients[1], calibration.kg1000_intercept);
     sd_format_float(coefficients[2], calibration.iadc_slope);
     sd_format_float(coefficients[3], calibration.iadc_intercept);
     for (unsigned i = 0; i < 7; ++i)
       sd_format_float(coefficients[4 + i], calibration.kg50[i]);
+    for (unsigned i = 0; i < 4; ++i)
+      sd_format_float(coefficients[11 + i], calibration.thermal[i]);
+    sd_format_float(coefficients[15], calibration.filter_tau_ms[0]);
+    sd_format_float(coefficients[16], calibration.filter_tau_ms[1]);
     const int len = snprintf(
         calibration_line, sizeof(calibration_line),
-        "# calibration,kg1000_slope=%s,kg1000_intercept=%s,iadc_slope=%s,iadc_intercept=%s,kg50_c0=%s,kg50_c1=%s,kg50_c2=%s,kg50_c3=%s,kg50_c4=%s,kg50_x0=%s,kg50_tare=%s\r\n",
+        "# calibration,kg1000_slope=%s,kg1000_intercept=%s,iadc_slope=%s,iadc_intercept=%s,kg50_c0=%s,kg50_c1=%s,kg50_c2=%s,kg50_c3=%s,kg50_c4=%s,kg50_x0=%s,kg50_tare=%s,kg1000_temp_ref=%s,kg1000_raw_per_c=%s,kg50_temp_ref=%s,kg50_raw_per_c=%s,kg1000_filter_tau_ms=%s,kg50_filter_tau_ms=%s\r\n",
         coefficients[0], coefficients[1], coefficients[2], coefficients[3],
         coefficients[4], coefficients[5], coefficients[6], coefficients[7],
-        coefficients[8], coefficients[9], coefficients[10]);
+        coefficients[8], coefficients[9], coefficients[10],
+        coefficients[11], coefficients[12], coefficients[13], coefficients[14], coefficients[15], coefficients[16]);
     if (len <= 0 || (size_t)len >= sizeof(calibration_line))
       status = FX_IO_ERROR;
     else
@@ -748,7 +753,7 @@ void sd_card_writer_thread_entry(ULONG initial_input)
     {
       serviced_work = 1U;
       sd_raw_slot_t *slot = (sd_raw_slot_t *)(uintptr_t)message;
-      char line[128];
+      char line[192];
       if (slot != NULL)
       {
         if (slot->session != g_sd_raw_session) {
@@ -770,18 +775,20 @@ void sd_card_writer_thread_entry(ULONG initial_input)
         for (uint16_t i = 0U; i < slot->count; ++i)
         {
           const sd_raw_adc_record_t *sample = &slot->samples[i];
-          char raw_text[24], calibrated_text[24];
+          char raw_text[24], calibrated_text[24], temperature_text[24];
+          sd_format_float(temperature_text, sample->adc_temperature_c);
           sd_format_float(raw_text, sample->raw_value);
           sd_format_float(calibrated_text, sample->calibrated_value);
           char stamp_text[21];
           sd_format_u64(stamp_text, daq_timestamp_ms(sample->network_unix_ms, sample->monotonic_ms));
-          const int len = snprintf(line, sizeof(line), "%s,%lu,%s,,%ld,%s,%s,%s\r\n",
+          const int len = snprintf(line, sizeof(line), "%s,%lu,%s,,%ld,%s,%s,%s,%s,%ld\r\n",
                                    stamp_text,
                                    (unsigned long)sample->monotonic_ms,
                                    sample->channel == 1U ? "kg50_raw" : "mcp3564r_raw",
                                    (long)sample->raw_adc_code,
                                    raw_text, calibrated_text,
-                                   sample->network_unix_ms != 0U ? "network" : "local");
+                                   sample->network_unix_ms != 0U ? "network" : "local",
+                                   temperature_text, (long)sample->adc_temperature_code);
           if ((len <= 0) || ((size_t)len >= sizeof(line)) ||
               (sd_write_bytes(line, (size_t)len) != FX_SUCCESS))
           {
@@ -945,7 +952,7 @@ sd_card_status_t sd_card_log_packet(const SedsPacketView *pkt)
     return SD_CARD_STATUS_IO_ERROR;
   }
   const int suffix = snprintf(&slot->line[prefix + want],
-      sizeof(slot->line) - (size_t)(prefix + want), ",,,,%s",
+      sizeof(slot->line) - (size_t)(prefix + want), ",,,,%s,,",
       network_ms != 0U ? "network" : "local");
   if (suffix <= 0 || (size_t)suffix + 2U >= sizeof(slot->line) - (size_t)(prefix + want))
   {
@@ -988,7 +995,7 @@ sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,
       telemetry_unix_ms(), telemetry_now_ms(), timestamp_ms);
   sd_format_u64(unix_text, daq_timestamp_ms(network_ms, timestamp_ms));
   sd_format_u64(monotonic_text, timestamp_ms);
-  const int len = snprintf(slot->line, sizeof(slot->line), "%s,%s,%s,%s,,,,%s\r\n",
+  const int len = snprintf(slot->line, sizeof(slot->line), "%s,%s,%s,%s,,,,%s,,\r\n",
                            unix_text, monotonic_text,
                            sensor_name, value_text, network_ms != 0U ? "network" : "local");
   if ((len <= 0) || ((size_t)len >= sizeof(slot->line)))

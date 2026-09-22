@@ -46,6 +46,7 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *);
 
 HARNESS = r'''
 #include <assert.h>
+#include <math.h>
 #include <string.h>
 #include "mcp3564r.h"
 #include "main.h"
@@ -161,7 +162,7 @@ static void test_configuration(void) {
   assert(registers[2] == 0x14); /* MCLK/1, OSR=1024. */
   assert(registers[3] == 0xCF); /* Gain 1, boost 2, AZ_MUX/AZ_REF enabled. */
   assert(registers[4] == 0xF0); /* Continuous scan cycles, 32-bit tagged data. */
-  assert(registers[7] == 3);    /* CH1-AGND and CH0-AGND, no differential pair. */
+  assert(registers[7] == 0x1003);    /* TEMP, CH1-AGND and CH0-AGND. */
   assert(registers[8] == 0);    /* No extra inter-scan timer delay. */
   assert(start_commands == 1 && timer_running);
 }
@@ -205,7 +206,17 @@ static void test_not_ready_and_recovery(void) {
   receive(1, 2197152);
   (void)take(1, 2197152);
   /* A diagnostic-channel result cannot masquerade as a load-cell sample. */
-  receive(12, 12345);
+  receive(12, 305656); /* Approximately 25 C. */
+  receive(0, 790001);
+  mcp3564r_sample_t warm = take(0, 790001);
+  assert(warm.temperature_code == 305656);
+  assert(warm.temperature_c > 24.9f && warm.temperature_c < 25.1f);
+  tick += 2001;
+  receive(0, 790001);
+  assert(isnan(take(0, 790001).temperature_c));
+  receive(12, 12345); /* Implausible temperature invalidates it. */
+  receive(1, 790001);
+  assert(isnan(take(1, 790001).temperature_c));
   assert(!mcp3564r_pending_samples());
   fail_next_dma = 1;
   receive(1, 2297152);

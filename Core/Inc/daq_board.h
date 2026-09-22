@@ -26,6 +26,7 @@ typedef struct
   float ext_adc_voltage_v;
   float ext_adc_loadcell_kg1000;
   float ext_adc_temp_c;
+  int32_t ext_adc_temp_code;
 } daq_snapshot_t;
 
 UINT daq_board_init(void);

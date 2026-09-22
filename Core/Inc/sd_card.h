@@ -24,6 +24,8 @@ typedef struct
   int32_t raw_adc_code;
   float raw_value;
   float calibrated_value;
+  float adc_temperature_c;
+  int32_t adc_temperature_code;
   uint8_t channel;
 } sd_raw_adc_record_t;
 
