@@ -1,6 +1,7 @@
 #include "DAQ-Threads.h"
 
 #include "sd_card.h"
+#include "daq_rates.h"
 
 TX_THREAD sd_writer_thread;
 
@@ -21,8 +22,8 @@ UINT create_sd_writer_thread(void)
                           0U,
                           g_sd_writer_thread_stack,
                           sizeof(g_sd_writer_thread_stack),
-                          8U,
-                          8U,
-                          TX_NO_TIME_SLICE,
+                          DAQ_IO_THREAD_PRIORITY,
+                          DAQ_IO_THREAD_PRIORITY,
+                          (TX_TIMER_TICKS_PER_SECOND * DAQ_IO_THREAD_SLICE_MS + 999U) / 1000U,
                           TX_AUTO_START);
 }

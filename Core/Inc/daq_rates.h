@@ -16,16 +16,26 @@
 #define DAQ_BROADCAST_RATE_HZ 500U
 #endif
 #define DAQ_ADC_MCLK_HZ 16000000U
+/* Temperature must refresh independently of acquisition-loop overruns. */
+#define DAQ_TEMPERATURE_REPORT_PERIOD_MS 100U
+/* Acquisition can overrun its period under telemetry load. Give SD an equal
+ * priority and a bounded slice instead of only the acquisition thread's tiny
+ * sleep gaps. IRQ-driven ADC acquisition continues during either worker. */
+#define DAQ_IO_THREAD_PRIORITY 6U
+#define DAQ_IO_THREAD_SLICE_MS 1U
 /* Size each SD batch for the service interval plus bounded scheduling slack.
  * Keeping 96 records per 2 ms slot would waste most of the RAM reserve. */
 #define DAQ_RAW_BATCH_CAPACITY (((DAQ_ADC_READ_RATE_HZ * DAQ_ACQUISITION_PERIOD_MS + 999U) / 1000U) + 4U)
-/* Bounded SD scheduling/startup reserve, independent of network cadence. */
+/* Reserve for intermittent card/filesystem stalls, independent of network
+ * cadence. The former 200 ms reserve overflowed during sustained bench runs. */
 #ifndef DAQ_SD_RAW_BUFFER_MS
-#define DAQ_SD_RAW_BUFFER_MS 200U
+#define DAQ_SD_RAW_BUFFER_MS 800U
 #endif
+/* Full-batch equivalents used to budget the compact byte pool. The actual
+ * pointer queue can hold more, smaller batches within that same RAM budget. */
 #define DAQ_SD_RAW_QUEUE_DEPTH ((DAQ_SD_RAW_BUFFER_MS + DAQ_ACQUISITION_PERIOD_MS - 1U) / DAQ_ACQUISITION_PERIOD_MS + 1U)
-#if DAQ_SD_RAW_QUEUE_DEPTH < 2 || DAQ_SD_RAW_QUEUE_DEPTH > 128
-#error "SD raw reserve must fit between 2 and 128 batches"
+#if DAQ_SD_RAW_QUEUE_DEPTH < 2 || DAQ_SD_RAW_QUEUE_DEPTH > 512
+#error "SD raw reserve must fit between 2 and 512 batches"
 #endif
 
 #if DAQ_ADC_OSR == 32

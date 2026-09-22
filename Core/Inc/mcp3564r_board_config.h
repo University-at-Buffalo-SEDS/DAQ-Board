@@ -9,7 +9,14 @@
  * CONFIG2 GAIN[2:0]=001 is unity gain, not 16x. */
 #define MCP3564R_BOARD_CONFIG0 0x82U
 #define MCP3564R_BOARD_CONFIG2 0xCFU
-#define MCP3564R_BOARD_SCAN 0x001003U /* TEMP (CH_ID 12), CH1, CH0 */
+#define MCP3564R_BOARD_SCAN 0x000003U /* CH1, CH0 at the load-cell clock/filter. */
+/* The die sensor reads about -33 C on this board at 16 MHz, even with long
+ * settling and TEMP-only scans. Measure it separately at MCLK/4 = 4 MHz,
+ * close to the datasheet's 4.9152 MHz characterization, OSR 256, gain 1.
+ * Keep the load-cell clock/filter/gain and voltage calibration unchanged. */
+#define MCP3564R_TEMPERATURE_CONFIG1 0x8cU
+#define MCP3564R_TEMPERATURE_SCAN 0x001000U
+#define MCP3564R_TEMPERATURE_INTERVAL_MS 100U
 #define MCP3564R_NOMINAL_VREF_V 2.4f
 
 #if ((MCP3564R_BOARD_CONFIG2 >> 3U) & 7U) != 1U
@@ -24,7 +31,7 @@ static inline float mcp3564r_code_to_voltage(int32_t code)
   return ((float)code * MCP3564R_NOMINAL_VREF_V) / 8388608.0f;
 }
 
-/* DS20006391A equation 5-1, unity gain (forced for TEMP in SCAN). */
+/* DS20006391C equation 5-1, unity gain; acquire at the temperature clock. */
 static inline float mcp3564r_code_to_temperature(int32_t code)
 {
   return 0.00040096f * (float)code * MCP3564R_NOMINAL_VREF_V - 269.13f;

@@ -21,14 +21,14 @@ class SdPollingTests(unittest.TestCase):
 #include <string.h>
 #include "daq_timestamp.h"
 typedef int sd_card_status_t;
+#define SD_LINE_MAX 384U
 typedef struct { float slope; } daq_calibration_t;
 typedef struct { daq_calibration_t calibration; char line[384]; uint16_t len; uint64_t session; } sd_line_slot_t;
 enum { SD_CARD_STATUS_OK, SD_CARD_STATUS_BUSY, SD_CARD_STATUS_BACKPRESSURE, SD_CARD_STATUS_IO_ERROR };
 static unsigned g_sd_services_initialized, g_sd_line_drop_count;
 static sd_line_slot_t slot;
 static int full, enqueued;
-static sd_line_slot_t *sd_alloc_slot(void) { return full ? NULL : &slot; }
-static void sd_free_slot(sd_line_slot_t *s) { (void)s; }
+static sd_line_slot_t *sd_alloc_slot(uint16_t len) { assert(len < 384); return full ? NULL : &slot; }
 static unsigned sd_calibration_snapshot(daq_calibration_t *c) { c->slope=1; return 0; }
 static uint64_t sd_run_snapshot(void) { return 0; }
 static unsigned sd_launch_finished(void) { return 0; }
@@ -95,6 +95,7 @@ typedef unsigned char UCHAR;
 #define FX_IO_ERROR 1U
 static int hsd1;
 static unsigned tick, busy, program_ticks = 2U;
+static unsigned g_sd_max_read_ms, g_sd_max_write_ms;
 static unsigned HAL_GetTick(void) { return tick; }
 static void tx_thread_sleep(unsigned n) { tick += n; }
 static unsigned HAL_SD_GetCardState(int *h) {

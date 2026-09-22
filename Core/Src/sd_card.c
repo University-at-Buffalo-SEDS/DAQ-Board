@@ -8,6 +8,7 @@
 #include "daq_timestamp.h"
 #include "sd_calendar.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -16,8 +17,10 @@ UINT _fx_partition_offset_calculate(void *partition_sector, UINT partition,
                                     ULONG *partition_start,
                                     ULONG *partition_size);
 
-#define SD_QUEUE_DEPTH 24U
-#define SD_RAW_QUEUE_DEPTH DAQ_SD_RAW_QUEUE_DEPTH
+/* Report rows also accumulate while the card stalls; 24 slots overflowed
+ * during ordinary flushes even when raw recording kept up. */
+#define SD_QUEUE_DEPTH 1024U
+#define SD_RAW_QUEUE_DEPTH 1024U
 #define SD_RAW_BATCH_MAX DAQ_RAW_BATCH_CAPACITY
 #define SD_LINE_MAX 384U
 #define SD_MEDIA_CACHE_SIZE (8U * 512U)
@@ -36,19 +39,17 @@ UINT _fx_partition_offset_calculate(void *partition_sector, UINT partition,
 typedef struct
 {
   uint16_t len;
-  uint8_t in_use;
   daq_calibration_t calibration;
   uint64_t session;
-  char line[SD_LINE_MAX];
+  char line[];
 } sd_line_slot_t;
 
 typedef struct
 {
   uint16_t count;
-  uint8_t in_use;
   daq_calibration_t calibration;
   uint64_t session;
-  sd_raw_adc_record_t samples[SD_RAW_BATCH_MAX];
+  sd_raw_adc_record_t samples[];
 } sd_raw_slot_t;
 
 static TX_QUEUE g_sd_queue;
@@ -57,8 +58,14 @@ static TX_QUEUE g_sd_raw_queue;
 static ULONG g_sd_raw_queue_storage[SD_RAW_QUEUE_DEPTH];
 static TX_MUTEX g_sd_pool_mutex;
 static TX_EVENT_FLAGS_GROUP g_sd_flags;
-static sd_line_slot_t g_sd_slots[SD_QUEUE_DEPTH];
-static sd_raw_slot_t g_sd_raw_slots[SD_RAW_QUEUE_DEPTH];
+/* Preserve the old RAM budgets, but allocate only the samples/CSV bytes
+ * actually present. Small batches no longer reserve twelve sample records. */
+static TX_BYTE_POOL g_sd_line_pool, g_sd_raw_pool;
+static UCHAR g_sd_line_pool_storage[384U * (offsetof(sd_line_slot_t, line) + SD_LINE_MAX)] SD_ALIGN_32;
+static UCHAR g_sd_raw_pool_storage[DAQ_SD_RAW_QUEUE_DEPTH *
+    (offsetof(sd_raw_slot_t, samples) + SD_RAW_BATCH_MAX * sizeof(sd_raw_adc_record_t))] SD_ALIGN_32;
+_Static_assert(sizeof(g_sd_line_pool_storage) <= 180U * 1024U, "SD telemetry RAM budget");
+_Static_assert(sizeof(g_sd_raw_pool_storage) <= 300U * 1024U, "SD raw RAM budget");
 
 static FX_MEDIA g_sd_media;
 static FX_FILE g_sd_file;
@@ -70,10 +77,12 @@ static UCHAR g_sd_media_cache[SD_MEDIA_CACHE_SIZE] SD_ALIGN_32;
 static UCHAR g_sd_transfer_buffer[SD_TRANSFER_SECTORS * SD_SECTOR_SIZE] SD_ALIGN_32;
 static UCHAR g_sd_write_buffer[4096U];
 static size_t g_sd_write_buffer_len = 0U;
+static UCHAR g_sd_telemetry_write_buffer[4096U];
+static size_t g_sd_telemetry_write_buffer_len = 0U;
 static char g_sd_filename[64];
 volatile uint32_t g_sd_ready = 0U;
 /* Debugger/simulator progress: 1 card init, 2 bus setup, 3 mount,
- * 4 open log, 5 ready. Preserve the failing stage for diagnosis. */
+ * 4 open log, 5 ready, 6 formatting. */
 volatile uint32_t g_sd_init_stage = 0U;
 static uint8_t g_sd_hardware_ready = 0U;
 static uint8_t g_file_open = 0U;
@@ -154,7 +163,17 @@ void sd_card_set_launch_clock(uint64_t session, uint64_t close_unix_ms)
 }
 
 volatile uint32_t g_sd_line_drop_count = 0U;
+volatile uint32_t g_sd_line_slots_used = 0U;
+volatile uint32_t g_sd_line_slots_peak = 0U;
 volatile uint32_t g_sd_raw_batch_drop_count = 0U;
+volatile uint32_t g_sd_raw_slots_used = 0U;
+volatile uint32_t g_sd_raw_slots_peak = 0U;
+volatile uint32_t g_sd_max_service_ms = 0U;
+volatile uint32_t g_sd_max_read_ms = 0U;
+volatile uint32_t g_sd_max_write_ms = 0U;
+volatile uint32_t g_sd_max_raw_service_ms = 0U;
+volatile uint32_t g_sd_max_telemetry_service_ms = 0U;
+volatile uint32_t g_sd_max_flush_ms = 0U;
 volatile uint32_t g_sd_write_error_count = 0U;
 volatile uint32_t g_sd_flush_count = 0U;
 volatile uint32_t g_sd_init_failures = 0U;
@@ -193,6 +212,7 @@ static UINT sd_wait_ready(void)
 
 static UINT sd_hal_read(UCHAR *destination, ULONG sector, ULONG sector_count)
 {
+  const uint32_t started = HAL_GetTick();
   while (sector_count != 0U)
   {
     const ULONG count = (sector_count > SD_TRANSFER_SECTORS)
@@ -212,11 +232,14 @@ static UINT sd_hal_read(UCHAR *destination, ULONG sector, ULONG sector_count)
     sector += count;
     sector_count -= count;
   }
+  const uint32_t elapsed = HAL_GetTick() - started;
+  if (elapsed > g_sd_max_read_ms) g_sd_max_read_ms = elapsed;
   return FX_SUCCESS;
 }
 
 static UINT sd_hal_write(const UCHAR *source, ULONG sector, ULONG sector_count)
 {
+  const uint32_t started = HAL_GetTick();
   while (sector_count != 0U)
   {
     const ULONG count = (sector_count > SD_TRANSFER_SECTORS)
@@ -236,6 +259,8 @@ static UINT sd_hal_write(const UCHAR *source, ULONG sector, ULONG sector_count)
     sector += count;
     sector_count -= count;
   }
+  const uint32_t elapsed = HAL_GetTick() - started;
+  if (elapsed > g_sd_max_write_ms) g_sd_max_write_ms = elapsed;
   return FX_SUCCESS;
 }
 
@@ -419,6 +444,48 @@ static UINT sd_open_timestamped_log(const daq_calibration_t *requested)
   return status;
 }
 
+static UINT sd_flush_telemetry_pending(void)
+{
+  if (g_sd_telemetry_write_buffer_len == 0U)
+  {
+    return FX_SUCCESS;
+  }
+  const UINT status = fx_file_write(&g_sd_telemetry_file, g_sd_telemetry_write_buffer,
+                                    (ULONG)g_sd_telemetry_write_buffer_len);
+  if (status != FX_SUCCESS)
+  {
+    g_sd_write_error_count++;
+    return status;
+  }
+  g_sd_telemetry_write_buffer_len = 0U;
+  return FX_SUCCESS;
+}
+
+static UINT sd_write_telemetry_bytes(const void *data, size_t len)
+{
+  const UCHAR *cursor = (const UCHAR *)data;
+  if ((g_telemetry_file_open == 0U) || (data == NULL) || (len == 0U))
+  {
+    return FX_PTR_ERROR;
+  }
+
+  while (len != 0U)
+  {
+    const size_t available = sizeof(g_sd_telemetry_write_buffer) - g_sd_telemetry_write_buffer_len;
+    const size_t copy_len = (len < available) ? len : available;
+    memcpy(&g_sd_telemetry_write_buffer[g_sd_telemetry_write_buffer_len], cursor, copy_len);
+    g_sd_telemetry_write_buffer_len += copy_len;
+    cursor += copy_len;
+    len -= copy_len;
+    if ((g_sd_telemetry_write_buffer_len == sizeof(g_sd_telemetry_write_buffer)) &&
+        (sd_flush_telemetry_pending() != FX_SUCCESS))
+    {
+      return FX_IO_ERROR;
+    }
+  }
+  return FX_SUCCESS;
+}
+
 /* Delayed telemetry rows rotate only their own file, never the raw log. */
 static UINT sd_write_telemetry_row(const sd_line_slot_t *slot)
 {
@@ -427,7 +494,8 @@ static UINT sd_write_telemetry_row(const sd_line_slot_t *slot)
        memcmp(&g_sd_telemetry_calibration, &slot->calibration,
              sizeof(slot->calibration)) != 0))
   {
-    if (fx_media_flush(&g_sd_media) != FX_SUCCESS) return FX_IO_ERROR;
+    if (sd_flush_telemetry_pending() != FX_SUCCESS ||
+        fx_media_flush(&g_sd_media) != FX_SUCCESS) return FX_IO_ERROR;
     if (sd_close_log(&g_sd_telemetry_file, g_sd_telemetry_filename) != FX_SUCCESS) return FX_IO_ERROR;
     g_telemetry_file_open = 0U;
   }
@@ -441,7 +509,7 @@ static UINT sd_write_telemetry_row(const sd_line_slot_t *slot)
     g_sd_telemetry_calibration = slot->calibration;
     g_sd_telemetry_session = slot->session;
   }
-  return fx_file_write(&g_sd_telemetry_file, (VOID *)slot->line, slot->len);
+  return sd_write_telemetry_bytes(slot->line, slot->len);
 }
 
 static UINT sd_marker_exists(void)
@@ -457,6 +525,64 @@ static UINT sd_marker_exists(void)
   return status;
 }
 
+/* FileX formats FAT tables one sector at a time. Coalesce those writes only
+ * during provisioning; normal FileX writes retain their synchronous semantics.
+ * Copy the buffer because FileX reuses it immediately after each callback. */
+static UCHAR g_sd_format_buffer[SD_TRANSFER_SECTORS * SD_SECTOR_SIZE];
+static ULONG g_sd_format_start;
+static ULONG g_sd_format_count;
+static UINT g_sd_format_error;
+volatile uint32_t g_sd_format_sectors_written;
+volatile uint32_t g_sd_mount_status;
+volatile uint32_t g_sd_format_status;
+
+static UINT sd_format_flush(void)
+{
+  if (g_sd_format_error != FX_SUCCESS) return g_sd_format_error;
+  if (g_sd_format_count == 0U) return FX_SUCCESS;
+  g_sd_format_error = sd_hal_write(g_sd_format_buffer, g_sd_format_start,
+                                  g_sd_format_count);
+  if (g_sd_format_error == FX_SUCCESS)
+  {
+    g_sd_format_sectors_written += g_sd_format_count;
+    g_sd_format_count = 0U;
+  }
+  return g_sd_format_error;
+}
+
+static VOID sd_format_driver(FX_MEDIA *media)
+{
+  if (media->fx_media_driver_request == FX_DRIVER_INIT)
+  {
+    g_sd_format_count = 0U;
+    g_sd_format_error = FX_SUCCESS;
+    g_sd_format_sectors_written = 0U;
+    sd_filex_driver(media);
+    return;
+  }
+  if (media->fx_media_driver_request == FX_DRIVER_WRITE)
+  {
+    ULONG sector = media->fx_media_driver_logical_sector + media->fx_media_hidden_sectors;
+    const UCHAR *source = media->fx_media_driver_buffer;
+    for (ULONG i = 0U; i < media->fx_media_driver_sectors; ++i, ++sector)
+    {
+      if (g_sd_format_count != 0U &&
+          sector != g_sd_format_start + g_sd_format_count)
+        (void)sd_format_flush();
+      if (g_sd_format_error != FX_SUCCESS) break;
+      if (g_sd_format_count == 0U) g_sd_format_start = sector;
+      memcpy(g_sd_format_buffer + g_sd_format_count * SD_SECTOR_SIZE,
+             source + i * SD_SECTOR_SIZE, SD_SECTOR_SIZE);
+      if (++g_sd_format_count == SD_TRANSFER_SECTORS) (void)sd_format_flush();
+    }
+    media->fx_media_driver_status = g_sd_format_error;
+    return;
+  }
+  /* Boot writes, reads, flush and uninit must observe all buffered FAT writes. */
+  media->fx_media_driver_status = sd_format_flush();
+  if (media->fx_media_driver_status == FX_SUCCESS) sd_filex_driver(media);
+}
+
 static UINT sd_format_and_mark(void)
 {
   HAL_SD_CardInfoTypeDef card_info = {0};
@@ -468,8 +594,9 @@ static UINT sd_format_and_mark(void)
     return FX_IO_ERROR;
   }
 
+  g_sd_init_stage = 6U;
   UINT status = fx_media_format(&g_sd_media,
-                                sd_filex_driver,
+                                sd_format_driver,
                                 FX_NULL,
                                 g_sd_media_cache,
                                 sizeof(g_sd_media_cache),
@@ -482,10 +609,12 @@ static UINT sd_format_and_mark(void)
                                 64U,
                                 255U,
                                 63U);
+  g_sd_format_status = status;
   if (status != FX_SUCCESS)
   {
     return status;
   }
+  g_sd_init_stage = 3U;
   status = fx_media_open(&g_sd_media, "DAQ SD", sd_filex_driver, FX_NULL,
                          g_sd_media_cache, sizeof(g_sd_media_cache));
   if (status != FX_SUCCESS)
@@ -524,6 +653,7 @@ static UINT sd_mount_or_provision(void)
 {
   UINT status = fx_media_open(&g_sd_media, "DAQ SD", sd_filex_driver, FX_NULL,
                               g_sd_media_cache, sizeof(g_sd_media_cache));
+  g_sd_mount_status = status;
   if ((status == FX_SUCCESS) && (sd_marker_exists() == FX_SUCCESS))
   {
     /* Upgrade cards provisioned before the directory label was added,
@@ -582,64 +712,63 @@ static UINT sd_write_bytes(const void *data, size_t len)
   return FX_SUCCESS;
 }
 
-static sd_line_slot_t *sd_alloc_slot(void)
+/* ThreadX byte pools may return word-aligned memory. Retain the original
+ * allocation before an explicitly 8-byte-aligned record (uint64_t members).
+ * Allocation is bounded to the static pools and never waits for free memory. */
+static void *sd_pool_allocate(TX_BYTE_POOL *pool, size_t bytes)
+{
+  void *allocation = NULL;
+  if (tx_byte_allocate(pool, &allocation, bytes + sizeof(void *) + 7U, TX_NO_WAIT) != TX_SUCCESS)
+    return NULL;
+  const uintptr_t aligned = ((uintptr_t)allocation + sizeof(void *) + 7U) & ~(uintptr_t)7U;
+  ((void **)aligned)[-1] = allocation;
+  return (void *)aligned;
+}
+
+static void sd_pool_release(void *slot)
+{
+  (void)tx_byte_release(((void **)slot)[-1]);
+}
+
+static sd_line_slot_t *sd_alloc_slot(uint16_t len)
 {
   sd_line_slot_t *slot = NULL;
-  if (tx_mutex_get(&g_sd_pool_mutex, TX_WAIT_FOREVER) != TX_SUCCESS)
-  {
-    return NULL;
-  }
-  for (uint32_t i = 0U; i < SD_QUEUE_DEPTH; ++i)
-  {
-    if (g_sd_slots[i].in_use == 0U)
-    {
-      g_sd_slots[i].in_use = 1U;
-      slot = &g_sd_slots[i];
-      break;
-    }
-  }
+  if (tx_mutex_get(&g_sd_pool_mutex, TX_WAIT_FOREVER) != TX_SUCCESS) return NULL;
+  slot = sd_pool_allocate(&g_sd_line_pool, offsetof(sd_line_slot_t, line) + len + 1U);
+  if (slot != NULL && ++g_sd_line_slots_used > g_sd_line_slots_peak)
+    g_sd_line_slots_peak = g_sd_line_slots_used;
   (void)tx_mutex_put(&g_sd_pool_mutex);
   return slot;
 }
 
 static void sd_free_slot(sd_line_slot_t *slot)
 {
-  if ((slot != NULL) &&
-      (tx_mutex_get(&g_sd_pool_mutex, TX_WAIT_FOREVER) == TX_SUCCESS))
+  if (slot != NULL && tx_mutex_get(&g_sd_pool_mutex, TX_WAIT_FOREVER) == TX_SUCCESS)
   {
-    slot->in_use = 0U;
-    slot->len = 0U;
+    --g_sd_line_slots_used;
+    sd_pool_release(slot);
     (void)tx_mutex_put(&g_sd_pool_mutex);
   }
 }
 
-static sd_raw_slot_t *sd_alloc_raw_slot(void)
+static sd_raw_slot_t *sd_alloc_raw_slot(uint16_t count)
 {
   sd_raw_slot_t *slot = NULL;
-  if (tx_mutex_get(&g_sd_pool_mutex, TX_WAIT_FOREVER) != TX_SUCCESS)
-  {
-    return NULL;
-  }
-  for (uint32_t i = 0U; i < SD_RAW_QUEUE_DEPTH; ++i)
-  {
-    if (g_sd_raw_slots[i].in_use == 0U)
-    {
-      g_sd_raw_slots[i].in_use = 1U;
-      slot = &g_sd_raw_slots[i];
-      break;
-    }
-  }
+  if (tx_mutex_get(&g_sd_pool_mutex, TX_WAIT_FOREVER) != TX_SUCCESS) return NULL;
+  slot = sd_pool_allocate(&g_sd_raw_pool, offsetof(sd_raw_slot_t, samples) +
+                          (size_t)count * sizeof(sd_raw_adc_record_t));
+  if (slot != NULL && ++g_sd_raw_slots_used > g_sd_raw_slots_peak)
+    g_sd_raw_slots_peak = g_sd_raw_slots_used;
   (void)tx_mutex_put(&g_sd_pool_mutex);
   return slot;
 }
 
 static void sd_free_raw_slot(sd_raw_slot_t *slot)
 {
-  if ((slot != NULL) &&
-      (tx_mutex_get(&g_sd_pool_mutex, TX_WAIT_FOREVER) == TX_SUCCESS))
+  if (slot != NULL && tx_mutex_get(&g_sd_pool_mutex, TX_WAIT_FOREVER) == TX_SUCCESS)
   {
-    slot->in_use = 0U;
-    slot->count = 0U;
+    --g_sd_raw_slots_used;
+    sd_pool_release(slot);
     (void)tx_mutex_put(&g_sd_pool_mutex);
   }
 }
@@ -746,6 +875,7 @@ void sd_card_writer_thread_entry(ULONG initial_input)
     /* Rotate only when a record with new coefficients arrives. Rotating from
      * the global snapshot while idle creates header-only files and can switch
      * forward then backward across an in-flight old acquisition batch. */
+    const uint32_t service_start_ms = HAL_GetTick();
 
     /* Bound raw work so a continuously replenished ADC queue cannot starve
      * live/replay rows, calibration rotation, or flush requests. */
@@ -801,7 +931,12 @@ void sd_card_writer_thread_entry(ULONG initial_input)
       }
     }
 
+    const uint32_t raw_ms = HAL_GetTick() - service_start_ms;
+    if (raw_ms > g_sd_max_raw_service_ms) g_sd_max_raw_service_ms = raw_ms;
+    const uint32_t telemetry_start_ms = HAL_GetTick();
     serviced_work |= sd_service_telemetry_rows();
+    const uint32_t telemetry_ms = HAL_GetTick() - telemetry_start_ms;
+    if (telemetry_ms > g_sd_max_telemetry_service_ms) g_sd_max_telemetry_service_ms = telemetry_ms;
 
     if (tx_event_flags_get(&g_sd_flags,
                            SD_FLAG_FLUSH_REQUEST | SD_FLAG_POWER_LOSS,
@@ -814,8 +949,10 @@ void sd_card_writer_thread_entry(ULONG initial_input)
     if ((flags != 0U) ||
         ((tx_time_get() - last_flush) >= TX_TIMER_TICKS_PER_SECOND))
     {
+      const uint32_t flush_start_ms = HAL_GetTick();
       sd_update_filesystem_clock();
       if ((sd_flush_pending() == FX_SUCCESS) &&
+          (sd_flush_telemetry_pending() == FX_SUCCESS) &&
           (fx_media_flush(&g_sd_media) == FX_SUCCESS))
       {
         g_sd_flush_count++;
@@ -825,6 +962,8 @@ void sd_card_writer_thread_entry(ULONG initial_input)
         g_sd_write_error_count++;
       }
       last_flush = tx_time_get();
+      const uint32_t flush_ms = HAL_GetTick() - flush_start_ms;
+      if (flush_ms > g_sd_max_flush_ms) g_sd_max_flush_ms = flush_ms;
     }
 
     /* Producers stop enqueueing at T+120 s; drain their already queued data,
@@ -836,11 +975,14 @@ void sd_card_writer_thread_entry(ULONG initial_input)
       if (g_file_open != 0U && sd_flush_pending() == FX_SUCCESS &&
           sd_close_log(&g_sd_file, g_sd_filename) == FX_SUCCESS) g_file_open = 0U;
       if (g_telemetry_file_open != 0U &&
+          sd_flush_telemetry_pending() == FX_SUCCESS &&
           sd_close_log(&g_sd_telemetry_file, g_sd_telemetry_filename) == FX_SUCCESS)
         g_telemetry_file_open = 0U;
       (void)fx_media_flush(&g_sd_media);
     }
 
+    const uint32_t service_ms = HAL_GetTick() - service_start_ms;
+    if (service_ms > g_sd_max_service_ms) g_sd_max_service_ms = service_ms;
     if (serviced_work == 0U)
     {
       tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 1000U);
@@ -859,6 +1001,11 @@ UINT sd_card_init(TX_BYTE_POOL *byte_pool)
   {
     return TX_MUTEX_ERROR;
   }
+  if (tx_byte_pool_create(&g_sd_line_pool, "sd_lines", g_sd_line_pool_storage,
+                           sizeof(g_sd_line_pool_storage)) != TX_SUCCESS ||
+      tx_byte_pool_create(&g_sd_raw_pool, "sd_raw", g_sd_raw_pool_storage,
+                           sizeof(g_sd_raw_pool_storage)) != TX_SUCCESS)
+    return TX_POOL_ERROR;
   if (tx_queue_create(&g_sd_queue, "sd_queue", TX_1_ULONG,
                       g_sd_queue_storage, sizeof(g_sd_queue_storage)) != TX_SUCCESS)
   {
@@ -915,54 +1062,53 @@ sd_card_status_t sd_card_log_packet(const SedsPacketView *pkt)
   {
     return SD_CARD_STATUS_BUSY;
   }
-  sd_line_slot_t *slot = sd_alloc_slot();
-  if (slot == NULL)
-  {
-    g_sd_line_drop_count++;
-    return SD_CARD_STATUS_BACKPRESSURE;
-  }
+  char line[SD_LINE_MAX];
+  daq_calibration_t calibration;
   char unix_text[21], monotonic_text[21];
   const uint64_t local_ms = telemetry_now_ms();
   const uint64_t network_ms = telemetry_unix_ms();
   sd_format_u64(unix_text, daq_timestamp_ms(network_ms, local_ms));
   sd_format_u64(monotonic_text, local_ms);
-  (void)sd_calibration_snapshot(&slot->calibration);
-  slot->session = sd_run_snapshot();
-  const int prefix = snprintf(slot->line, sizeof(slot->line), "%s,%s,seds_packet,",
+  (void)sd_calibration_snapshot(&calibration);
+  const uint64_t session = sd_run_snapshot();
+  const int prefix = snprintf(line, sizeof(line), "%s,%s,seds_packet,",
                               unix_text, monotonic_text);
-  if ((prefix <= 0) || ((size_t)prefix >= sizeof(slot->line) - 16U))
+  if ((prefix <= 0) || ((size_t)prefix >= sizeof(line) - 16U))
   {
-    sd_free_slot(slot);
     return SD_CARD_STATUS_IO_ERROR;
   }
   int32_t want = seds_pkt_to_string_len(pkt);
   if (want < 0)
   {
-    sd_free_slot(slot);
     return SD_CARD_STATUS_IO_ERROR;
   }
-  const size_t available = sizeof(slot->line) - (size_t)prefix - 16U;
+  const size_t available = sizeof(line) - (size_t)prefix - 16U;
   if ((size_t)want > available)
   {
     want = (int32_t)available;
   }
-  if (seds_pkt_to_string(pkt, &slot->line[prefix], (size_t)want + 1U) != SEDS_OK)
+  if (seds_pkt_to_string(pkt, &line[prefix], (size_t)want + 1U) != SEDS_OK)
   {
-    sd_free_slot(slot);
     return SD_CARD_STATUS_IO_ERROR;
   }
-  const int suffix = snprintf(&slot->line[prefix + want],
-      sizeof(slot->line) - (size_t)(prefix + want), ",,,,%s,,",
+  const int suffix = snprintf(&line[prefix + want],
+      sizeof(line) - (size_t)(prefix + want), ",,,,%s,,",
       network_ms != 0U ? "network" : "local");
-  if (suffix <= 0 || (size_t)suffix + 2U >= sizeof(slot->line) - (size_t)(prefix + want))
+  if (suffix <= 0 || (size_t)suffix + 2U >= sizeof(line) - (size_t)(prefix + want))
   {
-    sd_free_slot(slot);
     return SD_CARD_STATUS_IO_ERROR;
   }
   want += suffix;
-  slot->line[prefix + want] = '\r';
-  slot->line[prefix + want + 1] = '\n';
-  slot->len = (uint16_t)(prefix + want + 2);
+  line[prefix + want] = '\r';
+  line[prefix + want + 1] = '\n';
+  const uint16_t len = (uint16_t)(prefix + want + 2);
+  sd_line_slot_t *slot = sd_alloc_slot(len);
+  if (slot == NULL) { g_sd_line_drop_count++; return SD_CARD_STATUS_BACKPRESSURE; }
+  slot->calibration = calibration;
+  slot->session = session;
+  memcpy(slot->line, line, len);
+  slot->line[len] = '\0';
+  slot->len = len;
   return sd_enqueue_line(slot);
 }
 
@@ -974,20 +1120,16 @@ sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,
   /* The bounded row queue can accept startup records while the writer mounts
    * the card. Do not discard the first network row merely because mounting
    * runs in another task. A missing/slow card still produces backpressure
-   * when the fixed pool fills; no memory is allocated dynamically. */
+   * when the static byte pool fills; the general-purpose heap is not used. */
   if ((g_sd_services_initialized == 0U) || (sensor_name == NULL) || sd_launch_finished())
   {
     return SD_CARD_STATUS_BUSY;
   }
-  sd_line_slot_t *slot = sd_alloc_slot();
-  if (slot == NULL)
-  {
-    g_sd_line_drop_count++;
-    return SD_CARD_STATUS_BACKPRESSURE;
-  }
-  if (calibration != NULL) slot->calibration = *calibration;
-  else (void)sd_calibration_snapshot(&slot->calibration);
-  slot->session = sd_run_snapshot();
+  char line[SD_LINE_MAX];
+  daq_calibration_t captured_calibration;
+  if (calibration != NULL) captured_calibration = *calibration;
+  else (void)sd_calibration_snapshot(&captured_calibration);
+  const uint64_t session = sd_run_snapshot();
   char value_text[24];
   sd_format_float(value_text, value);
   char unix_text[21], monotonic_text[21];
@@ -995,14 +1137,18 @@ sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,
       telemetry_unix_ms(), telemetry_now_ms(), timestamp_ms);
   sd_format_u64(unix_text, daq_timestamp_ms(network_ms, timestamp_ms));
   sd_format_u64(monotonic_text, timestamp_ms);
-  const int len = snprintf(slot->line, sizeof(slot->line), "%s,%s,%s,%s,,,,%s,,\r\n",
+  const int len = snprintf(line, sizeof(line), "%s,%s,%s,%s,,,,%s,,\r\n",
                            unix_text, monotonic_text,
                            sensor_name, value_text, network_ms != 0U ? "network" : "local");
-  if ((len <= 0) || ((size_t)len >= sizeof(slot->line)))
+  if ((len <= 0) || ((size_t)len >= sizeof(line)))
   {
-    sd_free_slot(slot);
     return SD_CARD_STATUS_IO_ERROR;
   }
+  sd_line_slot_t *slot = sd_alloc_slot((uint16_t)len);
+  if (slot == NULL) { g_sd_line_drop_count++; return SD_CARD_STATUS_BACKPRESSURE; }
+  slot->calibration = captured_calibration;
+  slot->session = session;
+  memcpy(slot->line, line, (size_t)len + 1U);
   slot->len = (uint16_t)len;
   return sd_enqueue_line(slot);
 }
@@ -1011,12 +1157,15 @@ sd_card_status_t sd_card_enqueue_raw_adc_samples(const sd_raw_adc_record_t *samp
                                                  uint16_t count,
                                                  const daq_calibration_t *calibration)
 {
-  if ((g_sd_ready == 0U) || (samples == NULL) || (calibration == NULL) || (count == 0U) ||
+  /* Buffer the first samples while an already provisioned card mounts, just
+   * as the telemetry queue does. Missing/formatting cards remain bounded by
+   * the pool; the writer alone consumes records after a successful mount. */
+  if ((g_sd_services_initialized == 0U) || (samples == NULL) || (calibration == NULL) || (count == 0U) ||
       (count > SD_RAW_BATCH_MAX) || sd_launch_finished())
   {
     return SD_CARD_STATUS_BUSY;
   }
-  sd_raw_slot_t *slot = sd_alloc_raw_slot();
+  sd_raw_slot_t *slot = sd_alloc_raw_slot(count);
   if (slot == NULL)
   {
     g_sd_raw_batch_drop_count++;

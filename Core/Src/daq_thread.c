@@ -30,12 +30,32 @@ volatile uint32_t g_daq_loadcell_publish_ok_count = 0U;
 volatile uint32_t g_daq_loadcell_publish_fail_count = 0U;
 volatile uint32_t g_daq_kg50_publish_ok_count = 0U;
 volatile uint32_t g_daq_kg50_publish_fail_count = 0U;
+volatile uint32_t g_daq_temperature_publish_ok_count = 0U;
+volatile uint32_t g_daq_temperature_publish_fail_count = 0U;
 volatile uint32_t g_daq_raw_samples_drained_count = 0U;
 volatile uint32_t g_daq_nonzero_raw_sample_count = 0U;
 volatile uint32_t g_daq_sd_raw_batch_drop_count = 0U;
 volatile uint32_t g_daq_sd_network_row_ok_count = 0U;
 volatile uint32_t g_daq_sd_network_row_fail_count = 0U;
 volatile uint32_t g_daq_sample_overrun_count = 0U;
+
+/* Wall-time profiling, including preemption and mutex waits. Stages are board
+ * sampling, raw drain/enqueue, publishing, and ADC service. Read deltas of the
+ * totals/counts to locate rate limits without stopping acquisition. */
+volatile uint32_t g_daq_stage_ticks[4] = {0};
+volatile uint32_t g_daq_stage_max_ticks[4] = {0};
+volatile uint32_t g_daq_stage_count[4] = {0};
+
+static ULONG daq_profile_stage(unsigned stage, ULONG started)
+{
+  const ULONG now = tx_time_get();
+  const uint32_t elapsed = (uint32_t)(now - started);
+  g_daq_stage_ticks[stage] += elapsed;
+  if (elapsed > g_daq_stage_max_ticks[stage])
+    g_daq_stage_max_ticks[stage] = elapsed;
+  g_daq_stage_count[stage]++;
+  return now;
+}
 
 static ULONG g_daq_thread_stack[DAQ_THREAD_STACK_SIZE / sizeof(ULONG)];
 
@@ -226,6 +246,7 @@ void daq_thread_entry(ULONG initial_input)
   uint8_t power_loss_latched = 0U;
   uint8_t daq_ready = 1U;
   uint32_t slow_sensor_log_counter = 0U;
+  uint32_t last_temperature_report_ms = 0U;
   daq_downsample_t downsample = {0};
   daq_downsample_t downsample_kg50 = {0};
 #if (DISABLE_SD_CARD == 0U)
@@ -257,6 +278,7 @@ void daq_thread_entry(ULONG initial_input)
       continue;
     }
 
+    ULONG stage_started = tx_time_get();
     if (daq_board_sample(&snapshot) != TX_SUCCESS)
     {
       g_daq_sample_fail_count++;
@@ -264,6 +286,7 @@ void daq_thread_entry(ULONG initial_input)
       continue;
     }
 
+    stage_started = daq_profile_stage(0U, stage_started);
     g_daq_sample_ok_count++;
     const daq_calibration_t calibration = daq_calibration_current();
     daq_loadcell_window_t window;
@@ -281,10 +304,19 @@ void daq_thread_entry(ULONG initial_input)
     (void)daq_drain_ext_adc(&snapshot, NULL, DAQ_RAW_BATCH_MAX, &calibration, &window);
 #endif
 
+    stage_started = daq_profile_stage(1U, stage_started);
+    const uint32_t report_ms = (uint32_t)snapshot.monotonic_ms;
+    if ((uint32_t)(report_ms - last_temperature_report_ms) >= DAQ_TEMPERATURE_REPORT_PERIOD_MS)
+    {
+      last_temperature_report_ms = report_ms;
+      if (log_telemetry_asynchronous(SEDS_DT_DAQ_ADC_TEMPERATURE, &snapshot.ext_adc_temp_c, 1U, sizeof(float)) == SEDS_OK)
+        g_daq_temperature_publish_ok_count++;
+      else
+        g_daq_temperature_publish_fail_count++;
+    }
     if (++slow_sensor_log_counter >= DAQ_SLOW_SENSOR_LOG_DIVIDER)
     {
       slow_sensor_log_counter = 0U;
-      (void)log_telemetry_asynchronous(SEDS_DT_DAQ_ADC_TEMPERATURE, &snapshot.ext_adc_temp_c, 1U, sizeof(float));
       daq_store_snapshot_csv(&snapshot, &calibration, &window);
     }
     float filtered;
@@ -305,7 +337,9 @@ void daq_thread_entry(ULONG initial_input)
                            (uint32_t)snapshot.monotonic_ms, DAQ_BROADCAST_PERIOD_MS, &filtered))
       daq_publish_kg50(filtered, snapshot.monotonic_ms, &calibration);
 
+    stage_started = daq_profile_stage(2U, stage_started);
     (void)daq_board_ext_adc_start_dma();
+    (void)daq_profile_stage(3U, stage_started);
 
     if ((power_loss_latched == 0U) && (snapshot.input_voltage_v <= DAQ_INPUT_VOLTAGE_LOW_V))
     {
@@ -346,8 +380,8 @@ UINT create_daq_thread(void)
                           0U,
                           g_daq_thread_stack,
                           sizeof(g_daq_thread_stack),
-                          6U,
-                          6U,
-                          TX_NO_TIME_SLICE,
+                          DAQ_IO_THREAD_PRIORITY,
+                          DAQ_IO_THREAD_PRIORITY,
+                          (TX_TIMER_TICKS_PER_SECOND * DAQ_IO_THREAD_SLICE_MS + 999U) / 1000U,
                           TX_AUTO_START);
 }

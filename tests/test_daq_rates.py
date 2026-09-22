@@ -46,13 +46,13 @@ class DaqRateTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
 
     def test_default_and_fast_settings(self):
-        self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_ADC_OSR_BITS == 5); assert(DAQ_ADC_READ_INTERVAL_US == 271); assert(DAQ_BROADCAST_PERIOD_MS == 2); assert(DAQ_ACQUISITION_PERIOD_MS == 2); assert(DAQ_SD_RAW_QUEUE_DEPTH == 101); assert(DAQ_RAW_BATCH_CAPACITY == 12);}')
+        self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_ADC_OSR_BITS == 5); assert(DAQ_ADC_READ_INTERVAL_US == 271); assert(DAQ_BROADCAST_PERIOD_MS == 2); assert(DAQ_ACQUISITION_PERIOD_MS == 2); assert(DAQ_SD_RAW_QUEUE_DEPTH == 401); assert(DAQ_RAW_BATCH_CAPACITY == 12);}')
         self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_ADC_OSR_BITS == 3); assert(DAQ_ADC_READ_INTERVAL_US == 84); assert(DAQ_BROADCAST_PERIOD_MS == 100);}',
                      ['DAQ_ADC_OSR=256', 'DAQ_ADC_READ_RATE_HZ=12000', 'DAQ_ACQUISITION_PERIOD_MS=5', 'DAQ_BROADCAST_RATE_HZ=10'])
 
     def test_unsafe_configurations_fail_compilation(self):
         for defines in [['DAQ_ADC_READ_RATE_HZ=0'], ['DAQ_ADC_READ_RATE_HZ=12000'],
-                        ['DAQ_SD_RAW_BUFFER_MS=1000'],
+                        ['DAQ_SD_RAW_BUFFER_MS=2000'],
                         ['DAQ_BROADCAST_RATE_HZ=1000'], ['DAQ_ADC_OSR=123']]:
             with self.subTest(defines=defines):
                 self.compile('#include "daq_rates.h"\nint main(void) {}', defines, False)
@@ -105,5 +105,34 @@ int main(void) {
   assert(!daq_downsample_add(&state, 7, 1, UINT32_MAX-9, 20, &out));
   assert(daq_downsample_add(&state, 7, 1, 10, 20, &out));
   assert(out == 7);
+}
+''')
+
+    def test_temperature_publication_uses_elapsed_time_not_loop_count(self):
+        source = (ROOT / 'Core/Src/daq_thread.c').read_text()
+        block = source[source.index('    const uint32_t report_ms ='):
+                       source.index('    if (++slow_sensor_log_counter')]
+        self.compile(r'''#include <stdint.h>
+#include <assert.h>
+#include "daq_rates.h"
+#define SEDS_OK 0
+#define SEDS_DT_DAQ_ADC_TEMPERATURE 140
+static unsigned g_daq_temperature_publish_ok_count, g_daq_temperature_publish_fail_count;
+static unsigned last_temperature_report_ms;
+static struct { uint64_t monotonic_ms; float ext_adc_temp_c; } snapshot;
+static int log_telemetry_asynchronous(unsigned t, void *v, unsigned n, unsigned size) {
+  assert(t==140 && v==&snapshot.ext_adc_temp_c && n==1 && size==sizeof(float)); return 0;
+}
+static void publish(void) {
+''' + block + r'''
+}
+int main(void) {
+  for(unsigned ms=0;ms<=1000;ms+=20) { snapshot.monotonic_ms=ms; publish(); }
+  assert(g_daq_temperature_publish_ok_count==10);
+  snapshot.monotonic_ms=2500; publish(); publish();
+  assert(g_daq_temperature_publish_ok_count==11); /* no catch-up burst */
+  last_temperature_report_ms=UINT32_MAX-50;
+  snapshot.monotonic_ms=49; publish();
+  assert(g_daq_temperature_publish_ok_count==12 && !g_daq_temperature_publish_fail_count);
 }
 ''')

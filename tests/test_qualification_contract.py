@@ -197,7 +197,10 @@ class QualificationContractTests(unittest.TestCase):
         self.assertIn("persistent_store_get", calibration)
         self.assertIn("sd_card_set_calibration(&next)", calibration)
         self.assertIn('"SD Writer"', writer)
-        self.assertGreaterEqual(writer.count("8U,"), 2)
+        # Equal-priority bounded slices prevent either I/O worker starving.
+        self.assertGreaterEqual(writer.count("DAQ_IO_THREAD_PRIORITY,"), 2)
+        self.assertIn("DAQ_IO_THREAD_SLICE_MS", writer)
+        self.assertIn("DAQ_IO_THREAD_SLICE_MS", daq)
 
 if __name__ == "__main__":
     unittest.main()

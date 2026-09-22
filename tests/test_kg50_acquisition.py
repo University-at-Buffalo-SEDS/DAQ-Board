@@ -115,7 +115,7 @@ int main(void) {
 #include <string.h>
 #include "mcp3564r_board_config.h"
 int main(void) {
-  assert(MCP3564R_BOARD_SCAN == 0x1003);
+  assert(MCP3564R_BOARD_SCAN == 3);
   assert(((MCP3564R_BOARD_CONFIG2 >> 3) & 7) == 1);
   assert(mcp3564r_code_to_voltage(0) == 0);
   /* AMP2's nominal 0.6 V bias is one quarter of the 2.4 V reference. */

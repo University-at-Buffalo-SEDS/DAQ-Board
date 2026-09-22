@@ -32,19 +32,31 @@ legacy points; use live capture for temperature-aware calibration.
 
 ## Acquisition and wire contract
 
-MCP3564R SCAN enables TEMP (bit 12, channel ID 12), CH1 and CH0. TEMP uses unity
-gain internally. The first-order datasheet conversion is
+MCP3564R normally scans CH1 and CH0 at the existing 16 MHz clock and OSR 1024.
+Every 100 ms, the acquisition thread briefly selects TEMP only (bit 12,
+channel ID 12), with the clock prescaled to 4 MHz and OSR 256. After one TEMP
+result it restores the load-cell scan, clock, and filter. Gain remains unity.
+The first-order datasheet conversion is
 `T = 0.00040096 * code * 2.4 - 269.13` (Celsius). Invalid/out-of-range readings
 (outside -40..125 C), or readings older than 2 s, are unavailable. Each queued
 load sample retains its acquisition-time temperature. Temperature measurements
 are never queued as a load cell.
 
-Adding TEMP to every scan reduces per-cell throughput to roughly two-thirds
-of the previous two-channel scan, with unchanged OSR/auto-zero settings.
-The 500 Hz broadcast setting is a ceiling, not guaranteed sample throughput.
-Hardware timing and thermal performance still require bench validation.
+The temperature measurement briefly pauses load-cell conversions; TEMP no
+longer consumes a slot in every load-cell scan. The 500 Hz broadcast setting
+is a ceiling, not guaranteed sample throughput. A missing TEMP conversion
+times out after 50 ms so load acquisition can resume. Register changes run in
+the acquisition thread with DMA polling stopped, never inside a DMA ISR.
 
-- ID 140 `DAQ_ADC_TEMPERATURE`: one float32 Celsius, sent about once/second;
+On the attached board, the original 16 MHz temperature scan read about -33 C
+in a roughly 23 C room. Longer settling and a TEMP-only scan did not fix it;
+4 MHz measured about 28–29 C with the unchanged datasheet formula. This is
+die temperature, not a calibrated ambient thermometer. No arbitrary room
+temperature offset is applied. The datasheet characterizes the sensor at
+4.9152 MHz.
+
+- ID 140 `DAQ_ADC_TEMPERATURE`: one float32 Celsius, sent every 100 ms using
+  elapsed time rather than acquisition-loop counts;
   NaN indicates unavailable. CAN route follows the two load-cell streams.
 - ID 141 `DAQ_THERMAL_CALIBRATION`: retained four-float32 variable:
   `[KG1000 reference C, KG1000 raw/C, KG50 reference C, KG50 raw/C]`.
@@ -61,7 +73,7 @@ Hardware timing and thermal performance still require bench validation.
 
 ## Research and limitations
 
-[Microchip MCP3561/2/4R datasheet](https://download.mikroe.com/documents/datasheets/MCP3562_datasheet.pdf),
+[Microchip MCP3561/2/4R datasheet](https://www.microchip.com/content/dam/mchp/documents/APID/ProductDocuments/DataSheets/MCP3561_2_4R-Data-Sheet-DS200006391C.pdf),
 sections 5.1.2 and 5.15.3.2, specifies the die-temperature transfer function,
 unity gain during TEMP scans, and uncalibrated sensor offset/gain. An absolute
 thermometer calibration is not necessary for an empirical relative-drift fit,

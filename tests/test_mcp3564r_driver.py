@@ -59,6 +59,7 @@ static uint32_t registers[16];
 static unsigned selected, command, reg, byte_index, powered, timer_running;
 static unsigned ready, dma_pending, dma_calls, start_commands, fail_next_dma;
 static uint32_t tick, wire_word;
+static unsigned fail_command;
 
 void HAL_GPIO_WritePin(void *port, uint16_t pin, unsigned value) {
   (void)pin;
@@ -78,6 +79,7 @@ HAL_StatusTypeDef HAL_SPI_TransmitReceive(SPI_HandleTypeDef *s, uint8_t *tx,
     uint8_t *rx, uint16_t len, uint32_t timeout) {
   (void)timeout;
   assert(s == &spi && powered && selected);
+  if (!command && fail_command && tx[0] == fail_command) { fail_command=0; return HAL_ERROR; }
   for (unsigned i = 0; i < len; ++i) {
     rx[i] = 0;
     if (!command) {
@@ -162,7 +164,7 @@ static void test_configuration(void) {
   assert(registers[2] == 0x14); /* MCLK/1, OSR=1024. */
   assert(registers[3] == 0xCF); /* Gain 1, boost 2, AZ_MUX/AZ_REF enabled. */
   assert(registers[4] == 0xF0); /* Continuous scan cycles, 32-bit tagged data. */
-  assert(registers[7] == 0x1003);    /* TEMP, CH1-AGND and CH0-AGND. */
+  assert(registers[7] == 3);    /* Fast load-cell scan; temperature is separate. */
   assert(registers[8] == 0);    /* No extra inter-scan timer delay. */
   assert(start_commands == 1 && timer_running);
 }
@@ -206,7 +208,10 @@ static void test_not_ready_and_recovery(void) {
   receive(1, 2197152);
   (void)take(1, 2197152);
   /* A diagnostic-channel result cannot masquerade as a load-cell sample. */
-  receive(12, 305656); /* Approximately 25 C. */
+  tick += 100;
+  assert(mcp3564r_start_dma() == HAL_OK);
+  receive(12, 305656); /* Approximately 25 C at the temperature clock. */
+  assert(mcp3564r_start_dma() == HAL_OK);
   receive(0, 790001);
   mcp3564r_sample_t warm = take(0, 790001);
   assert(warm.temperature_code == 305656);
@@ -214,7 +219,9 @@ static void test_not_ready_and_recovery(void) {
   tick += 2001;
   receive(0, 790001);
   assert(isnan(take(0, 790001).temperature_c));
+  assert(mcp3564r_start_dma() == HAL_OK);
   receive(12, 12345); /* Implausible temperature invalidates it. */
+  assert(mcp3564r_start_dma() == HAL_OK);
   receive(1, 790001);
   assert(isnan(take(1, 790001).temperature_c));
   assert(!mcp3564r_pending_samples());
@@ -224,13 +231,53 @@ static void test_not_ready_and_recovery(void) {
   assert(mcp3564r_start_dma() == HAL_OK);
   receive(1, 2397152);
   (void)take(1, 2397152);
-  assert(start_commands == 1);
+  assert(start_commands == 5);
+}
+
+static void test_temperature_clock_switch(void) {
+  /* Unexpected TEMP tagged data at 16 MHz must not become a temperature. */
+  receive(12, 245000);
+  receive(0, 790001);
+  assert(isnan(take(0, 790001).temperature_c));
+  for (unsigned i=0; i<10; ++i) {
+    tick += 100;
+    assert(mcp3564r_start_dma() == HAL_OK);
+    assert(registers[2] == 0x8c && registers[7] == 0x1000);
+    assert(registers[3] == 0xcf && timer_running);
+    receive(12, 305656);
+    assert(!timer_running && !mcp3564r_pending_samples());
+    assert(mcp3564r_start_dma() == HAL_OK);
+    assert(registers[2] == 0x14 && registers[7] == 3 && registers[3] == 0xcf);
+    receive(1, 2097152);
+    mcp3564r_sample_t sample=take(1,2097152);
+    assert(sample.temperature_c>24.9f && sample.temperature_c<25.1f);
+    assert(sample.voltage_v>0.599f && sample.voltage_v<0.601f);
+  }
+  tick+=100; fail_command=0x4a;
+  assert(mcp3564r_start_dma()==HAL_ERROR && !selected && !timer_running);
+  assert(mcp3564r_start_dma()==HAL_OK && registers[2]==0x8c && registers[7]==0x1000);
+  receive(12,305656);
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==3);
+  /* A missing temperature conversion cannot stop load-cell acquisition. */
+  tick+=100;
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==0x1000);
+  tick+=50;
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==3);
+  receive(0,790001); (void)take(0,790001);
+  /* No interleaving SPI writes while a DMA frame is outstanding. */
+  tick+=100; wire_word=790001; ready=1;
+  mcp3564r_timer_elapsed_callback(&htim2);
+  assert(dma_pending);
+  assert(mcp3564r_start_dma()==HAL_BUSY && registers[7]==3);
+  dma_pending=0; HAL_SPI_TxRxCpltCallback(&spi);
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==0x1000);
 }
 int main(int argc, char **argv) {
   assert(argc == 2 && mcp3564r_init(&spi) == TX_SUCCESS);
   if (!strcmp(argv[1], "config")) test_configuration();
   else if (!strcmp(argv[1], "response")) test_equal_input_response();
   else if (!strcmp(argv[1], "polling")) test_not_ready_and_recovery();
+  else if (!strcmp(argv[1], "temperature")) test_temperature_clock_switch();
   else assert(0);
 }
 '''
@@ -266,3 +313,6 @@ class Mcp3564rDriverTests(unittest.TestCase):
 
     def test_not_ready_polls_and_failed_dma_do_not_freeze_acquisition(self):
         subprocess.run([str(self.binary), 'polling'], check=True)
+
+    def test_temperature_uses_slow_clock_and_restores_fast_load_scan(self):
+        subprocess.run([str(self.binary), "temperature"], check=True)

@@ -40,6 +40,8 @@ static UINT fx_file_close(FX_FILE *f) {
 }
 static UINT sd_close_log(FX_FILE *f, char *name) { (void)name; return fx_file_close(f); }
 static UINT sd_flush_pending(void) { return 0; }
+static unsigned fail_flush;
+static UINT sd_flush_telemetry_pending(void) { return fail_flush ? FX_IO_ERROR : 0; }
 static UINT sd_open_timestamped_log(const daq_calibration_t *c) {
   raw_opens++; g_file_open=1; g_sd_open_calibration=*c; return 0;
 }
@@ -54,6 +56,9 @@ static UINT fx_file_write(FX_FILE *f, VOID *data, unsigned len) {
   assert(f==&g_sd_telemetry_file && data && len);
   writes++; return fail_write ? FX_IO_ERROR : FX_SUCCESS;
 }
+static UINT sd_write_telemetry_bytes(const void *data, size_t len) {
+  return fx_file_write(&g_sd_telemetry_file, (void *)data, len);
+}
 """ + telemetry + raw + r"""
 int main(void) {
   sd_line_slot_t row={{1,0},"kg1000_network",14,0};
@@ -64,6 +69,9 @@ int main(void) {
   /* A queued old network row cannot rotate or contaminate the new raw file. */
   assert(sd_write_telemetry_row(&row)==0 && raw_opens==1);
   row.calibration=next;
+  fail_flush=1;
+  assert(sd_write_telemetry_row(&row)==FX_IO_ERROR && telemetry_closes==0);
+  fail_flush=0;
   assert(sd_write_telemetry_row(&row)==0 && telemetry_opens==2 && telemetry_closes==1);
   assert(sd_select_calibration(&next)==0 && raw_opens==1);
   fail_write=1;
