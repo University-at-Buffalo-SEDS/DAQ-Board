@@ -46,10 +46,10 @@ int main(void) {
    * must be usable before mounting completes. */
   assert(sd_card_enqueue_csv_row("kg1000_network", 20, 0.25f, NULL)==SD_CARD_STATUS_OK);
   assert(enqueued==1);
-  assert(strcmp(slot.line, "1224,20,kg1000_network,0.250,,,,network\r\n")==0);
+  assert(strcmp(slot.line, "1224,20,kg1000_network,0.250,,,,network,,\r\n")==0);
   network_ms=0;
   assert(sd_card_enqueue_csv_row("kg1000_network", 25, 0.25f, NULL)==SD_CARD_STATUS_OK);
-  assert(strcmp(slot.line, "25,25,kg1000_network,0.250,,,,local\r\n")==0);
+  assert(strcmp(slot.line, "25,25,kg1000_network,0.250,,,,local,,\r\n")==0);
   enqueued=1;
   full=1;
   assert(sd_card_enqueue_csv_row("kg1000_network", 40, 0.25f, NULL)==SD_CARD_STATUS_BACKPRESSURE);

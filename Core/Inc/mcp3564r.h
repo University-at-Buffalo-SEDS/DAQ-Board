@@ -34,6 +34,7 @@ typedef struct
   float voltage_v; /* ADC-pin voltage, using the nominal internal reference. */
   float raw_value; /* Historical calibration input, for either load cell. */
   float temperature_c;
+  int32_t temperature_code; /* Uncorrected TEMP conversion, valid when temperature_c is finite. */
   uint32_t overrun_count;
 } mcp3564r_sample_t;
 

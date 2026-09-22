@@ -251,3 +251,10 @@ known-weight measurements; they cannot be inferred from the 50 kg rating.
 ADC format and scan configuration follow the
 [Microchip MCP3561/2/4R datasheet](https://www.microchip.com/content/dam/mchp/documents/APID/ProductDocuments/DataSheets/MCP3561_2_4R-Data-Sheet-DS200006391C.pdf),
 sections 5.6, 5.15, and 8.8.
+
+## Temperature compensation
+
+ADC temperature telemetry and per-cell thermal offset calibration are described
+in [Temperature compensation](docs/temperature-compensation.md). New live
+calibration captures retain ADC temperature; learn drift using unloaded captures
+at different stabilized temperatures, then capture zero/mass and save.

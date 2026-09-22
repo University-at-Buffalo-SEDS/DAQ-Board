@@ -98,6 +98,7 @@ UINT daq_board_sample(daq_snapshot_t *snapshot)
   snapshot->ext_adc_voltage_v = ext_adc_sample.voltage_v;
   snapshot->ext_adc_loadcell_kg1000 = ext_adc_sample.raw_value;
   snapshot->ext_adc_temp_c = ext_adc_sample.temperature_c;
+  snapshot->ext_adc_temp_code = ext_adc_sample.temperature_code;
 
   g_daq_board_sample_status = 0U;
   return TX_SUCCESS;

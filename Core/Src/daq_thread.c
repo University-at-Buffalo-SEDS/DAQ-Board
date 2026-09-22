@@ -10,6 +10,8 @@
 #include "daq_rates.h"
 #include "daq_downsample.h"
 #include "daq_timestamp.h"
+#include "daq_filter.h"
+#include <string.h>
 TX_THREAD daq_thread;
 
 #define DAQ_THREAD_STACK_SIZE (32U * 1024U)
@@ -58,7 +60,16 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
     .code = snapshot->ext_adc_code,
     .voltage_v = snapshot->ext_adc_voltage_v,
     .raw_value = snapshot->ext_adc_loadcell_kg1000,
+    .temperature_c = snapshot->ext_adc_temp_c,
+    .temperature_code = snapshot->ext_adc_temp_code,
   };
+  static daq_filter_t filters[2];
+  static daq_calibration_t filter_calibration;
+  if (memcmp(&filter_calibration, calibration, sizeof(*calibration)) != 0)
+  {
+    memset(filters, 0, sizeof(filters));
+    filter_calibration = *calibration;
+  }
   uint16_t count = 0U;
   const uint64_t unix_now = telemetry_unix_ms();
   const uint64_t mono_now = telemetry_now_ms();
@@ -70,6 +81,9 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
     {
       const uint8_t channel = sample.channel;
       const float raw = sample.raw_value;
+      const float corrected = daq_filter_add(&filters[channel],
+          daq_calibration_temperature_raw(calibration, channel, raw, sample.temperature_c),
+          (uint32_t)sample.monotonic_ms, calibration->filter_tau_ms[channel]);
       if (records != NULL)
       {
         records[count].channel = channel;
@@ -77,9 +91,11 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
         records[count].network_unix_ms = daq_sample_network_ms(unix_now, mono_now, sample.monotonic_ms);
         records[count].raw_adc_code = sample.code;
         records[count].raw_value = raw;
+        records[count].adc_temperature_c = sample.temperature_c;
+        records[count].adc_temperature_code = sample.temperature_code;
         records[count].calibrated_value = channel == 1U
-            ? daq_calibration_apply_kg50(calibration, raw)
-            : calibration->kg1000_slope * raw + calibration->kg1000_intercept;
+            ? daq_calibration_apply_kg50(calibration, corrected)
+            : calibration->kg1000_slope * corrected + calibration->kg1000_intercept;
       }
       if (sample.code != 0) g_daq_nonzero_raw_sample_count++;
       window->code_sum[channel] += sample.code;
@@ -268,6 +284,7 @@ void daq_thread_entry(ULONG initial_input)
     if (++slow_sensor_log_counter >= DAQ_SLOW_SENSOR_LOG_DIVIDER)
     {
       slow_sensor_log_counter = 0U;
+      (void)log_telemetry_asynchronous(SEDS_DT_DAQ_ADC_TEMPERATURE, &snapshot.ext_adc_temp_c, 1U, sizeof(float));
       daq_store_snapshot_csv(&snapshot, &calibration, &window);
     }
     float filtered;

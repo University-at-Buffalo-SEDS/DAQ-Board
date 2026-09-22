@@ -4,6 +4,7 @@
 #include "daq_rates.h"
 
 #include <string.h>
+#include <math.h>
 
 #define MCP3564R_CMD_RESET (0x78U)
 #define MCP3564R_CMD_START (0x68U)
@@ -36,6 +37,8 @@ typedef struct
 {
   uint32_t raw32;
   uint32_t monotonic_ms;
+  float temperature_c;
+  int32_t temperature_code;
 } mcp3564r_sample_entry_t;
 
 typedef struct
@@ -52,6 +55,10 @@ typedef struct
   volatile uint8_t first_conversion_pending;
   uint32_t start_offset_us;
   uint32_t latest_raw32;
+  float temperature_c;
+  int32_t temperature_code;
+  uint32_t temperature_ms;
+  uint8_t temperature_valid;
   mcp3564r_sample_entry_t queue[MCP3564R_SAMPLE_QUEUE_DEPTH];
 } mcp3564r_context_t;
 
@@ -236,10 +243,23 @@ static void mcp3564r_store_raw32(uint32_t raw32)
 {
   mcp3564r_sample_entry_t entry;
 
+  if ((raw32 >> 28U) == 12U)
+  {
+    const float temperature = mcp3564r_code_to_temperature(mcp3564r_decode_code(raw32));
+    g_mcp3564r.temperature_valid = isfinite(temperature) && temperature >= -40.0f && temperature <= 125.0f;
+    g_mcp3564r.temperature_c = temperature;
+    g_mcp3564r.temperature_code = mcp3564r_decode_code(raw32);
+    g_mcp3564r.temperature_ms = HAL_GetTick();
+    return;
+  }
   /* Never route a diagnostic/unconfigured channel as a load cell. */
   if ((raw32 >> 28U) > 1U) return;
   entry.raw32 = raw32;
   entry.monotonic_ms = HAL_GetTick();
+  entry.temperature_c = g_mcp3564r.temperature_valid &&
+      (uint32_t)(entry.monotonic_ms - g_mcp3564r.temperature_ms) <= 2000U
+      ? g_mcp3564r.temperature_c : NAN;
+  entry.temperature_code = g_mcp3564r.temperature_code;
   g_mcp3564r.latest_raw32 = entry.raw32;
 
   if (g_mcp3564r.queue_count >= MCP3564R_SAMPLE_QUEUE_DEPTH)
@@ -533,12 +553,17 @@ UINT mcp3564r_get_sample(mcp3564r_sample_t *sample)
   }
 
   memset(sample, 0, sizeof(*sample));
+  sample->temperature_c = NAN;
   raw32 = 0U;
   sample_valid = 0U;
 
   primask = __get_PRIMASK();
   __disable_irq();
 
+  sample->temperature_c = g_mcp3564r.temperature_valid &&
+      (uint32_t)(HAL_GetTick() - g_mcp3564r.temperature_ms) <= 2000U
+      ? g_mcp3564r.temperature_c : NAN;
+  sample->temperature_code = g_mcp3564r.temperature_code;
   dma_busy = g_mcp3564r.dma_busy;
   queued_samples = g_mcp3564r.queue_count;
   overrun_count = g_mcp3564r.overrun_count;
@@ -551,6 +576,8 @@ UINT mcp3564r_get_sample(mcp3564r_sample_t *sample)
     g_mcp3564r.queue_count--;
 
     raw32 = entry.raw32;
+    sample->temperature_c = entry.temperature_c;
+    sample->temperature_code = entry.temperature_code;
     monotonic_ms = entry.monotonic_ms;
     sample_valid = 1U;
     queued_samples = g_mcp3564r.queue_count;
@@ -576,7 +603,7 @@ UINT mcp3564r_get_sample(mcp3564r_sample_t *sample)
   sample->code = code;
   sample->voltage_v = mcp3564r_code_to_voltage(code);
   sample->raw_value = mcp3564r_code_to_raw_value(code);
-  sample->temperature_c = 0.0f;
+
 
   return TX_SUCCESS;
 }
