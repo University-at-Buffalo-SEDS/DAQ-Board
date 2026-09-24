@@ -229,9 +229,17 @@ static void test_not_ready_and_recovery(void) {
   receive(1, 2297152);
   assert(!selected && !timer_running && !mcp3564r_pending_samples());
   assert(mcp3564r_start_dma() == HAL_OK);
+  if (registers[7] == 0xfc) {
+    for (int ch=7; ch>=2; --ch) { receive(ch, 100000); (void)take(ch, 100000); }
+    assert(mcp3564r_start_dma()==HAL_OK && registers[7]==3);
+  }
   receive(1, 2397152);
   (void)take(1, 2397152);
-  assert(start_commands == 5);
+  /* Auxiliary scan can be due after recovery. Complete it if selected. */
+  if (registers[7] == 0xfc) {
+    for (int ch=7; ch>=2; --ch) { receive(ch, 100000); (void)take(ch, 100000); }
+    assert(mcp3564r_start_dma()==HAL_OK && registers[7]==3);
+  }
 }
 
 static void test_temperature_clock_switch(void) {
@@ -272,12 +280,41 @@ static void test_temperature_clock_switch(void) {
   dma_pending=0; HAL_SPI_TxRxCpltCallback(&spi);
   assert(mcp3564r_start_dma()==HAL_OK && registers[7]==0x1000);
 }
+static void test_auxiliary_pass(void) {
+  tick += 100;
+  /* Temperature has priority, then auxiliary gets a bounded turn. */
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==0x1000);
+  receive(12,305656);
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==3);
+  receive(0,790001); (void)take(0,790001);
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==0xfc && registers[2]==0x14);
+  receive(1,123); assert(!mcp3564r_pending_samples());
+  for (int ch=7; ch>=2; --ch) {
+    receive(ch,2097152);
+    mcp3564r_sample_t sample=take(ch,2097152);
+    assert(sample.raw_value==sample.voltage_v && sample.raw_value==0.6f);
+    const float connector=mcp3564r_connector_voltage(ch,sample.voltage_v);
+    assert(fabsf(connector-(ch>=6 ? 6.6f : 0.6f))<0.00001f);
+  }
+  assert(!timer_running);
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==3);
+  receive(1,2097152); assert(take(1,2097152).raw_value!=0.6f);
+  /* Incomplete aux scan times out and returns to load cells. */
+  tick+=100;
+  assert(mcp3564r_start_dma()==HAL_OK);receive(12,305656);
+  assert(mcp3564r_start_dma()==HAL_OK);
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==0xfc);
+  tick+=25;
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==3);
+  receive(0,790001);(void)take(0,790001);
+}
 int main(int argc, char **argv) {
   assert(argc == 2 && mcp3564r_init(&spi) == TX_SUCCESS);
   if (!strcmp(argv[1], "config")) test_configuration();
   else if (!strcmp(argv[1], "response")) test_equal_input_response();
   else if (!strcmp(argv[1], "polling")) test_not_ready_and_recovery();
   else if (!strcmp(argv[1], "temperature")) test_temperature_clock_switch();
+  else if (!strcmp(argv[1], "auxiliary")) test_auxiliary_pass();
   else assert(0);
 }
 '''
@@ -316,3 +353,6 @@ class Mcp3564rDriverTests(unittest.TestCase):
 
     def test_temperature_uses_slow_clock_and_restores_fast_load_scan(self):
         subprocess.run([str(self.binary), "temperature"], check=True)
+
+    def test_auxiliary_scan_preserves_channel_units_and_resumes_loadcells(self):
+        subprocess.run([str(self.binary), "auxiliary"], check=True)

@@ -16,7 +16,11 @@ typedef struct
   float input_voltage_v;
   float input_current_a;
   float adc1_aux_v;
-  float analog_inputs_v[4];
+  float analog_inputs_v[8]; /* SAR_IN1..8, connector volts. */
+  float current_sense_v[2];
+  float current_sense_a[2];
+  float power_monitor_v[2];
+  uint8_t analog_sample_fresh;
   float analog_outputs_v[2];
   uint8_t ext_adc_channel;
   uint8_t ext_adc_sample_valid;

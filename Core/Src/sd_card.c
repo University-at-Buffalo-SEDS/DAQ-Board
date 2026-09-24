@@ -914,7 +914,10 @@ void sd_card_writer_thread_entry(ULONG initial_input)
           const int len = snprintf(line, sizeof(line), "%s,%lu,%s,,%ld,%s,%s,%s,%s,%ld\r\n",
                                    stamp_text,
                                    (unsigned long)sample->monotonic_ms,
-                                   sample->channel == 1U ? "kg50_raw" : "mcp3564r_raw",
+                                   sample->channel < 8U ? (const char *const[]){
+                                     "mcp3564r_raw", "kg50_raw", "mcp3564r_ch2_raw", "mcp3564r_ch3_raw",
+                                     "mcp3564r_ch4_raw", "mcp3564r_ch5_raw", "mcp3564r_ch6_raw", "mcp3564r_ch7_raw"
+                                   }[sample->channel] : "invalid_adc_channel",
                                    (long)sample->raw_adc_code,
                                    raw_text, calibrated_text,
                                    sample->network_unix_ms != 0U ? "network" : "local",

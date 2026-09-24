@@ -25,14 +25,14 @@ typedef struct
 
 typedef struct
 {
-  uint8_t channel; /* 0: KG1000, 1: KG50 (single-ended against AGND). */
+  uint8_t channel; /* 0: KG1000, 1: KG50, 2..7: auxiliary (single-ended). */
   uint8_t sample_valid;
   uint8_t dma_busy;
   uint8_t queued_samples;
   uint64_t monotonic_ms;
   int32_t code;
   float voltage_v; /* ADC-pin voltage, using the nominal internal reference. */
-  float raw_value; /* Historical calibration input, for either load cell. */
+  float raw_value; /* CH0/1 historical calibration input; CH2..7 ADC-pin volts. */
   float temperature_c;
   int32_t temperature_code; /* Uncorrected TEMP conversion, valid when temperature_c is finite. */
   uint32_t overrun_count;

@@ -22,6 +22,7 @@ class Kg50AcquisitionTests(unittest.TestCase):
 #include <stddef.h>
 #include "daq_timestamp.h"
 #include "daq_filter.h"
+#include "mcp3564r_board_config.h"
 #define TX_SUCCESS 0
 static unsigned g_daq_nonzero_raw_sample_count, g_daq_raw_samples_drained_count;
 typedef struct { float kg1000_slope, kg1000_intercept, iadc_slope, iadc_intercept, kg50[7], thermal[4], filter_tau_ms[2]; } daq_calibration_t;
@@ -89,6 +90,15 @@ int main(void) {
   assert(daq_drain_ext_adc(&snapshot,NULL,4,&cal,&window)==1);
   assert(!snapshot.ext_adc_sample_valid && window.count[0]==0 && window.count[1]==1);
   assert(window.sum[1]==7 && window.voltage_sum[1]==0.6f);
+  /* Auxiliary samples retain ADC volts and divider-adjusted connector volts,
+     with no load-cell calibration/filter or mass-channel count contamination. */
+  snapshot=(daq_snapshot_t){ .ext_adc_sample_valid=1, .ext_adc_channel=6,
+      .ext_adc_voltage_v=0.6f, .ext_adc_loadcell_kg1000=0.6f };
+  assert(daq_drain_ext_adc(&snapshot,records,4,&cal,&window)==1);
+  assert(window.count[0]==0 && window.count[1]==0 && window.count[6]==1);
+  assert(!snapshot.ext_adc_sample_valid && records[0].channel==6);
+  assert(fabsf(records[0].calibrated_value-6.6f)<1e-6f);
+  assert(records[0].raw_value==0.6f);
   /* Invalid diagnostic channels are discarded, with bounded draining. */
   snapshot=(daq_snapshot_t){ .ext_adc_sample_valid=1, .ext_adc_channel=15 };
   next=0; queued_count=3;

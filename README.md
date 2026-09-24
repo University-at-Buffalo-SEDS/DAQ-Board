@@ -258,3 +258,10 @@ ADC temperature telemetry and per-cell thermal offset calibration are described
 in [Temperature compensation](docs/temperature-compensation.md). New live
 calibration captures retain ADC temperature; learn drift using unloaded captures
 at different stabilized temperatures, then capture zero/mass and save.
+
+## Additional analog inputs
+
+All eight SAR inputs, six auxiliary MCP inputs, current sensors and power
+monitors are supported at a default 10 Hz. See [the connector and telemetry
+map](docs/analog-inputs.md) for pinouts, nominal units, GroundStation testing
+configuration, and the additional load on acquisition/network/SD.

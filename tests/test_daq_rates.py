@@ -111,7 +111,7 @@ int main(void) {
     def test_temperature_publication_uses_elapsed_time_not_loop_count(self):
         source = (ROOT / 'Core/Src/daq_thread.c').read_text()
         block = source[source.index('    const uint32_t report_ms ='):
-                       source.index('    if (++slow_sensor_log_counter')]
+                       source.index('    daq_enqueue_analog(&snapshot')]
         self.compile(r'''#include <stdint.h>
 #include <assert.h>
 #include "daq_rates.h"

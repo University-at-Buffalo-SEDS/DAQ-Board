@@ -66,6 +66,9 @@ typedef struct
   volatile uint8_t temperature_scan_complete;
   uint8_t scan_config_valid;
   uint32_t temperature_attempt_ms;
+  volatile uint8_t aux_scan_active;
+  volatile uint8_t aux_seen;
+  uint32_t aux_attempt_ms;
   mcp3564r_sample_entry_t queue[MCP3564R_SAMPLE_QUEUE_DEPTH];
 } mcp3564r_context_t;
 
@@ -275,7 +278,14 @@ static void mcp3564r_store_raw32(uint32_t raw32)
     return;
   }
   /* Never route a diagnostic/unconfigured channel as a load cell. */
-  if ((raw32 >> 28U) > 1U || g_mcp3564r.temperature_scan_active != 0U) return;
+  const unsigned channel = raw32 >> 28U;
+  if (g_mcp3564r.temperature_scan_active != 0U || channel > 7U) return;
+  if (g_mcp3564r.aux_scan_active != 0U)
+  {
+    if ((MCP3564R_AUX_SCAN & (1U << channel)) == 0U) return;
+    g_mcp3564r.aux_seen |= (uint8_t)(1U << channel);
+  }
+  else if (channel > 1U) return;
   entry.raw32 = raw32;
   entry.monotonic_ms = HAL_GetTick();
   entry.temperature_c = g_mcp3564r.temperature_valid &&
@@ -461,7 +471,7 @@ static HAL_StatusTypeDef mcp3564r_start_cycle(void)
 
 /* Called only by the acquisition thread, never from a DMA/timer ISR. Stop
  * polling before changing the sequencer and reject switching mid-transfer. */
-static HAL_StatusTypeDef mcp3564r_switch_scan(uint8_t temperature)
+static HAL_StatusTypeDef mcp3564r_switch_scan(uint8_t mode)
 {
   const uint32_t mask = __get_PRIMASK();
   __disable_irq();
@@ -476,7 +486,10 @@ static HAL_StatusTypeDef mcp3564r_switch_scan(uint8_t temperature)
   if (mask == 0U) __enable_irq();
 
   g_mcp3564r.scan_config_valid = 0U;
+  const uint8_t temperature = mode == 1U;
   g_mcp3564r.temperature_scan_active = temperature;
+  g_mcp3564r.aux_scan_active = mode == 2U;
+  g_mcp3564r.aux_seen = 0U;
   g_mcp3564r.temperature_scan_complete = 0U;
   g_mcp3564r.start_sent = 0U;
   g_mcp3564r.first_conversion_pending = 1U;
@@ -487,7 +500,8 @@ static HAL_StatusTypeDef mcp3564r_switch_scan(uint8_t temperature)
                                                : MCP3564R_DEFAULT_CONFIG.config1_reg);
   if (status == HAL_OK)
     status = mcp3564r_write_reg24(MCP3564R_SCAN_ADDR,
-                                temperature ? MCP3564R_TEMPERATURE_SCAN : MCP3564R_BOARD_SCAN);
+                                temperature ? MCP3564R_TEMPERATURE_SCAN :
+                                mode == 2U ? MCP3564R_AUX_SCAN : MCP3564R_BOARD_SCAN);
   if (status != HAL_OK) return status;
   g_mcp3564r.scan_config_valid = 1U;
   return mcp3564r_start_cycle();
@@ -528,6 +542,7 @@ UINT mcp3564r_init(SPI_HandleTypeDef *spi)
 
   g_mcp3564r.scan_config_valid = 1U;
   g_mcp3564r.temperature_attempt_ms = HAL_GetTick();
+  g_mcp3564r.aux_attempt_ms = HAL_GetTick();
   g_mcp3564r_init_status = 0U;
   return TX_SUCCESS;
 }
@@ -554,8 +569,14 @@ HAL_StatusTypeDef mcp3564r_start_dma(void)
 
   const uint32_t now = HAL_GetTick();
   if (g_mcp3564r.scan_config_valid == 0U)
-    return mcp3564r_switch_scan(g_mcp3564r.temperature_scan_active);
-  if (g_mcp3564r.temperature_scan_active != 0U)
+    return mcp3564r_switch_scan(g_mcp3564r.temperature_scan_active ? 1U : g_mcp3564r.aux_scan_active ? 2U : 0U);
+  if (g_mcp3564r.aux_scan_active != 0U)
+  {
+    if (g_mcp3564r.aux_seen == MCP3564R_AUX_SCAN ||
+        (uint32_t)(now - g_mcp3564r.aux_attempt_ms) >= MCP3564R_AUX_TIMEOUT_MS)
+      return mcp3564r_switch_scan(0U);
+  }
+  else if (g_mcp3564r.temperature_scan_active != 0U)
   {
     if (g_mcp3564r.temperature_scan_complete != 0U ||
         (uint32_t)(now - g_mcp3564r.temperature_attempt_ms) >= MCP3564R_TEMP_TIMEOUT_MS)
@@ -565,6 +586,14 @@ HAL_StatusTypeDef mcp3564r_start_dma(void)
   {
     const HAL_StatusTypeDef status = mcp3564r_switch_scan(1U);
     if (status != HAL_BUSY) g_mcp3564r.temperature_attempt_ms = now;
+    return status;
+  }
+
+  else if (MCP3564R_AUX_SCAN != 0U &&
+           (uint32_t)(now - g_mcp3564r.aux_attempt_ms) >= MCP3564R_AUX_INTERVAL_MS)
+  {
+    const HAL_StatusTypeDef status = mcp3564r_switch_scan(2U);
+    if (status != HAL_BUSY) g_mcp3564r.aux_attempt_ms = now;
     return status;
   }
 
@@ -591,7 +620,8 @@ void mcp3564r_dma_complete(void)
   g_mcp3564r.first_conversion_pending = 0U;
   g_mcp3564r.dma_busy = 0U;
   mcp3564r_deselect();
-  if (g_mcp3564r.temperature_scan_active != 0U && g_mcp3564r.temperature_scan_complete != 0U)
+  if ((g_mcp3564r.temperature_scan_active != 0U && g_mcp3564r.temperature_scan_complete != 0U) ||
+      (g_mcp3564r.aux_scan_active != 0U && g_mcp3564r.aux_seen == MCP3564R_AUX_SCAN))
   {
     /* Restore the fast load-cell scan on the next acquisition-thread service. */
     g_mcp3564r.conversion_active = 0U;
@@ -683,7 +713,7 @@ UINT mcp3564r_get_sample(mcp3564r_sample_t *sample)
   sample->monotonic_ms = monotonic_ms;
   sample->code = code;
   sample->voltage_v = mcp3564r_code_to_voltage(code);
-  sample->raw_value = mcp3564r_code_to_raw_value(code);
+  sample->raw_value = sample->channel < 2U ? mcp3564r_code_to_raw_value(code) : sample->voltage_v;
 
 
   return TX_SUCCESS;

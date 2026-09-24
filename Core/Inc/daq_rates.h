@@ -18,6 +18,13 @@
 #define DAQ_ADC_MCLK_HZ 16000000U
 /* Temperature must refresh independently of acquisition-loop overruns. */
 #define DAQ_TEMPERATURE_REPORT_PERIOD_MS 100U
+/* Auxiliary channels run at 10 Hz; they do not need the load-cell cadence. */
+#ifndef DAQ_ANALOG_REPORT_PERIOD_MS
+#define DAQ_ANALOG_REPORT_PERIOD_MS 100U
+#endif
+#if DAQ_ANALOG_REPORT_PERIOD_MS < 100U || DAQ_ANALOG_REPORT_PERIOD_MS > 1000U
+#error "Auxiliary analog period must be 100..1000 ms"
+#endif
 /* Acquisition can overrun its period under telemetry load. Give SD an equal
  * priority and a bounded slice instead of only the acquisition thread's tiny
  * sleep gaps. IRQ-driven ADC acquisition continues during either worker. */

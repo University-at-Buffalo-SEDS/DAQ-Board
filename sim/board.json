@@ -52,8 +52,8 @@
       "model": "stm32_adc",
       "bus": "adc1",
       "bits": 14,
-      "channels": 12,
-      "channel_samples": [8192, 8192, 8192, 8192, 8192, 10900, 8192, 8300, 8192, 8192, 8192, 9000],
+      "channels": 18,
+      "channel_samples": [8192, 8192, 8192, 8192, 8192, 1000, 2000, 3000, 4000, 8192, 8192, 9000, 8192, 8192, 8192, 8192, 1000, 5500],
       "noise_lsb": 4
     },
     {
@@ -72,8 +72,8 @@
       "model": "mcp3564r",
       "bus": "spi2",
       "bits": 24,
-      "channels": 2,
-      "channel_samples": [1048576, 2097152]
+      "channels": 8,
+      "channel_samples": [1048576, 2097152, 100000, 200000, 300000, 400000, 500000, 600000]
     },
     {
       "type": "storage",
@@ -103,6 +103,9 @@
       {"name": "fdcan_tx_fail", "symbol": "g_fdcan_tx_fail_count", "maximum": 0},
       {"name": "daq_samples", "symbol": "g_daq_sample_ok_count", "minimum": 3},
       {"name": "daq_sample_overruns", "symbol": "g_daq_sample_overrun_count", "maximum": 0},
+      {"name": "analog_reports", "symbol": "g_daq_analog_publish_ok_count", "minimum": 1},
+      {"name": "analog_report_failures", "symbol": "g_daq_analog_publish_fail_count", "maximum": 0},
+      {"name": "analog_snapshot_drops", "symbol": "g_daq_analog_work_drop_count", "maximum": 0},
       {"name": "daq_thread_create_status", "symbol": "g_daq_thread_create_status"},
       {"name": "daq_sample_failures", "symbol": "g_daq_sample_fail_count"},
       {"name": "daq_init_failures", "symbol": "g_daq_init_fail_count"},

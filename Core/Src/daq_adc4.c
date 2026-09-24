@@ -1,6 +1,7 @@
 #include "daq_adc4.h"
 
 #include "main.h"
+#include <math.h>
 
 extern ADC_HandleTypeDef hadc4;
 
@@ -20,6 +21,9 @@ static HAL_StatusTypeDef daq_adc4_read_raw(uint32_t channel, uint32_t *raw)
 {
   ADC_ChannelConfTypeDef cfg = {0};
 
+  /* CubeMX selects four bits; selecting another channel does not remove them.
+   * With single-conversion polling, explicitly select exactly one each time. */
+  WRITE_REG(hadc4.Instance->CHSELR, 0U);
   cfg.Channel = channel;
   cfg.Rank = ADC4_RANK_CHANNEL_NUMBER;
   cfg.SamplingTime = ADC4_SAMPLINGTIME_COMMON_1;
@@ -76,14 +80,16 @@ UINT daq_adc4_sample(daq_adc4_sample_t *sample)
     return TX_PTR_ERROR;
   }
 
+  UINT result = TX_SUCCESS;
   for (uint32_t i = 0; i < DAQ_ADC4_CHANNEL_COUNT; ++i)
   {
     if (daq_adc4_read_raw(g_adc4_channels[i], &raw) != HAL_OK)
     {
-      return TX_NOT_DONE;
+      sample->analog_inputs_v[i] = NAN;
+      result = TX_NOT_DONE;
     }
-    sample->analog_inputs_v[i] = daq_adc4_counts_to_voltage(raw);
+    else sample->analog_inputs_v[i] = daq_adc4_counts_to_voltage(raw);
   }
 
-  return TX_SUCCESS;
+  return result;
 }

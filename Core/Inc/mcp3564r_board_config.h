@@ -10,6 +10,15 @@
 #define MCP3564R_BOARD_CONFIG0 0x82U
 #define MCP3564R_BOARD_CONFIG2 0xCFU
 #define MCP3564R_BOARD_SCAN 0x000003U /* CH1, CH0 at the load-cell clock/filter. */
+/* One auxiliary pass per period, then resume the two load cells. */
+#ifndef MCP3564R_AUX_SCAN
+#define MCP3564R_AUX_SCAN 0x0000FCU /* CH2..7, single-ended. Set 0 to disable. */
+#endif
+#if (MCP3564R_AUX_SCAN & ~0x0000FCU) != 0U
+#error "Auxiliary mask must contain only CH2..7"
+#endif
+#define MCP3564R_AUX_INTERVAL_MS 100U
+#define MCP3564R_AUX_TIMEOUT_MS 25U
 /* The die sensor reads about -33 C on this board at 16 MHz, even with long
  * settling and TEMP-only scans. Measure it separately at MCLK/4 = 4 MHz,
  * close to the datasheet's 4.9152 MHz characterization, OSR 256, gain 1.
@@ -29,6 +38,12 @@
 static inline float mcp3564r_code_to_voltage(int32_t code)
 {
   return ((float)code * MCP3564R_NOMINAL_VREF_V) / 8388608.0f;
+}
+
+/* CH6/7 are P4 HVAIN1/2 through 10k:1k dividers. */
+static inline float mcp3564r_connector_voltage(unsigned channel, float adc_voltage)
+{
+  return channel >= 6U && channel <= 7U ? adc_voltage * 11.0f : adc_voltage;
 }
 
 /* DS20006391C equation 5-1, unity gain; acquire at the temperature clock. */
