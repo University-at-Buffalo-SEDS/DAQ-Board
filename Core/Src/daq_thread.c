@@ -267,10 +267,10 @@ static void daq_publish_loadcell(const daq_snapshot_t *snapshot, const daq_calib
   }
 #endif
 
-  if (log_telemetry_asynchronous(SEDS_DT_KG1000,
+  if (log_telemetry_captured(SEDS_DT_KG1000,
                                  &loadcell_kg1000,
                                  1U,
-                                 sizeof(loadcell_kg1000)) == SEDS_OK)
+                                 sizeof(loadcell_kg1000), snapshot->monotonic_ms) == SEDS_OK)
   {
     g_daq_loadcell_publish_ok_count++;
   }
@@ -292,10 +292,80 @@ static void daq_publish_kg50(float raw, uint64_t monotonic_ms,
   (void)monotonic_ms;
   (void)calibration;
 #endif
-  if (log_telemetry_asynchronous(SEDS_DT_KG50, &raw, 1U, sizeof(raw)) == SEDS_OK)
+  if (log_telemetry_captured(SEDS_DT_KG50, &raw, 1U, sizeof(raw), monotonic_ms) == SEDS_OK)
     g_daq_kg50_publish_ok_count++;
   else
     g_daq_kg50_publish_fail_count++;
+}
+
+/* Acquisition never waits for network publication. A work item keeps the
+ * captured timestamp and calibration; saturation rejects the newest item and
+ * is counted separately from the raw SD path. */
+#define DAQ_REPORT_DEPTH 16U
+#define DAQ_REPORT_KG1000 1U
+#define DAQ_REPORT_KG50 2U
+#define DAQ_REPORT_TEMPERATURE 4U
+typedef struct {
+  uint64_t monotonic_ms;
+  daq_calibration_t calibration;
+  float kg1000, kg50, temperature;
+  uint32_t flags;
+} daq_report_t;
+static TX_THREAD g_report_thread;
+static TX_QUEUE g_report_queue;
+static TX_BLOCK_POOL g_report_pool;
+static ULONG g_report_stack[8192U / sizeof(ULONG)];
+static ULONG g_report_queue_storage[DAQ_REPORT_DEPTH];
+static ULONG g_report_pool_storage[(DAQ_REPORT_DEPTH * (sizeof(daq_report_t) + sizeof(void *)) + sizeof(ULONG) - 1U) / sizeof(ULONG)];
+volatile uint32_t g_daq_report_enqueued_count;
+volatile uint32_t g_daq_report_completed_count;
+volatile uint32_t g_daq_report_drop_count;
+volatile uint32_t g_daq_report_max_age_ms;
+
+static void daq_enqueue_report(const daq_report_t *report)
+{
+  if (!report->flags) return;
+  daq_report_t *work;
+  if (tx_block_allocate(&g_report_pool, (VOID **)&work, TX_NO_WAIT) != TX_SUCCESS) {
+    g_daq_report_drop_count++;
+    return;
+  }
+  *work = *report;
+  ULONG message = (ULONG)(uintptr_t)work;
+  if (tx_queue_send(&g_report_queue, &message, TX_NO_WAIT) != TX_SUCCESS) {
+    (void)tx_block_release(work);
+    g_daq_report_drop_count++;
+  } else g_daq_report_enqueued_count++;
+}
+
+static void daq_report_thread_entry(ULONG argument)
+{
+  (void)argument;
+  for (;;) {
+    ULONG message;
+    if (tx_queue_receive(&g_report_queue, &message, TX_WAIT_FOREVER) != TX_SUCCESS) continue;
+    daq_report_t *work = (daq_report_t *)(uintptr_t)message;
+    const uint64_t now = telemetry_now_ms();
+    const uint32_t age = now >= work->monotonic_ms ? (uint32_t)(now - work->monotonic_ms) : 0U;
+    if (age > g_daq_report_max_age_ms) g_daq_report_max_age_ms = age;
+    if (work->flags & DAQ_REPORT_KG1000) {
+      daq_snapshot_t snapshot = {0};
+      snapshot.ext_adc_sample_valid = 1U;
+      snapshot.ext_adc_loadcell_kg1000 = work->kg1000;
+      snapshot.monotonic_ms = work->monotonic_ms;
+      daq_publish_loadcell(&snapshot, &work->calibration);
+    }
+    if (work->flags & DAQ_REPORT_KG50)
+      daq_publish_kg50(work->kg50, work->monotonic_ms, &work->calibration);
+    if (work->flags & DAQ_REPORT_TEMPERATURE) {
+      if (log_telemetry_captured(SEDS_DT_DAQ_ADC_TEMPERATURE, &work->temperature,
+                                 1U, sizeof(float), work->monotonic_ms) == SEDS_OK)
+        g_daq_temperature_publish_ok_count++;
+      else g_daq_temperature_publish_fail_count++;
+    }
+    g_daq_report_completed_count++;
+    (void)tx_block_release(work);
+  }
 }
 
 #if (DAQ_ENABLE_DUMMY_CAN_TELEMETRY != 0U)
@@ -378,14 +448,14 @@ void daq_thread_entry(ULONG initial_input)
 #endif
 
     stage_started = daq_profile_stage(1U, stage_started);
+    daq_report_t report = {.monotonic_ms = snapshot.monotonic_ms,
+                           .calibration = calibration};
     const uint32_t report_ms = (uint32_t)snapshot.monotonic_ms;
     if ((uint32_t)(report_ms - last_temperature_report_ms) >= DAQ_TEMPERATURE_REPORT_PERIOD_MS)
     {
       last_temperature_report_ms = report_ms;
-      if (log_telemetry_asynchronous(SEDS_DT_DAQ_ADC_TEMPERATURE, &snapshot.ext_adc_temp_c, 1U, sizeof(float)) == SEDS_OK)
-        g_daq_temperature_publish_ok_count++;
-      else
-        g_daq_temperature_publish_fail_count++;
+      report.temperature = snapshot.ext_adc_temp_c;
+      report.flags |= DAQ_REPORT_TEMPERATURE;
     }
     daq_enqueue_analog(&snapshot, &calibration, &window);
     float filtered;
@@ -395,16 +465,18 @@ void daq_thread_entry(ULONG initial_input)
     {
       /* SD kg1000_network and SEDSNet receive this identical filtered value.
        * Raw records above retain individual, unfiltered conversions. */
-      daq_snapshot_t published = snapshot;
-      published.ext_adc_loadcell_kg1000 = filtered;
-      published.ext_adc_sample_valid = 1U;
-      daq_publish_loadcell(&published, &calibration);
+      report.kg1000 = filtered;
+      report.flags |= DAQ_REPORT_KG1000;
     }
 
     const float kg50_average = window.count[1] != 0U ? window.sum[1] / window.count[1] : 0.0f;
     if (daq_downsample_add(&downsample_kg50, kg50_average, window.count[1],
                            (uint32_t)snapshot.monotonic_ms, DAQ_BROADCAST_PERIOD_MS, &filtered))
-      daq_publish_kg50(filtered, snapshot.monotonic_ms, &calibration);
+    {
+      report.kg50 = filtered;
+      report.flags |= DAQ_REPORT_KG50;
+    }
+    daq_enqueue_report(&report);
 
     stage_started = daq_profile_stage(2U, stage_started);
     (void)daq_board_ext_adc_start_dma();
@@ -500,15 +572,32 @@ static void daq_analog_thread_entry(ULONG argument)
 
 UINT create_daq_thread(void)
 {
-  UINT status = tx_block_pool_create(&g_analog_pool, "Analog snapshots", sizeof(daq_analog_work_t),
+  UINT status = tx_block_pool_create(&g_report_pool, "Loadcell reports", sizeof(daq_report_t),
+                                     g_report_pool_storage, sizeof(g_report_pool_storage));
+  if (status != TX_SUCCESS) return status;
+  status = tx_queue_create(&g_report_queue, "Loadcell reports", TX_1_ULONG,
+                           g_report_queue_storage, sizeof(g_report_queue_storage));
+  if (status != TX_SUCCESS) return status;
+  status = tx_thread_create(&g_report_thread, "Loadcell reporting", daq_report_thread_entry, 0U,
+                            g_report_stack, sizeof(g_report_stack), DAQ_IO_THREAD_PRIORITY,
+                            DAQ_IO_THREAD_PRIORITY,
+                            (TX_TIMER_TICKS_PER_SECOND * DAQ_IO_THREAD_SLICE_MS + 999U) / 1000U,
+                            TX_AUTO_START);
+  if (status != TX_SUCCESS) return status;
+  status = tx_block_pool_create(&g_analog_pool, "Analog snapshots", sizeof(daq_analog_work_t),
                                      g_analog_pool_storage, sizeof(g_analog_pool_storage));
   if (status != TX_SUCCESS) return status;
   status = tx_queue_create(&g_analog_queue, "Analog snapshots", TX_1_ULONG,
                            g_analog_queue_storage, sizeof(g_analog_queue_storage));
   if (status != TX_SUCCESS) return status;
+  /* The SD writer can remain ready while draining a slow card. A lower-priority
+   * analog worker would never run, even while the DAQ sleeps. Share the same
+   * bounded round-robin slice as acquisition and storage instead. */
   status = tx_thread_create(&g_analog_thread, "Analog reporting", daq_analog_thread_entry, 0U,
-                            g_analog_stack, sizeof(g_analog_stack), DAQ_IO_THREAD_PRIORITY + 1U,
-                            DAQ_IO_THREAD_PRIORITY + 1U, TX_NO_TIME_SLICE, TX_AUTO_START);
+                            g_analog_stack, sizeof(g_analog_stack), DAQ_IO_THREAD_PRIORITY,
+                            DAQ_IO_THREAD_PRIORITY,
+                            (TX_TIMER_TICKS_PER_SECOND * DAQ_IO_THREAD_SLICE_MS + 999U) / 1000U,
+                            TX_AUTO_START);
   if (status != TX_SUCCESS) return status;
   return tx_thread_create(&daq_thread,
                           "DAQ Thread",

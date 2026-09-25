@@ -46,7 +46,7 @@ class DaqRateTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
 
     def test_default_and_fast_settings(self):
-        self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_ADC_OSR_BITS == 5); assert(DAQ_ADC_READ_INTERVAL_US == 271); assert(DAQ_BROADCAST_PERIOD_MS == 2); assert(DAQ_ACQUISITION_PERIOD_MS == 2); assert(DAQ_SD_RAW_QUEUE_DEPTH == 401); assert(DAQ_RAW_BATCH_CAPACITY == 12);}')
+        self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_ADC_OSR_BITS == 5); assert(DAQ_ADC_READ_INTERVAL_US == 271); assert(DAQ_BROADCAST_PERIOD_MS == 4); assert(DAQ_ACQUISITION_PERIOD_MS == 2); assert(DAQ_SD_RAW_QUEUE_DEPTH == 401); assert(DAQ_RAW_BATCH_CAPACITY == 12);}')
         self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_ADC_OSR_BITS == 3); assert(DAQ_ADC_READ_INTERVAL_US == 84); assert(DAQ_BROADCAST_PERIOD_MS == 100);}',
                      ['DAQ_ADC_OSR=256', 'DAQ_ADC_READ_RATE_HZ=12000', 'DAQ_ACQUISITION_PERIOD_MS=5', 'DAQ_BROADCAST_RATE_HZ=10'])
 
@@ -69,7 +69,7 @@ int main(void) {
   assert(!daq_downsample_add(&s, 1, 1, 2001, 20, &out));
 }''')
 
-    def test_500_hz_reports_each_second_without_catchup_bursts(self):
+    def test_250_hz_reports_each_second_without_catchup_bursts(self):
         self.compile(r'''#include "daq_downsample.h"
 #include "daq_rates.h"
 #include <assert.h>
@@ -77,7 +77,7 @@ int main(void) {
   daq_downsample_t state = {0}; float out; unsigned reports = 0;
   for (unsigned ms=0; ms<=1000; ms+=DAQ_ACQUISITION_PERIOD_MS)
     reports += daq_downsample_add(&state, 1, 1, ms, DAQ_BROADCAST_PERIOD_MS, &out);
-  assert(reports == 500);
+  assert(reports == 250);
   assert(daq_downsample_add(&state, 1, 1, 2000, DAQ_BROADCAST_PERIOD_MS, &out));
   assert(!daq_downsample_add(&state, 1, 1, 2001, DAQ_BROADCAST_PERIOD_MS, &out));
 }''')
@@ -117,22 +117,23 @@ int main(void) {
 #include "daq_rates.h"
 #define SEDS_OK 0
 #define SEDS_DT_DAQ_ADC_TEMPERATURE 140
-static unsigned g_daq_temperature_publish_ok_count, g_daq_temperature_publish_fail_count;
+static unsigned reports;
+#define DAQ_REPORT_TEMPERATURE 4U
+static struct {float temperature; unsigned flags;} report;
 static unsigned last_temperature_report_ms;
 static struct { uint64_t monotonic_ms; float ext_adc_temp_c; } snapshot;
-static int log_telemetry_asynchronous(unsigned t, void *v, unsigned n, unsigned size) {
-  assert(t==140 && v==&snapshot.ext_adc_temp_c && n==1 && size==sizeof(float)); return 0;
-}
 static void publish(void) {
+ report.flags=0;
 ''' + block + r'''
+ if(report.flags & DAQ_REPORT_TEMPERATURE) { assert(report.temperature==snapshot.ext_adc_temp_c); reports++; }
 }
 int main(void) {
   for(unsigned ms=0;ms<=1000;ms+=20) { snapshot.monotonic_ms=ms; publish(); }
-  assert(g_daq_temperature_publish_ok_count==10);
+  assert(reports==10);
   snapshot.monotonic_ms=2500; publish(); publish();
-  assert(g_daq_temperature_publish_ok_count==11); /* no catch-up burst */
+  assert(reports==11); /* no catch-up burst */
   last_temperature_report_ms=UINT32_MAX-50;
   snapshot.monotonic_ms=49; publish();
-  assert(g_daq_temperature_publish_ok_count==12 && !g_daq_temperature_publish_fail_count);
+  assert(reports==12);
 }
 ''')

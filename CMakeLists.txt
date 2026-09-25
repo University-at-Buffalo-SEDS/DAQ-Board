@@ -37,6 +37,8 @@ endif()
 
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
+set(DAQ_BROADCAST_RATE_HZ "250" CACHE STRING "Reports per second per loadcell (ADC/SD rates are independent)")
+target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE DAQ_BROADCAST_RATE_HZ=${DAQ_BROADCAST_RATE_HZ}U)
 target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
     -T "${CMAKE_SOURCE_DIR}/STM32U585xx_FLASH.ld")
 

@@ -2,18 +2,22 @@ include(FetchContent)
 
 set(SEDSNET_SCHEMA_FILE "${CMAKE_SOURCE_DIR}/config/sedsnet.json")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-             "${SEDSNET_SCHEMA_FILE}")
+             "${SEDSNET_SCHEMA_FILE}"
+             "${CMAKE_SOURCE_DIR}/third_party/embedded-crc32fast/Cargo.toml"
+             "${CMAKE_SOURCE_DIR}/third_party/embedded-crc32fast/src/lib.rs")
 
 set(SEDSNET_FORCE_RELEASE ON CACHE BOOL
     "Build SEDSNet in release mode for embedded firmware" FORCE)
 set(SEDSNET_EMBEDDED_BUILD ON CACHE BOOL "Build SEDSNet for an embedded target" FORCE)
+# The U585 has room to optimize the router for throughput instead of code size.
+set(SEDSNET_ENV_CARGO_PROFILE_RELEASE_EMBEDDED_OPT_LEVEL "3" CACHE STRING "" FORCE)
 set(SEDSNET_ENABLE_CRYPTOGRAPHY ON CACHE BOOL
     "Enable the board HASH-backed SEDSNet cryptography provider" FORCE)
 
 FetchContent_Declare(
     sedsnet
     GIT_REPOSITORY https://github.com/Rylan-Meilutis/SEDSnet.git
-    GIT_TAG main
+    GIT_TAG b3f0cdd97b1ee16efe640e11d0dce8c469c8c49a
     GIT_SHALLOW FALSE
     PATCH_COMMAND ${CMAKE_COMMAND}
                   -DSEDSNET_SOURCE_DIR=<SOURCE_DIR>

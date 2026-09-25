@@ -77,6 +77,9 @@ static int32_t g_board_link_side_id = -1;
 #endif
 static uint8_t g_local_unix_valid = 0U;
 static uint64_t g_local_unix_ms = 0ULL;
+static uint8_t g_discovery_schema_announced = 0U;
+static uint8_t g_discovery_schema_requested = 0U;
+static uint64_t g_discovery_schema_retry_ms = 0ULL;
 
 RouterState g_router = {.r = NULL, .created = 0U, .start_time = 0ULL};
 
@@ -436,6 +439,27 @@ SedsResult telemetry_poll_discovery(void) {
   }
 
   bool did_queue = false;
+  /* Cadence polling advertises routes, not schema. Publish the complete local
+   * catalog once after startup so existing relays learn newly added types.
+   * Leave queue processing running between bounded retries on queue pressure. */
+  const uint64_t now = tx_raw_now_ms_locked();
+  if (now >= g_discovery_schema_retry_ms) {
+    if (!g_discovery_schema_announced) {
+      g_discovery_schema_retry_ms = now + 1000ULL;
+      if (seds_router_announce_discovery(g_router.r) == SEDS_OK) {
+        g_discovery_schema_announced = 1U;
+      }
+    } else if (!g_discovery_schema_requested && g_telemetry_discovery_seen) {
+      /* Recover peer definitions when this board restarts after the peers'
+       * startup announcements. Wait for a peer, and separate the two bursts. */
+      static const uint8_t empty = 0U;
+      g_discovery_schema_retry_ms = now + 1000ULL;
+      if (seds_router_log_bytes(g_router.r, SEDS_DT_DISCOVERY_SCHEMA_REQUEST,
+                                &empty, 0U) == SEDS_OK) {
+        g_discovery_schema_requested = 1U;
+      }
+    }
+  }
   (void)flight_state_cache_poll(g_router.r);
   (void)daq_calibration_poll(g_router.r);
   (void)daq_log_clock_poll(g_router.r);
@@ -605,7 +629,7 @@ SedsResult init_telemetry_router(void) {
     return result;
   }
 
-  /* Discovery begins from the normal poll loop after link startup. */
+  /* The normal poll loop sends the initial schema after link startup. */
 
   g_router.r = r;
   result = flight_state_cache_init(r);
@@ -617,6 +641,9 @@ SedsResult init_telemetry_router(void) {
     return result;
   }
   g_router.created = 1U;
+  g_discovery_schema_announced = 0U;
+  g_discovery_schema_requested = 0U;
+  g_discovery_schema_retry_ms = 0ULL;
   g_router.start_time = tx_raw_now_ms_locked();
   return SEDS_OK;
 #endif
@@ -646,6 +673,29 @@ SedsResult log_telemetry_synchronous(SedsDataType data_type, const void *data,
   (void)data_type;
   print_data_no_telem((void *)data, element_count * element_size);
   return SEDS_OK;
+#endif
+}
+
+SedsResult log_telemetry_captured(SedsDataType data_type, const void *data,
+                                size_t element_count, size_t element_size,
+                                uint64_t captured_monotonic_ms) {
+#ifdef TELEMETRY_ENABLED
+  if (!data || !element_count || !element_size) return SEDS_BAD_ARG;
+  if (!g_router.r && init_telemetry_router() != SEDS_OK) return SEDS_ERR;
+  uint64_t timestamp = 0ULL;
+  const SedsResult clock_status = seds_router_get_network_time_ms(g_router.r, &timestamp);
+  /* Read uptime after the network clock call, which may wait on router locks. */
+  const uint64_t now = telemetry_now_ms();
+  const uint64_t age = now >= captured_monotonic_ms ? now - captured_monotonic_ms : 0ULL;
+  if (clock_status != SEDS_OK)
+    timestamp = now >= g_router.start_time ? now - g_router.start_time : 0ULL;
+  timestamp = timestamp >= age ? timestamp - age : 0ULL;
+  return seds_router_log_typed_ex(g_router.r, data_type, data, element_count,
+                                  element_size, guess_kind_from_elem_size(element_size),
+                                  &timestamp, 1);
+#else
+  (void)captured_monotonic_ms;
+  return log_telemetry_asynchronous(data_type, data, element_count, element_size);
 #endif
 }
 

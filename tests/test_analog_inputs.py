@@ -265,3 +265,58 @@ int main(void) {
             result=subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-I',str(p),'-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(binary)],input=harness,text=True,capture_output=True)
             self.assertEqual(result.returncode,0,result.stderr)
             subprocess.run([str(binary)],check=True)
+
+    def test_analog_worker_shares_sd_priority_and_bounded_slice(self):
+        daq=(ROOT/'Core/Src/daq_thread.c').read_text().split('UINT create_daq_thread(void)',1)[1]
+        sd=(ROOT/'Core/Src/sd_writer_thread.c').read_text().split('UINT create_sd_writer_thread(void)',1)[1]
+        harness=r'''
+#include <assert.h>
+#include <stddef.h>
+#include "daq_rates.h"
+typedef unsigned UINT;
+typedef unsigned long ULONG;
+typedef int TX_THREAD;
+#define TX_SUCCESS 0U
+#define TX_1_ULONG 1U
+#define TX_AUTO_START 1U
+#define TX_NO_TIME_SLICE 0U
+#define TX_TIMER_TICKS_PER_SECOND 50000U
+static TX_THREAD g_analog_thread,daq_thread,sd_writer_thread,g_report_thread;
+static int g_report_pool,g_report_queue;
+static ULONG g_report_pool_storage[64],g_report_queue_storage[16],g_report_stack[2048];
+typedef struct {unsigned x;} daq_report_t;
+static void daq_report_thread_entry(ULONG x){(void)x;}
+static int g_analog_pool,g_analog_queue;
+static ULONG g_analog_pool_storage[64],g_analog_queue_storage[3],g_analog_stack[1024],g_daq_thread_stack[1024],g_sd_writer_thread_stack[1024];
+typedef struct {unsigned x;} daq_analog_work_t;
+#define DAQ_THREAD_STACK_SIZE sizeof(g_daq_thread_stack)
+static void daq_analog_thread_entry(ULONG x){(void)x;}
+static void daq_thread_entry(ULONG x){(void)x;}
+static void sd_writer_thread_entry(ULONG x){(void)x;}
+static UINT priorities[4],thresholds[4];static ULONG slices[4];
+static UINT tx_block_pool_create(int *p,char *n,unsigned block,void *buf,unsigned size){(void)p;(void)n;(void)block;(void)buf;(void)size;return 0;}
+static UINT tx_queue_create(int *p,char *n,unsigned words,void *buf,unsigned size){(void)p;(void)n;(void)words;(void)buf;(void)size;return 0;}
+static UINT tx_thread_create(TX_THREAD *p,char *n,void (*entry)(ULONG),ULONG arg,void *stack,ULONG size,UINT priority,UINT threshold,ULONG slice,UINT start){
+ (void)n;(void)entry;(void)arg;(void)stack;(void)size;(void)start;
+ unsigned i=p==&g_analog_thread?0:p==&daq_thread?1:p==&g_report_thread?3:2;
+ priorities[i]=priority;thresholds[i]=threshold;slices[i]=slice;return 0;
+}
+UINT create_daq_thread(void)
+'''+daq+'\nUINT create_sd_writer_thread(void)\n'+sd+r'''
+int main(void){
+ assert(create_daq_thread()==TX_SUCCESS && create_sd_writer_thread()==TX_SUCCESS);
+ /* A perpetually ready SD task must not outrank the analog consumer. All
+  * peers must rotate, and preemption thresholds must permit that rotation. */
+ assert(priorities[0]==priorities[1] && priorities[0]==priorities[2]);
+ for(unsigned i=0;i<4;i++){
+  assert(priorities[i]==priorities[0]);
+  assert(thresholds[i]==priorities[i]);
+  assert(slices[i]>0 && slices[i]<=TX_TIMER_TICKS_PER_SECOND/1000U);
+ }
+}
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            binary=pathlib.Path(tmp)/'scheduling-test'
+            result=subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(binary)],input=harness,text=True,capture_output=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            subprocess.run([str(binary)],check=True)

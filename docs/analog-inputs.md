@@ -76,14 +76,29 @@ or be zero to disable the auxiliary pass. Unread/stale fields report NaN after
 
 Each drained MCP sample is queued to SD with its channel and original timestamp:
 CH0 `mcp3564r_raw`, CH1 `kg50_raw`, CH2–7 `mcp3564r_chN_raw`. Internal analog
-voltage/current rows are captured at 10 Hz. A bounded, lower-priority worker
+voltage/current rows are captured at 10 Hz. A bounded, time-sliced worker
 publishes analog telemetry and formats these rows with the original capture
 timestamp, outside the load-cell acquisition loop. `g_daq_analog_work_drop_count`
-counts snapshots rejected if all three worker slots are occupied. Queue/write diagnostics
+counts snapshots rejected if all three worker slots are occupied. The worker
+shares the acquisition/SD priority with a 1 ms slice, so a continuously busy SD
+writer cannot starve analog reporting. Queue/write diagnostics
 still determine whether storage kept up; this feature does not establish a
 lossless 12 kHz recording qualification.
 
 ## Network and GroundStation
+
+Loadcells default to **250 reports/s each** (500 combined), with a 4 ms
+downsampling window. ADC acquisition and raw SD capture keep their own rates.
+`cmake -S . -B build/Release_Script -DDAQ_BROADCAST_RATE_HZ=500` enables an
+explicit 500 Hz-per-channel test; use `250` to restore the normal setting.
+
+Loadcell and temperature publication now runs in a separate worker with 16
+bounded report slots. Acquisition submits without waiting. Reports retain the
+captured values, calibration and time; network timestamps subtract queue age.
+`g_daq_report_drop_count` counts rejected work items (which may contain both
+loadcells), and `g_daq_report_max_age_ms` records the maximum worker delay.
+These counters are independent of raw ADC/SD loss counters. No new hardware
+throughput qualification has been performed for this worker.
 
 Append-only SEDSnet IDs (existing IDs unchanged):
 
@@ -98,11 +113,17 @@ All four target GroundStation, best-effort at 10 Hz, with explicit DAQ CAN route
 They add approximately 40 messages/s and 880 payload bytes/s before framing.
 GroundStation's matching runtime schema advertises the GROUND_STATION endpoint;
 its default, test-fire and HITL layouts have a DAQ analog tab with explicitly
-bound DAQ chart series and separate voltage/current axes. The relay uses the
-SEDSnet v4 wire contract; no renumbering of existing gateway types is needed.
+bound DAQ chart series and separate voltage/current axes, including both load cells.
+The DAQ publishes its schema at startup; existing gateways merge the new type
+definitions at runtime. Routine discovery polling alone does not send schema.
+A failed initial announcement is retried once per second until queued successfully;
+After discovering a peer, the board also requests its schema once, so restarting
+a board does not depend on catching the peer's earlier startup advertisement.
+Failed submissions retry at one-second intervals; successful submissions stop
+repeating. This is not an acknowledgment that every peer has merged the schema.
 
-Rebuild/reflash DAQ and rebuild/restart GroundStation to activate. No live board
-was flashed by this change. Confirm the installed bridge's throughput and
+Rebuild/reflash DAQ and rebuild/restart GroundStation to activate. The gateway
+does not need the new analog definitions compiled in. Confirm the installed bridge's throughput and
 unknown-type forwarding during bench testing. For a future sensor, choose its
 existing type/index in the layout and add the physical-unit calibration in GS;
 changing the fixed payload order requires a coordinated schema update.

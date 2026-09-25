@@ -13,7 +13,7 @@
 #define DAQ_ACQUISITION_PERIOD_MS 2U
 #endif
 #ifndef DAQ_BROADCAST_RATE_HZ
-#define DAQ_BROADCAST_RATE_HZ 500U
+#define DAQ_BROADCAST_RATE_HZ 250U
 #endif
 #define DAQ_ADC_MCLK_HZ 16000000U
 /* Temperature must refresh independently of acquisition-loop overruns. */
@@ -25,9 +25,9 @@
 #if DAQ_ANALOG_REPORT_PERIOD_MS < 100U || DAQ_ANALOG_REPORT_PERIOD_MS > 1000U
 #error "Auxiliary analog period must be 100..1000 ms"
 #endif
-/* Acquisition can overrun its period under telemetry load. Give SD an equal
- * priority and a bounded slice instead of only the acquisition thread's tiny
- * sleep gaps. IRQ-driven ADC acquisition continues during either worker. */
+/* Acquisition, SD and analog reporting share a priority and bounded slice.
+ * A continuously ready SD writer must not starve analog reporting. IRQ-driven
+ * ADC acquisition continues while any of these workers runs. */
 #define DAQ_IO_THREAD_PRIORITY 6U
 #define DAQ_IO_THREAD_SLICE_MS 1U
 /* Size each SD batch for the service interval plus bounded scheduling slack.

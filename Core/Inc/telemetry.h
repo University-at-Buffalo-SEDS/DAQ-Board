@@ -25,6 +25,10 @@ SedsResult init_telemetry_router(void);
 SedsResult log_telemetry_synchronous(SedsDataType data_type, const void *data,
                                      size_t element_count, size_t element_size);
 
+/* Capture time is absolute board monotonic time, as returned by telemetry_now_ms. */
+SedsResult log_telemetry_captured(SedsDataType data_type, const void *data,
+                                size_t element_count, size_t element_size,
+                                uint64_t captured_monotonic_ms);
 SedsResult log_telemetry_asynchronous(SedsDataType data_type, const void *data,
                                       size_t element_count, size_t element_size);
 

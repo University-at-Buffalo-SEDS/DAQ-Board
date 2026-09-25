@@ -29,7 +29,7 @@ if(_already_prepared EQUAL -1)
 endif()
 
 # crc32fast's default slicing-by-16 table consumes 16 KiB of flash. Use the
-# board-owned, wire-compatible bitwise implementation on constrained targets.
+# board-owned, wire-compatible 1 KiB table implementation on constrained targets.
 file(TO_CMAKE_PATH "${SEDSNET_CRC32_DIR}" _crc32_path)
 set(_crc32_patch
     "[patch.crates-io]\ncrc32fast = { path = \"${_crc32_path}\" }\n")
