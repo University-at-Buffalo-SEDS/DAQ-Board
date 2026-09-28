@@ -28,13 +28,16 @@ typedef struct { float kg1000_slope, kg1000_intercept, iadc_slope, iadc_intercep
 #define SEDS_DT_DAQ_KG50_CALIBRATION 138
 #define SEDS_DT_DAQ_THERMAL_CALIBRATION 141
 #define SEDS_DT_DAQ_FILTER_CALIBRATION 142
+#define SEDS_DT_DAQ_KG50_INPUT 147
+static unsigned requested_input;
+static void mcp3564r_request_kg50_input(uint8_t input) { requested_input=input; }
 #define SEDS_OK 0
 #define SEDS_BAD_ARG 1
 #define SEDS_HANDLER_ERROR 2
 #define LAUNCHCORE_PERSIST_OK 0
 #define LAUNCHCORE_PERSIST_NOT_FOUND 1
 volatile uint32_t g_telemetry_discovery_seen=1;
-static unsigned ticks, fail_persist, requests[6], rotations;
+static unsigned ticks, fail_persist, requests[11], rotations;
 static unsigned char persisted[sizeof(daq_calibration_t)];
 static size_t persisted_len;
 static daq_calibration_t sd_calibration;
@@ -57,14 +60,14 @@ static unsigned persistent_store_set(unsigned key, const void *value, size_t siz
 }
 static void sd_card_set_calibration(const daq_calibration_t *c) { sd_calibration=*c; rotations++; }
 static unsigned seds_router_enable_network_variable(SedsRouter *r,unsigned ty,bool read,bool write) {
-  assert(r && ty>=137 && ty<=142 && read && !write); return 0;
+  assert(r && ty>=137 && ty<=147 && read && !write); return 0;
 }
 static unsigned seds_router_on_network_variable_update(SedsRouter *r,unsigned ty,
     SedsResult (*cb)(const SedsPacketView *, void *),void *user) {
-  (void)user; assert(r && ty>=137 && ty<=142 && cb); return 0;
+  (void)user; assert(r && ty>=137 && ty<=147 && cb); return 0;
 }
 static unsigned seds_router_request_managed_variable(SedsRouter *r,unsigned ty) {
-  assert(r && ty>=137 && ty<=142); requests[ty-137]++; return 0;
+  assert(r && ty>=137 && ty<=147); requests[ty-137]++; return 0;
 }
 static daq_calibration_t daq_calibration_current(void);
 ''' + source + r'''
@@ -76,6 +79,15 @@ int main(void) {
   assert(g_daq_calibration_restores==1 && g_calibration.kg1000_slope==2);
   assert(g_calibration.kg50[1]==1 && daq_calibration_apply_kg50(&g_calibration,5)==5);
   ticks=500; assert(daq_calibration_poll(&router)==0);
+  assert(requests[10]==1);
+  uint8_t input=1;
+  SedsPacketView source_packet={147,&input,1};
+  assert(apply_kg50_input(&source_packet,NULL)==SEDS_OK && requested_input==1);
+  input=2; assert(apply_kg50_input(&source_packet,NULL)==SEDS_HANDLER_ERROR && requested_input==1);
+  source_packet.payload_len=0; assert(apply_kg50_input(&source_packet,NULL)==SEDS_HANDLER_ERROR);
+  source_packet.payload_len=1; input=0;
+  assert(apply_kg50_input(&source_packet,NULL)==SEDS_OK && requested_input==0);
+
   assert(requests[0]==1 && requests[1]==1);
   float kg50[7]={1,2,3,0,0,1,6};
   SedsPacketView packet={138,kg50,sizeof(kg50)};

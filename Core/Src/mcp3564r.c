@@ -67,12 +67,23 @@ typedef struct
   uint8_t scan_config_valid;
   uint32_t temperature_attempt_ms;
   volatile uint8_t aux_scan_active;
+  volatile uint8_t p6_scan_active;
+  volatile uint8_t fast_sample_seen;
   volatile uint8_t aux_seen;
   uint32_t aux_attempt_ms;
   mcp3564r_sample_entry_t queue[MCP3564R_SAMPLE_QUEUE_DEPTH];
 } mcp3564r_context_t;
 
 static mcp3564r_context_t g_mcp3564r = {0};
+static volatile uint8_t g_kg50_input_requested;
+static volatile uint8_t g_kg50_input_active;
+void mcp3564r_request_kg50_input(uint8_t input) { if (input <= 1U) g_kg50_input_requested = input; }
+uint8_t mcp3564r_kg50_input(void) { return g_kg50_input_active; }
+static uint32_t mcp3564r_fast_scan(uint8_t input) {
+  if (input == 0U) return MCP3564R_BOARD_SCAN;
+  return g_mcp3564r.p6_scan_active ? 0x000200U : 0x000001U;
+}
+
 volatile uint32_t g_mcp3564r_init_status = UINT32_MAX;
 #if (MCP3564R_USE_DMA_READ != 0U)
 static uint8_t g_mcp3564r_tx_frame[MCP3564R_DCACHE_LINE_SIZE] MCP3564R_DMA_ALIGN;
@@ -279,13 +290,14 @@ static void mcp3564r_store_raw32(uint32_t raw32)
   }
   /* Never route a diagnostic/unconfigured channel as a load cell. */
   const unsigned channel = raw32 >> 28U;
-  if (g_mcp3564r.temperature_scan_active != 0U || channel > 7U) return;
+  if (g_mcp3564r.temperature_scan_active != 0U || (channel > 7U && channel != 9U)) return;
   if (g_mcp3564r.aux_scan_active != 0U)
   {
     if ((MCP3564R_AUX_SCAN & (1U << channel)) == 0U) return;
     g_mcp3564r.aux_seen |= (uint8_t)(1U << channel);
   }
-  else if (channel > 1U) return;
+  else if ((mcp3564r_fast_scan(g_kg50_input_active) & (1U << channel)) == 0U) return;
+  if (g_mcp3564r.aux_scan_active == 0U) g_mcp3564r.fast_sample_seen = 1U;
   entry.raw32 = raw32;
   entry.monotonic_ms = HAL_GetTick();
   entry.temperature_c = g_mcp3564r.temperature_valid &&
@@ -487,8 +499,11 @@ static HAL_StatusTypeDef mcp3564r_switch_scan(uint8_t mode)
 
   g_mcp3564r.scan_config_valid = 0U;
   const uint8_t temperature = mode == 1U;
+  const uint8_t requested_input = g_kg50_input_requested;
   g_mcp3564r.temperature_scan_active = temperature;
   g_mcp3564r.aux_scan_active = mode == 2U;
+  g_mcp3564r.p6_scan_active = mode == 3U && requested_input == 1U;
+  g_mcp3564r.fast_sample_seen = 0U;
   g_mcp3564r.aux_seen = 0U;
   g_mcp3564r.temperature_scan_complete = 0U;
   g_mcp3564r.start_sent = 0U;
@@ -499,10 +514,13 @@ static HAL_StatusTypeDef mcp3564r_switch_scan(uint8_t mode)
     status = mcp3564r_write_reg8(2U, temperature ? MCP3564R_TEMPERATURE_CONFIG1
                                                : MCP3564R_DEFAULT_CONFIG.config1_reg);
   if (status == HAL_OK)
+    status = mcp3564r_write_reg8(3U, g_mcp3564r.p6_scan_active ? MCP3564R_P6_CONFIG2 : MCP3564R_BOARD_CONFIG2);
+  if (status == HAL_OK)
     status = mcp3564r_write_reg24(MCP3564R_SCAN_ADDR,
                                 temperature ? MCP3564R_TEMPERATURE_SCAN :
-                                mode == 2U ? MCP3564R_AUX_SCAN : MCP3564R_BOARD_SCAN);
+                                mode == 2U ? MCP3564R_AUX_SCAN : mcp3564r_fast_scan(requested_input));
   if (status != HAL_OK) return status;
+  if (mode == 0U || mode == 3U) g_kg50_input_active = requested_input;
   g_mcp3564r.scan_config_valid = 1U;
   return mcp3564r_start_cycle();
 }
@@ -515,6 +533,7 @@ UINT mcp3564r_init(SPI_HandleTypeDef *spi)
   }
 
   memset(&g_mcp3564r, 0, sizeof(g_mcp3564r));
+  g_kg50_input_active = 0U;
   g_mcp3564r.spi = spi;
   g_mcp3564r.start_offset_us = MCP3564R_DEFAULT_START_OFFSET_US;
   g_mcp3564r.first_conversion_pending = 1U;
@@ -568,8 +587,10 @@ HAL_StatusTypeDef mcp3564r_start_dma(void)
   }
 
   const uint32_t now = HAL_GetTick();
+  if (g_kg50_input_requested != g_kg50_input_active)
+    return mcp3564r_switch_scan(0U);
   if (g_mcp3564r.scan_config_valid == 0U)
-    return mcp3564r_switch_scan(g_mcp3564r.temperature_scan_active ? 1U : g_mcp3564r.aux_scan_active ? 2U : 0U);
+    return mcp3564r_switch_scan(g_mcp3564r.temperature_scan_active ? 1U : g_mcp3564r.aux_scan_active ? 2U : g_mcp3564r.p6_scan_active ? 3U : 0U);
   if (g_mcp3564r.aux_scan_active != 0U)
   {
     if (g_mcp3564r.aux_seen == MCP3564R_AUX_SCAN ||
@@ -596,6 +617,13 @@ HAL_StatusTypeDef mcp3564r_start_dma(void)
     if (status != HAL_BUSY) g_mcp3564r.aux_attempt_ms = now;
     return status;
   }
+
+  /* CONFIG2 gain is shared. Alternate settled single-channel fast scans:
+   * CH0 at x1, P6 differential channel 9 at x16. Never rewrite SPI registers
+   * from the DMA ISR or change gain underneath an in-flight conversion. */
+  if (g_kg50_input_active == 1U && g_mcp3564r.temperature_scan_active == 0U &&
+      g_mcp3564r.aux_scan_active == 0U && g_mcp3564r.fast_sample_seen != 0U)
+    return mcp3564r_switch_scan(g_mcp3564r.p6_scan_active ? 0U : 3U);
 
   if ((g_mcp3564r.dma_busy != 0U) || (g_mcp3564r.conversion_active != 0U))
   {
@@ -712,7 +740,8 @@ UINT mcp3564r_get_sample(mcp3564r_sample_t *sample)
   sample->overrun_count = overrun_count;
   sample->monotonic_ms = monotonic_ms;
   sample->code = code;
-  sample->voltage_v = mcp3564r_code_to_voltage(code);
+  sample->voltage_v = mcp3564r_code_to_voltage(code) /
+      (sample->channel == 9U ? MCP3564R_P6_GAIN : 1.0f);
   sample->raw_value = sample->channel < 2U ? mcp3564r_code_to_raw_value(code) : sample->voltage_v;
 
 

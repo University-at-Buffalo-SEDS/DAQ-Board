@@ -308,6 +308,46 @@ static void test_auxiliary_pass(void) {
   assert(mcp3564r_start_dma()==HAL_OK && registers[7]==3);
   receive(0,790001);(void)take(0,790001);
 }
+static void test_p6_fast_selection(void) {
+  mcp3564r_request_kg50_input(1);
+  assert(mcp3564r_kg50_input()==0); /* callback performs no SPI I/O */
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==1 && registers[3]==0xcf);
+  assert(mcp3564r_kg50_input()==1 && registers[2]==0x14);
+  receive(9,123); assert(!mcp3564r_pending_samples());
+  receive(0,790001); assert(take(0,790001).raw_value!=0.0f);
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==0x200 && registers[3]==0xef);
+  /* First poll after each gain change allows full digital-filter settling. */
+  assert(htim2.reload>=500);
+  receive(0,123); assert(!mcp3564r_pending_samples());
+  receive(9,-2097152);
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==1 && registers[3]==0xcf);
+  /* A queued x16 sample is scaled by its own channel, not today's gain. */
+  assert(take(9,-2097152).raw_value==-0.0375f);
+  receive(1,123); assert(!mcp3564r_pending_samples());
+  receive(0,790001); (void)take(0,790001);
+  fail_command=0x4e; /* Fail the CONFIG2 write; retry the intended P6 phase. */
+  assert(mcp3564r_start_dma()==HAL_ERROR && !timer_running);
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==0x200 && registers[3]==0xef);
+  tick+=100;
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==0x1000 && registers[3]==0xcf);
+  receive(12,305656);
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==1 && registers[3]==0xcf);
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==0xfc && registers[3]==0xcf);
+  for (int ch=7;ch>=2;--ch) { receive(ch,1000); (void)take(ch,1000); }
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==1);
+  receive(0,790001); (void)take(0,790001);
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==0x200 && registers[3]==0xef);
+  /* A request during DMA must wait until the transfer completes. */
+  ready=1; wire_word=0x90000000U|1000U; mcp3564r_timer_elapsed_callback(&htim2);
+  assert(dma_pending); mcp3564r_request_kg50_input(0);
+  assert(mcp3564r_start_dma()==HAL_BUSY && mcp3564r_kg50_input()==1 && registers[3]==0xef);
+  dma_pending=0; HAL_SPI_TxRxCpltCallback(&spi); (void)take(9,1000);
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==3 && registers[3]==0xcf && mcp3564r_kg50_input()==0);
+  receive(9,123); assert(!mcp3564r_pending_samples());
+  receive(1,123); (void)take(1,123);
+  mcp3564r_request_kg50_input(255); assert(mcp3564r_start_dma()==HAL_BUSY);
+  assert(registers[7]==3);
+}
 int main(int argc, char **argv) {
   assert(argc == 2 && mcp3564r_init(&spi) == TX_SUCCESS);
   if (!strcmp(argv[1], "config")) test_configuration();
@@ -315,6 +355,7 @@ int main(int argc, char **argv) {
   else if (!strcmp(argv[1], "polling")) test_not_ready_and_recovery();
   else if (!strcmp(argv[1], "temperature")) test_temperature_clock_switch();
   else if (!strcmp(argv[1], "auxiliary")) test_auxiliary_pass();
+  else if (!strcmp(argv[1], "p6")) test_p6_fast_selection();
   else assert(0);
 }
 '''
@@ -356,3 +397,6 @@ class Mcp3564rDriverTests(unittest.TestCase):
 
     def test_auxiliary_scan_preserves_channel_units_and_resumes_loadcells(self):
         subprocess.run([str(self.binary), "auxiliary"], check=True)
+
+    def test_p6_differential_uses_fast_scan_and_switches_only_between_dma_transfers(self):
+        subprocess.run([str(self.binary), "p6"], check=True)

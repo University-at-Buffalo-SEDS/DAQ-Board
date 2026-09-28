@@ -99,6 +99,14 @@ int main(void) {
   assert(!snapshot.ext_adc_sample_valid && records[0].channel==6);
   assert(fabsf(records[0].calibrated_value-6.6f)<1e-6f);
   assert(records[0].raw_value==0.6f);
+  /* P6 differential samples remain individual signed volts in SD and their
+     own window; they never inherit AMP2's raw scale or calibration. */
+  snapshot=(daq_snapshot_t){ .ext_adc_sample_valid=1, .ext_adc_channel=9,
+      .ext_adc_code=-100, .ext_adc_voltage_v=-0.002f, .ext_adc_loadcell_kg1000=-0.002f };
+  assert(daq_drain_ext_adc(&snapshot,records,4,&cal,&window)==1);
+  assert(window.count[9]==1 && window.count[0]==0 && window.count[1]==0);
+  assert(records[0].channel==9 && records[0].raw_adc_code==-100);
+  assert(records[0].raw_value==-0.002f && records[0].calibrated_value==-0.002f);
   /* Invalid diagnostic channels are discarded, with bounded draining. */
   snapshot=(daq_snapshot_t){ .ext_adc_sample_valid=1, .ext_adc_channel=15 };
   next=0; queued_count=3;

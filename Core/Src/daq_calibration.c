@@ -1,6 +1,7 @@
 #include "daq_calibration.h"
 
 #include "main.h"
+#include "mcp3564r.h"
 #include "persistent_store.h"
 #include "sd_card.h"
 #include "sedsnet_config.h"
@@ -22,6 +23,7 @@ static bool g_network_value_seen;
 static bool g_kg50_network_value_seen;
 static bool g_thermal_network_value_seen;
 static bool g_filter_network_value_seen;
+static bool g_input_network_value_seen;
 static uint32_t g_last_refresh_ms;
 
 volatile uint32_t g_daq_calibration_updates __attribute__((used, externally_visible));
@@ -114,6 +116,16 @@ static SedsResult apply_calibration(const SedsPacketView *packet, void *user)
   return SEDS_OK;
 }
 
+static SedsResult apply_kg50_input(const SedsPacketView *packet, void *user)
+{
+  (void)user;
+  if (packet == NULL || packet->payload == NULL || packet->payload_len != 1U || ((const uint8_t *)packet->payload)[0] > 1U)
+    return SEDS_HANDLER_ERROR;
+  mcp3564r_request_kg50_input(((const uint8_t *)packet->payload)[0]);
+  g_input_network_value_seen = true;
+  return SEDS_OK;
+}
+
 SedsResult daq_calibration_init(SedsRouter *router)
 {
   if (router == NULL) return SEDS_BAD_ARG;
@@ -138,6 +150,10 @@ SedsResult daq_calibration_init(SedsRouter *router)
   result = seds_router_enable_network_variable(router, SEDS_DT_DAQ_FILTER_CALIBRATION, true, false);
   if (result != SEDS_OK) return result;
   result = seds_router_on_network_variable_update(router, SEDS_DT_DAQ_FILTER_CALIBRATION, apply_calibration, NULL);
+  if (result != SEDS_OK) return result;
+  result = seds_router_enable_network_variable(router, SEDS_DT_DAQ_KG50_INPUT, true, false);
+  if (result != SEDS_OK) return result;
+  result = seds_router_on_network_variable_update(router, SEDS_DT_DAQ_KG50_INPUT, apply_kg50_input, NULL);
   g_last_refresh_ms = HAL_GetTick();
   return result;
 }
@@ -145,7 +161,7 @@ SedsResult daq_calibration_init(SedsRouter *router)
 SedsResult daq_calibration_poll(SedsRouter *router)
 {
   if (router == NULL) return SEDS_BAD_ARG;
-  if ((g_network_value_seen && g_kg50_network_value_seen && g_thermal_network_value_seen && g_filter_network_value_seen) || g_telemetry_discovery_seen == 0U) return SEDS_OK;
+  if ((g_network_value_seen && g_kg50_network_value_seen && g_thermal_network_value_seen && g_filter_network_value_seen && g_input_network_value_seen) || g_telemetry_discovery_seen == 0U) return SEDS_OK;
   const uint32_t now = HAL_GetTick();
   if ((uint32_t)(now - g_last_refresh_ms) < DAQ_CALIBRATION_RETRY_MS) return SEDS_OK;
   g_last_refresh_ms = now;
@@ -158,6 +174,8 @@ SedsResult daq_calibration_poll(SedsRouter *router)
     result = seds_router_request_managed_variable(router, SEDS_DT_DAQ_THERMAL_CALIBRATION);
   if (result == SEDS_OK && !g_filter_network_value_seen)
     result = seds_router_request_managed_variable(router, SEDS_DT_DAQ_FILTER_CALIBRATION);
+  if (result == SEDS_OK && !g_input_network_value_seen)
+    result = seds_router_request_managed_variable(router, SEDS_DT_DAQ_KG50_INPUT);
   return result;
 }
 

@@ -917,7 +917,7 @@ void sd_card_writer_thread_entry(ULONG initial_input)
                                    sample->channel < 8U ? (const char *const[]){
                                      "mcp3564r_raw", "kg50_raw", "mcp3564r_ch2_raw", "mcp3564r_ch3_raw",
                                      "mcp3564r_ch4_raw", "mcp3564r_ch5_raw", "mcp3564r_ch6_raw", "mcp3564r_ch7_raw"
-                                   }[sample->channel] : "invalid_adc_channel",
+                                   }[sample->channel] : sample->channel == 9U ? "mcp3564r_ch2_ch3_gain16_raw" : "invalid_adc_channel",
                                    (long)sample->raw_adc_code,
                                    raw_text, calibrated_text,
                                    sample->network_unix_ms != 0U ? "network" : "local",

@@ -25,20 +25,24 @@ typedef struct
 
 typedef struct
 {
-  uint8_t channel; /* 0: KG1000, 1: KG50, 2..7: auxiliary (single-ended). */
+  uint8_t channel; /* 0: KG1000, 1: KG50, 2..7: auxiliary; 9: P6 differential at x16. */
   uint8_t sample_valid;
   uint8_t dma_busy;
   uint8_t queued_samples;
   uint64_t monotonic_ms;
   int32_t code;
   float voltage_v; /* ADC-pin voltage, using the nominal internal reference. */
-  float raw_value; /* CH0/1 historical calibration input; CH2..7 ADC-pin volts. */
+  float raw_value; /* CH0/1 historical calibration input; CH2..7/9 input volts (CH9 divided by PGA gain). */
   float temperature_c;
   int32_t temperature_code; /* Uncorrected TEMP conversion, valid when temperature_c is finite. */
   uint32_t overrun_count;
 } mcp3564r_sample_t;
 
 extern const mcp3564r_config_t MCP3564R_DEFAULT_CONFIG;
+
+/* 0: AMP2/CH1; 1: P6 differential CH2-CH3 (scan channel 9). */
+void mcp3564r_request_kg50_input(uint8_t input);
+uint8_t mcp3564r_kg50_input(void);
 
 UINT mcp3564r_init(SPI_HandleTypeDef *spi);
 void mcp3564r_set_start_offset_us(uint32_t offset_us);

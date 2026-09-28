@@ -61,10 +61,10 @@ static ULONG g_daq_thread_stack[DAQ_THREAD_STACK_SIZE / sizeof(ULONG)];
 
 typedef struct
 {
-  int64_t code_sum[8];
-  float sum[8];
-  float voltage_sum[8];
-  uint16_t count[8];
+  int64_t code_sum[10];
+  float sum[10];
+  float voltage_sum[10];
+  uint16_t count[10];
 } daq_loadcell_window_t;
 
 static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
@@ -97,7 +97,7 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
 
   for (;;)
   {
-    if (sample.sample_valid != 0U && sample.channel < 8U && count < capacity)
+    if (sample.sample_valid != 0U && (sample.channel < 8U || sample.channel == 9U) && count < capacity)
     {
       const uint8_t channel = sample.channel;
       const float raw = sample.raw_value;
@@ -280,11 +280,11 @@ static void daq_publish_loadcell(const daq_snapshot_t *snapshot, const daq_calib
   }
 }
 
-static void daq_publish_kg50(float raw, uint64_t monotonic_ms,
+static void daq_publish_kg50(float raw, uint8_t input, uint64_t monotonic_ms,
                              const daq_calibration_t *calibration)
 {
 #if (DISABLE_SD_CARD == 0U)
-  if (sd_card_enqueue_csv_row("kg50_network", monotonic_ms, raw, calibration) == SD_CARD_STATUS_OK)
+  if (sd_card_enqueue_csv_row(input ? "kg50_p6_network_volts" : "kg50_network", monotonic_ms, raw, calibration) == SD_CARD_STATUS_OK)
     g_daq_sd_network_row_ok_count++;
   else
     g_daq_sd_network_row_fail_count++;
@@ -292,7 +292,11 @@ static void daq_publish_kg50(float raw, uint64_t monotonic_ms,
   (void)monotonic_ms;
   (void)calibration;
 #endif
-  if (log_telemetry_captured(SEDS_DT_KG50, &raw, 1U, sizeof(raw), monotonic_ms) == SEDS_OK)
+  const float tagged[] = {(float)input, raw};
+  const SedsResult result = input == 0U
+      ? log_telemetry_captured(SEDS_DT_KG50, &raw, 1U, sizeof(raw), monotonic_ms)
+      : log_telemetry_captured(SEDS_DT_DAQ_KG50_SELECTED, tagged, 2U, sizeof(float), monotonic_ms);
+  if (result == SEDS_OK)
     g_daq_kg50_publish_ok_count++;
   else
     g_daq_kg50_publish_fail_count++;
@@ -310,6 +314,7 @@ typedef struct {
   daq_calibration_t calibration;
   float kg1000, kg50, temperature;
   uint32_t flags;
+  uint8_t kg50_input;
 } daq_report_t;
 static TX_THREAD g_report_thread;
 static TX_QUEUE g_report_queue;
@@ -356,7 +361,7 @@ static void daq_report_thread_entry(ULONG argument)
       daq_publish_loadcell(&snapshot, &work->calibration);
     }
     if (work->flags & DAQ_REPORT_KG50)
-      daq_publish_kg50(work->kg50, work->monotonic_ms, &work->calibration);
+      daq_publish_kg50(work->kg50, work->kg50_input, work->monotonic_ms, &work->calibration);
     if (work->flags & DAQ_REPORT_TEMPERATURE) {
       if (log_telemetry_captured(SEDS_DT_DAQ_ADC_TEMPERATURE, &work->temperature,
                                  1U, sizeof(float), work->monotonic_ms) == SEDS_OK)
@@ -392,6 +397,7 @@ void daq_thread_entry(ULONG initial_input)
   uint32_t last_temperature_report_ms = 0U;
   daq_downsample_t downsample = {0};
   daq_downsample_t downsample_kg50 = {0};
+  uint8_t previous_kg50_input = 0U;
 #if (DISABLE_SD_CARD == 0U)
   sd_raw_adc_record_t raw_records[DAQ_RAW_BATCH_MAX];
 #endif
@@ -469,8 +475,14 @@ void daq_thread_entry(ULONG initial_input)
       report.flags |= DAQ_REPORT_KG1000;
     }
 
-    const float kg50_average = window.count[1] != 0U ? window.sum[1] / window.count[1] : 0.0f;
-    if (daq_downsample_add(&downsample_kg50, kg50_average, window.count[1],
+    report.kg50_input = mcp3564r_kg50_input();
+    if (report.kg50_input != previous_kg50_input) {
+      memset(&downsample_kg50, 0, sizeof(downsample_kg50));
+      previous_kg50_input = report.kg50_input;
+    }
+    const unsigned kg50_channel = report.kg50_input == 1U ? 9U : 1U;
+    const float kg50_average = window.count[kg50_channel] != 0U ? window.sum[kg50_channel] / window.count[kg50_channel] : 0.0f;
+    if (daq_downsample_add(&downsample_kg50, kg50_average, window.count[kg50_channel],
                            (uint32_t)snapshot.monotonic_ms, DAQ_BROADCAST_PERIOD_MS, &filtered))
     {
       report.kg50 = filtered;

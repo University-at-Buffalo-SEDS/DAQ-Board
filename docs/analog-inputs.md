@@ -147,3 +147,31 @@ the unchanged baseline firmware has three overruns under the same simulator.
 The diagnostic run is not a full-suite qualification: memory/network soak stages
 were not reached, and the pinned public v0.4.12 image was unavailable. Bench
 validation remains required, especially for ADC accuracy and sustained throughput.
+
+## Selectable P6 50 kg input
+
+GroundStation's 50 kg selector switches between AMP2/P8 (source 0) and P6
+pin 3 (+) minus pin 4 (-), MCP differential scan channel 9 (source 1).
+The managed `DAQ_KG50_INPUT` UInt8 packet (ID 147) selects the source.
+P6 uses CONFIG2=0xEF, PGA **16x**. Since the gain register is shared, its
+single-channel scan alternates with CH0 at unity gain; temperature and auxiliary
+scans also restore unity gain. Configuration changes run only in the acquisition
+thread with DMA idle, followed by the first-conversion settling interval.
+The nominal differential full-scale range is +/-2.4/16 = +/-0.15 V.
+
+P6 reports `DAQ_KG50_SELECTED` (ID 148), two Float32 values `[1, volts]`, at
+the same 250 Hz reporting target as normal KG50. Input volts divide ADC codes
+by 16; queued samples retain this conversion after the gain changes again.
+Gain switching costs conversion time, so achieved rates require hardware
+measurement. Source tags let GroundStation reject late packets from another
+input. The 1000 kg raw coordinate and saved calibration are unchanged.
+
+GroundStation keeps separate mass/temperature/filter profiles for P8 and P6.
+A new P6 profile needs zero/span calibration before it produces kilograms.
+SD retains every queued differential conversion as `mcp3564r_ch2_ch3_gain16_raw`,
+including signed ADC code and unfiltered differential input volts; these records
+are not converted with the AMP2 calibration. P6 mass calibration is applied by
+GroundStation. Auxiliary CH2/CH3 voltage reports remain separate, slow channels.
+
+Gain and scan mapping: Microchip MCP3561/2/4R DS20006391C, CONFIG2 register 8-4
+and ADC channel selection table 5-15.

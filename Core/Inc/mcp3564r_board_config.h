@@ -9,6 +9,9 @@
  * CONFIG2 GAIN[2:0]=001 is unity gain, not 16x. */
 #define MCP3564R_BOARD_CONFIG0 0x82U
 #define MCP3564R_BOARD_CONFIG2 0xCFU
+/* CONFIG2.GAIN=101: analog PGA x16, only during P6 CH2-CH3 scan. */
+#define MCP3564R_P6_CONFIG2 0xEFU
+#define MCP3564R_P6_GAIN 16.0f
 #define MCP3564R_BOARD_SCAN 0x000003U /* CH1, CH0 at the load-cell clock/filter. */
 /* One auxiliary pass per period, then resume the two load cells. */
 #ifndef MCP3564R_AUX_SCAN

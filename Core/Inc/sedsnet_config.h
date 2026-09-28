@@ -68,3 +68,6 @@
 #define SEDS_DT_DAQ_SDADC_VOLTAGES ((SedsDataType)144U)
 #define SEDS_DT_DAQ_CURRENT_SENSE ((SedsDataType)145U)
 #define SEDS_DT_DAQ_POWER_MONITOR ((SedsDataType)146U)
+
+#define SEDS_DT_DAQ_KG50_INPUT ((SedsDataType)147U)
+#define SEDS_DT_DAQ_KG50_SELECTED ((SedsDataType)148U)

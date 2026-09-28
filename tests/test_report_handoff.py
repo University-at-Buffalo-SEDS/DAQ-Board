@@ -59,16 +59,16 @@ static UINT tx_queue_send(TX_QUEUE*q,VOID*p,unsigned wait){(void)q;assert(wait==
 static UINT tx_queue_receive(TX_QUEUE*q,VOID*p,unsigned wait){(void)q;assert(wait==TX_WAIT_FOREVER);if(!queued)longjmp(finished,1);*(ULONG*)p=message;queued=0;return 0;}
 static uint64_t telemetry_now_ms(void){return 12350;}
 static void daq_publish_loadcell(const daq_snapshot_t*s,const daq_calibration_t*c){assert(s->monotonic_ms==12300 && s->ext_adc_loadcell_kg1000==1.25f && c->slope==2);published++;}
-static void daq_publish_kg50(float value,uint64_t time,const daq_calibration_t*c){assert(value==2.5f && time==12300 && c->slope==2);published++;}
+static void daq_publish_kg50(float value,uint8_t input,uint64_t time,const daq_calibration_t*c){assert(input==1 && value==2.5f && time==12300 && c->slope==2);published++;}
 static int log_telemetry_captured(unsigned type,const void*data,size_t count,size_t size,uint64_t time){assert(type==140 && *(const float*)data==30 && count==1 && size==4 && time==12300);published++;return 0;}
 ''' + source[start:end] + r'''
 int main(void){
  assert(DAQ_BROADCAST_RATE_HZ==250 && DAQ_BROADCAST_PERIOD_MS==4);
- daq_report_t report={.monotonic_ms=12300,.calibration={2},.kg1000=1.25,.kg50=2.5,.temperature=30,.flags=7};
+ daq_report_t report={.monotonic_ms=12300,.calibration={2},.kg1000=1.25,.kg50=2.5,.temperature=30,.flags=7,.kg50_input=1};
  fail_alloc=1;daq_enqueue_report(&report);assert(g_daq_report_drop_count==1 && !published);
  fail_alloc=0;fail_send=1;daq_enqueue_report(&report);assert(g_daq_report_drop_count==2 && released==1);
  fail_send=0;daq_enqueue_report(&report);assert(!published && g_daq_report_enqueued_count==1);
- report.monotonic_ms=999;report.kg1000=999;report.calibration.slope=999;
+ report.kg50_input=0;report.monotonic_ms=999;report.kg1000=999;report.calibration.slope=999;
  if(!setjmp(finished))daq_report_thread_entry(0);
  assert(published==3 && released==2 && g_daq_report_completed_count==1 && g_daq_report_max_age_ms==50);
 }
