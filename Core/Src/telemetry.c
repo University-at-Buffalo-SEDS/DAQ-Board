@@ -592,6 +592,9 @@ SedsResult init_telemetry_router(void) {
     result = seds_router_set_typed_route(r, -1, (uint32_t)SEDS_DT_KG50,
                                        g_can_side_id, true);
   if (result == SEDS_OK)
+    result = seds_router_set_typed_route(r, -1, (uint32_t)SEDS_DT_DAQ_KG50_SELECTED,
+                                       g_can_side_id, true);
+  if (result == SEDS_OK)
     result = seds_router_set_typed_route(r, -1, (uint32_t)SEDS_DT_DAQ_ADC_TEMPERATURE,
                                        g_can_side_id, true);
   const uint32_t analog_types[] = {SEDS_DT_DAQ_SAR_VOLTAGES, SEDS_DT_DAQ_SDADC_VOLTAGES,
