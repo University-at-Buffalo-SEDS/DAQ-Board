@@ -12,10 +12,11 @@ class SedsnetRoutingContract(unittest.TestCase):
             for path in (ROOT / "Core" / "Src").glob("*.c")
         )
         self.assertNotIn("seds_router_set_route", sources)
-        self.assertEqual(sources.count("seds_router_set_typed_route("), 4)
+        self.assertEqual(sources.count("seds_router_set_typed_route("), 5)
         self.assertIn("seds_router_set_typed_route(r, -1, (uint32_t)SEDS_DT_KG1000,\n"
                       "                                       g_can_side_id, true)", sources)
         self.assertIn("seds_router_set_typed_route(r, -1, (uint32_t)SEDS_DT_KG50,", sources)
+        self.assertIn("seds_router_set_typed_route(r, -1, (uint32_t)SEDS_DT_DAQ_KG50_SELECTED,", sources)
 
 
 if __name__ == "__main__":
