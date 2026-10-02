@@ -14,10 +14,12 @@ set(SEDSNET_ENV_CARGO_PROFILE_RELEASE_EMBEDDED_OPT_LEVEL "3" CACHE STRING "" FOR
 set(SEDSNET_ENABLE_CRYPTOGRAPHY ON CACHE BOOL
     "Enable the board HASH-backed SEDSNet cryptography provider" FORCE)
 
+include("${CMAKE_SOURCE_DIR}/cmake/sedsnet_source.cmake")
+
 FetchContent_Declare(
     sedsnet
     GIT_REPOSITORY https://github.com/Rylan-Meilutis/SEDSnet.git
-    GIT_TAG 10a0400bf56e09bfc2965128e602f1fc5de2d559
+    GIT_TAG main
     GIT_SHALLOW FALSE
     PATCH_COMMAND ${CMAKE_COMMAND}
                   -DSEDSNET_SOURCE_DIR=<SOURCE_DIR>
