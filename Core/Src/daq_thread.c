@@ -1,3 +1,4 @@
+#include "board_watchdog.h"
 #include "DAQ-Threads.h"
 
 #include "daq_board.h"
@@ -417,6 +418,7 @@ void daq_thread_entry(ULONG initial_input)
   for (;;)
   {
     const ULONG cycle_started = tx_time_get();
+        board_watchdog_progress(BOARD_WATCHDOG_ACQUISITION);
 #if (DAQ_ENABLE_DUMMY_CAN_TELEMETRY != 0U)
     daq_publish_dummy_can_telemetry();
 #endif

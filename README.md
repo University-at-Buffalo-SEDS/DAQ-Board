@@ -265,3 +265,9 @@ All eight SAR inputs, six auxiliary MCP inputs, current sensors and power
 monitors are supported at a default 10 Hz. See [the connector and telemetry
 map](docs/analog-inputs.md) for pinouts, nominal units, GroundStation testing
 configuration, and the additional load on acquisition/network/SD.
+
+## Hardware watchdog
+
+[Board watchdog configuration and validation](docs/watchdog.md). Build with
+`./build.py build --release --watchdog`.
+Watchdogs are opt-in and require the matching bootloader.

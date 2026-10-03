@@ -1,3 +1,4 @@
+#include "board_watchdog.h"
 // telemetry_thread.c
 #include "DAQ-Threads.h"
 #ifdef TELEMETRY_BOARD_LINK_UART
@@ -85,6 +86,7 @@ void telemetry_thread_entry(ULONG initial_input)
 
     for (;;)
     {
+        board_watchdog_progress(BOARD_WATCHDOG_NETWORK);
 #ifdef TELEMETRY_BOARD_LINK_UART
         board_link_uart_process();
 #endif
