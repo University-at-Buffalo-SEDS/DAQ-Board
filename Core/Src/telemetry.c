@@ -17,6 +17,8 @@
 #include "can_bus.h"
 #endif
 #include "sedsnet_config.h"
+#include "board_packet_store.h"
+#include "daq_clock_cache.h"
 #include "stm32u5xx_hal.h"
 
 #include <stdarg.h>
@@ -216,6 +218,16 @@ static SedsResult telemetry_heartbeat_handler(const SedsPacketView *pkt, void *u
 
 uint64_t telemetry_now_ms(void) { return tx_raw_now_ms_locked(); }
 
+static daq_clock_cache_t g_acquisition_clock;
+uint64_t telemetry_unix_ms_cached(void) {
+  const uint32_t mask = __get_PRIMASK();
+  __disable_irq();
+  const daq_clock_cache_t snapshot = g_acquisition_clock;
+  const uint32_t now = HAL_GetTick();
+  __set_PRIMASK(mask);
+  return daq_clock_cache_read(snapshot, now);
+}
+
 uint64_t telemetry_unix_ms(void) {
 #ifndef TELEMETRY_ENABLED
   return g_local_unix_valid ? g_local_unix_ms : 0ULL;
@@ -398,6 +410,11 @@ static void telemetry_update_network_health(SedsRouter *router) {
   if (seds_router_get_network_time_ms(router, &network_time_ms) == SEDS_OK) {
     g_telemetry_timesync_valid = 1U;
   }
+  const daq_clock_cache_t clock = daq_clock_cache_make(network_time_ms, HAL_GetTick());
+  const uint32_t mask = __get_PRIMASK();
+  __disable_irq();
+  g_acquisition_clock = clock;
+  __set_PRIMASK(mask);
   if (g_telemetry_discovery_seen != 0U &&
       g_telemetry_timesync_valid != 0U) {
     g_telemetry_network_ready = 1U;
@@ -520,6 +537,9 @@ SedsResult init_telemetry_router(void) {
     printf("Error: failed to register hardware crypto: %d\r\n", (int)result);
     return result;
   }
+
+  result = board_packet_store_init();
+  if (result != SEDS_OK) return result;
 
   r = seds_router_new(node_now_since_ms, NULL, locals,
                       sizeof(locals) / sizeof(locals[0]));

@@ -39,6 +39,14 @@ volatile uint32_t g_daq_sd_raw_batch_drop_count = 0U;
 volatile uint32_t g_daq_sd_network_row_ok_count = 0U;
 volatile uint32_t g_daq_sd_network_row_fail_count = 0U;
 volatile uint32_t g_daq_sample_overrun_count = 0U;
+volatile uint32_t g_daq_cycle_elapsed_ticks = 0U;
+volatile uint32_t g_daq_cycle_max_ticks = 0U;
+volatile uint32_t g_daq_first_overrun_ticks = 0U;
+volatile uint32_t g_daq_first_overrun_sample = 0U;
+volatile uint32_t g_daq_sampling_max_ticks = 0U;
+volatile uint32_t g_daq_drain_max_ticks = 0U;
+volatile uint32_t g_daq_publish_max_ticks = 0U;
+volatile uint32_t g_daq_adc_service_max_ticks = 0U;
 
 /* Wall-time profiling, including preemption and mutex waits. Stages are board
  * sampling, raw drain/enqueue, publishing, and ADC service. Read deltas of the
@@ -55,6 +63,12 @@ static ULONG daq_profile_stage(unsigned stage, ULONG started)
   if (elapsed > g_daq_stage_max_ticks[stage])
     g_daq_stage_max_ticks[stage] = elapsed;
   g_daq_stage_count[stage]++;
+  switch (stage) {
+    case 0U: g_daq_sampling_max_ticks = g_daq_stage_max_ticks[stage]; break;
+    case 1U: g_daq_drain_max_ticks = g_daq_stage_max_ticks[stage]; break;
+    case 2U: g_daq_publish_max_ticks = g_daq_stage_max_ticks[stage]; break;
+    default: g_daq_adc_service_max_ticks = g_daq_stage_max_ticks[stage]; break;
+  }
   return now;
 }
 
@@ -92,7 +106,7 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
     filter_calibration = *calibration;
   }
   uint16_t count = 0U;
-  const uint64_t unix_now = telemetry_unix_ms();
+  const uint64_t unix_now = telemetry_unix_ms_cached();
   const uint64_t mono_now = telemetry_now_ms();
   *window = (daq_loadcell_window_t){0};
 
@@ -418,7 +432,7 @@ void daq_thread_entry(ULONG initial_input)
   for (;;)
   {
     const ULONG cycle_started = tx_time_get();
-        board_watchdog_progress(BOARD_WATCHDOG_ACQUISITION);
+    board_watchdog_progress(BOARD_WATCHDOG_ACQUISITION);
 #if (DAQ_ENABLE_DUMMY_CAN_TELEMETRY != 0U)
     daq_publish_dummy_can_telemetry();
 #endif
@@ -515,14 +529,26 @@ void daq_thread_entry(ULONG initial_input)
     /* Include acquisition/publish work in the configured period. Sleeping for a
      * whole period after doing that work silently reduces the sample rate. */
     const ULONG elapsed = tx_time_get() - cycle_started;
+    g_daq_cycle_elapsed_ticks = elapsed;
+    if (elapsed > g_daq_cycle_max_ticks) g_daq_cycle_max_ticks = elapsed;
     if (elapsed < DAQ_SAMPLE_PERIOD_TICKS)
     {
       tx_thread_sleep(DAQ_SAMPLE_PERIOD_TICKS - elapsed);
     }
-    else
+    else if (elapsed > DAQ_SAMPLE_PERIOD_TICKS)
     {
+      if (g_daq_sample_overrun_count == 0U) {
+        g_daq_first_overrun_ticks = elapsed;
+        g_daq_first_overrun_sample = g_daq_sample_ok_count;
+      }
       g_daq_sample_overrun_count++;
       tx_thread_sleep(1U);
+    }
+    else
+    {
+      /* Finishing at the deadline is on time. Do not add another tick to
+       * every such cycle; still yield to the other ready I/O workers. */
+      tx_thread_relinquish();
     }
   }
 }
@@ -619,8 +645,8 @@ UINT create_daq_thread(void)
                           0U,
                           g_daq_thread_stack,
                           sizeof(g_daq_thread_stack),
-                          DAQ_IO_THREAD_PRIORITY,
-                          DAQ_IO_THREAD_PRIORITY,
+                          DAQ_ACQUISITION_THREAD_PRIORITY,
+                          DAQ_ACQUISITION_THREAD_PRIORITY,
                           (TX_TIMER_TICKS_PER_SECOND * DAQ_IO_THREAD_SLICE_MS + 999U) / 1000U,
                           TX_AUTO_START);
 }

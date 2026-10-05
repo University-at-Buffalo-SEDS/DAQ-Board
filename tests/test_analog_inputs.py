@@ -280,7 +280,7 @@ typedef int TX_THREAD;
 #define TX_1_ULONG 1U
 #define TX_AUTO_START 1U
 #define TX_NO_TIME_SLICE 0U
-#define TX_TIMER_TICKS_PER_SECOND 50000U
+#define TX_TIMER_TICKS_PER_SECOND 1000U
 static TX_THREAD g_analog_thread,daq_thread,sd_writer_thread,g_report_thread;
 static int g_report_pool,g_report_queue;
 static ULONG g_report_pool_storage[64],g_report_queue_storage[16],g_report_stack[2048];
@@ -305,11 +305,11 @@ UINT create_daq_thread(void)
 '''+daq+'\nUINT create_sd_writer_thread(void)\n'+sd+r'''
 int main(void){
  assert(create_daq_thread()==TX_SUCCESS && create_sd_writer_thread()==TX_SUCCESS);
- /* A perpetually ready SD task must not outrank the analog consumer. All
-  * peers must rotate, and preemption thresholds must permit that rotation. */
- assert(priorities[0]==priorities[1] && priorities[0]==priorities[2]);
+ /* Acquisition must preempt backlogged I/O; SD cannot starve analog/report
+  * peers. ThreadX uses smaller numbers for higher priorities. */
+ assert(priorities[1]<priorities[0]);
+ assert(priorities[0]==priorities[2] && priorities[0]==priorities[3]);
  for(unsigned i=0;i<4;i++){
-  assert(priorities[i]==priorities[0]);
   assert(thresholds[i]==priorities[i]);
   assert(slices[i]>0 && slices[i]<=TX_TIMER_TICKS_PER_SECOND/1000U);
  }

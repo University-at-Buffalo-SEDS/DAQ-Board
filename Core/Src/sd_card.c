@@ -1000,7 +1000,7 @@ UINT sd_card_init(TX_BYTE_POOL *byte_pool)
   {
     return TX_SUCCESS;
   }
-  if (tx_mutex_create(&g_sd_pool_mutex, "sd_pool", TX_NO_INHERIT) != TX_SUCCESS)
+  if (tx_mutex_create(&g_sd_pool_mutex, "sd_pool", TX_INHERIT) != TX_SUCCESS)
   {
     return TX_MUTEX_ERROR;
   }

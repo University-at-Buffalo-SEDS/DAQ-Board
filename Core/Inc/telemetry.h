@@ -3,6 +3,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Acquisition-safe UTC snapshot. No router calls, allocation or mutex waits. */
+uint64_t telemetry_unix_ms_cached(void);
+
 #ifdef __cplusplus
 extern "C" {
 #endif

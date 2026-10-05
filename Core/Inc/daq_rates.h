@@ -25,10 +25,11 @@
 #if DAQ_ANALOG_REPORT_PERIOD_MS < 100U || DAQ_ANALOG_REPORT_PERIOD_MS > 1000U
 #error "Auxiliary analog period must be 100..1000 ms"
 #endif
-/* Acquisition, SD and analog reporting share a priority and bounded slice.
- * A continuously ready SD writer must not starve analog reporting. IRQ-driven
- * ADC acquisition continues while any of these workers runs. */
+/* Acquisition outranks the I/O workers so reporting or SD backlogs cannot
+ * consume its service budget. SD and analog/report workers share a bounded
+ * slice; IRQ-driven ADC acquisition continues independently of these tasks. */
 #define DAQ_IO_THREAD_PRIORITY 6U
+#define DAQ_ACQUISITION_THREAD_PRIORITY 5U
 #define DAQ_IO_THREAD_SLICE_MS 1U
 /* Size each SD batch for the service interval plus bounded scheduling slack.
  * Keeping 96 records per 2 ms slot would waste most of the RAM reserve. */
