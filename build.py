@@ -366,6 +366,7 @@ class BuildConfig:
     project_name: str
     artifact: Optional[str]  # base name without extension (if known/forced)
 
+    sedsnet_ref: str = "main"
     watchdog: bool = False
 
     @property
@@ -408,6 +409,7 @@ def configure_and_build(ui: UI, cfg: BuildConfig, target: str | None = None) -> 
         f"-DCMAKE_TOOLCHAIN_FILE={str(cfg.toolchain_file)}",
         "-DCMAKE_COMMAND=cmake",
         watchdog_flag,
+        f"-DSEDSNET_GIT_REF={cfg.sedsnet_ref}",
         telemetry_flag,
         simulator_flag,
         "-DENABLE_TELEMETRY_CAN_BUS=ON",
@@ -769,6 +771,8 @@ def make_parser() -> argparse.ArgumentParser:
         mode = sp.add_mutually_exclusive_group()
         mode.add_argument("--debug", action="store_true", help="Debug build (default).")
         mode.add_argument("--release", action="store_true", help="Release build.")
+        sp.add_argument("--sedsnet-ref", choices=["main", "dev"], default=None,
+                        help="SEDSnet branch; current remote commit is fetched, with offline fallback.")
         sp.add_argument("--no-telemetry", action="store_true", help="Configure with -DENABLE_TELEMETRY=OFF")
         sp.add_argument("--watchdog", action="store_true", help="Enable board-owned task-progress hardware watchdog (requires matching bootloader).")
         sp.add_argument("--image", choices=["firmware", "bootloader", "factory", "ota"],
@@ -843,6 +847,7 @@ def build_cfg_from_args(ui: UI, args: argparse.Namespace) -> BuildConfig:
         build_type=build_type,
         telemetry=not args.no_telemetry,
         watchdog=args.watchdog,
+        sedsnet_ref=args.sedsnet_ref or "main",
         generator=args.generator,
         toolchain_file=toolchain,
         build_subdir=build_subdir,
