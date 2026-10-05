@@ -38,6 +38,7 @@ endif()
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
 include(cmake/packet_store.cmake)
+include(cmake/tlsf_allocator.cmake)
 set(DAQ_BROADCAST_RATE_HZ "250" CACHE STRING "Reports per second per loadcell (ADC/SD rates are independent)")
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE DAQ_BROADCAST_RATE_HZ=${DAQ_BROADCAST_RATE_HZ}U)
 target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
@@ -195,6 +196,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "${CMAKE_SOURCE_DIR}/Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_hash_ex.c")
 
 # Board-owned progress watchdog; deliberately independent of SEDSnet.
-option(ENABLE_BOARD_WATCHDOG "Enable independent hardware watchdog with task progress gating" OFF)
+option(ENABLE_BOARD_WATCHDOG "Enable independent hardware watchdog with task progress gating" ON)
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/Core/Src/board_watchdog.c)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE BOARD_WATCHDOG_ENABLE=$<BOOL:${ENABLE_BOARD_WATCHDOG}>)

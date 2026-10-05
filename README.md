@@ -293,3 +293,7 @@ pool and leaves ThreadX scheduling unchanged. Compression stays disabled.
 Use `--packet-store heap` to disable the arena, including in a previously enabled build cache.
 Startup fails cleanly if the reservation does not fit; router retries reuse
 the arena. This is an opt-in development build, not hardware qualification.
+
+`--allocator tlsf` selects the board-owned TLSF allocator for SEDSnet.
+ThreadX scheduling and thread stacks retain their existing ownership. The default is `threadx`.
+TLSF coalesces adjacent free blocks; packet-arena compaction is a separate option.

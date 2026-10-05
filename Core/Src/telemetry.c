@@ -18,6 +18,9 @@
 #endif
 #include "sedsnet_config.h"
 #include "board_packet_store.h"
+#ifdef TELEMETRY_USE_TLSF
+#include "telemetry_tlsf.h"
+#endif
 #include "daq_clock_cache.h"
 #include "stm32u5xx_hal.h"
 
@@ -538,6 +541,9 @@ SedsResult init_telemetry_router(void) {
     return result;
   }
 
+#ifdef TELEMETRY_USE_TLSF
+  seds_set_memory_admission_probe(telemetry_tlsf_admit);
+#endif
   result = board_packet_store_init();
   if (result != SEDS_OK) return result;
 

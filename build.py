@@ -366,9 +366,10 @@ class BuildConfig:
     project_name: str
     artifact: Optional[str]  # base name without extension (if known/forced)
 
+    allocator: str = "threadx"
     packet_store: str = "heap"
     sedsnet_ref: str = "main"
-    watchdog: bool = False
+    watchdog: bool = True
 
     @property
     def build_dir(self) -> Path:
@@ -410,6 +411,7 @@ def configure_and_build(ui: UI, cfg: BuildConfig, target: str | None = None) -> 
         f"-DCMAKE_TOOLCHAIN_FILE={str(cfg.toolchain_file)}",
         "-DCMAKE_COMMAND=cmake",
         watchdog_flag,
+        f"-DTELEMETRY_USE_TLSF={'ON' if cfg.allocator == 'tlsf' else 'OFF'}",
         f"-DSEDSNET_GIT_REF={cfg.sedsnet_ref}",
         f"-DSEDSNET_COMPACT_PACKET_STORE={'ON' if cfg.packet_store == 'compact' else 'OFF'}",
         "-DSEDSNET_COMPACT_PACKET_COMPRESSION=OFF",
@@ -658,6 +660,17 @@ def flash_st_flash(ui: UI, bin_path: Path, addr: str, reset: bool) -> None:
     run(ui, cmd)
 
 
+def verify_stm32_target(exe: str, connect: str) -> None:
+    """Refuse a CubeProgrammer write when the connected MCU family is wrong."""
+    probe = subprocess.run([exe, "-c", *connect.split()], capture_output=True,
+                           text=True, timeout=30)
+    output = re.sub(r"\x1b\[[0-9;]*m", "", probe.stdout + probe.stderr)
+    found = re.search(r"Device ID\s*:\s*(0x[0-9a-fA-F]+)", output)
+    if probe.returncode or found is None or int(found.group(1), 16) != 0x482:
+        actual = found.group(1) if found else "unidentified"
+        raise RuntimeError(f"Refusing flash: expected STM32 device 0x482, got {actual}. Check ST-Link wiring.")
+
+
 def flash_stm32prog_cli(
     ui: UI,
     bin_path: Path,
@@ -677,6 +690,7 @@ def flash_stm32prog_cli(
         raise FriendlyError("STM32_Programmer_CLI not found.\n"
                             "Install STM32CubeProgrammer and add it to PATH, "
                             "or pass --stm32prog-cli /path/to/STM32_Programmer_CLI.")
+    verify_stm32_target(exe, connect)
     cmd = [exe, "-c", connect, "-w", str(bin_path), addr, "-v"]
     if reset:
         cmd.append("-rst")
@@ -774,12 +788,18 @@ def make_parser() -> argparse.ArgumentParser:
         mode = sp.add_mutually_exclusive_group()
         mode.add_argument("--debug", action="store_true", help="Debug build (default).")
         mode.add_argument("--release", action="store_true", help="Release build.")
+        sp.add_argument("--allocator", choices=["threadx", "tlsf"], default="threadx",
+                        help="SEDSnet allocator (default: threadx); scheduling remains ThreadX.")
         sp.add_argument("--packet-store", choices=["heap", "compact"], default="heap",
                         help="Opt-in packet arena; compact selects dev unless --sedsnet-ref is explicit.")
         sp.add_argument("--sedsnet-ref", choices=["main", "dev"], default=None,
                         help="SEDSnet branch; current remote commit is fetched, with offline fallback.")
         sp.add_argument("--no-telemetry", action="store_true", help="Configure with -DENABLE_TELEMETRY=OFF")
-        sp.add_argument("--watchdog", action="store_true", help="Enable board-owned task-progress hardware watchdog (requires matching bootloader).")
+        watchdog = sp.add_mutually_exclusive_group()
+        watchdog.add_argument("--watchdog", dest="watchdog", action="store_true", default=True,
+                              help="Enable the task-progress hardware watchdog (default; matching bootloader required).")
+        watchdog.add_argument("--no-watchdog", dest="watchdog", action="store_false",
+                              help="Disable the hardware watchdog for a diagnostic build.")
         sp.add_argument("--image", choices=["firmware", "bootloader", "factory", "ota"],
                         default="factory",
                         help="Artifact to build (default: factory bootloader+firmware image).")
@@ -852,6 +872,7 @@ def build_cfg_from_args(ui: UI, args: argparse.Namespace) -> BuildConfig:
         build_type=build_type,
         telemetry=not args.no_telemetry,
         watchdog=args.watchdog,
+        allocator=args.allocator,
         packet_store=args.packet_store,
         sedsnet_ref=args.sedsnet_ref or ("dev" if args.packet_store == "compact" else "main"),
         generator=args.generator,
