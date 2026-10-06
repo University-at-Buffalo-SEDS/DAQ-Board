@@ -276,14 +276,16 @@ static uint64_t node_now_since_ms(void *user) {
 #ifdef TELEMETRY_CAN_BUS
 volatile uint32_t g_daq_loadcell_wire_tx_count = 0U;
 volatile uint32_t g_daq_loadcell_wire_fail_count = 0U;
-SedsResult tx_send(const uint8_t *bytes, size_t len, void *user) {
+static SedsResult tx_send_with_priority(const uint8_t *bytes, size_t len,
+                                        uint8_t priority, void *user) {
   (void)user;
 
   if (!bytes || len == 0U) {
     return SEDS_BAD_ARG;
   }
   const uint32_t can_id =
-      sim_probe_packed_data_type(bytes, len) == (uint32_t)SEDS_DT_HEARTBEAT
+      (priority >= 200U ||
+       sim_probe_packed_data_type(bytes, len) == (uint32_t)SEDS_DT_HEARTBEAT)
           ? 0x007U
           : 0x107U;
   if (can_bus_send_large(bytes, len, can_id) == HAL_OK) {
@@ -299,6 +301,11 @@ SedsResult tx_send(const uint8_t *bytes, size_t len, void *user) {
     g_daq_loadcell_wire_fail_count++;
   return SEDS_IO;
 }
+
+SedsResult tx_send(const uint8_t *bytes, size_t len, void *user) {
+  return tx_send_with_priority(bytes, len, 0U, user);
+}
+
 #endif
 #ifdef TELEMETRY_BOARD_LINK_UART
 static SedsResult board_link_tx_send(const uint8_t *bytes, size_t len, void *user) {
@@ -569,8 +576,8 @@ SedsResult init_telemetry_router(void) {
   }
 
 #ifdef TELEMETRY_CAN_BUS
-  g_can_side_id = seds_router_add_side_packed_profile(
-      r, "can", 3U, tx_send, NULL, false,
+  g_can_side_id = seds_router_add_side_packed_profile_with_priority(
+      r, "can", 3U, tx_send_with_priority, NULL, false,
       SEDS_SIDE_TRANSPORT_PROFILE_IPV6_LIKE, BOARD_CAN_MAX_FRAME_BYTES, 0U,
       BOARD_SIDE_TRANSPORT_TEMPLATES);
   if (g_can_side_id < 0) {
