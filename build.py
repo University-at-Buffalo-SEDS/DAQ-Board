@@ -791,7 +791,7 @@ def make_parser() -> argparse.ArgumentParser:
         sp.add_argument("--allocator", choices=["threadx", "tlsf"], default="threadx",
                         help="SEDSnet allocator (default: threadx); scheduling remains ThreadX.")
         sp.add_argument("--packet-store", choices=["heap", "compact"], default="heap",
-                        help="Opt-in packet arena; compact selects dev unless --sedsnet-ref is explicit.")
+                        help="Opt-in packet arena; uses main unless --sedsnet-ref is explicit.")
         sp.add_argument("--sedsnet-ref", choices=["main", "dev"], default=None,
                         help="SEDSnet branch; current remote commit is fetched, with offline fallback.")
         sp.add_argument("--no-telemetry", action="store_true", help="Configure with -DENABLE_TELEMETRY=OFF")
@@ -874,7 +874,7 @@ def build_cfg_from_args(ui: UI, args: argparse.Namespace) -> BuildConfig:
         watchdog=args.watchdog,
         allocator=args.allocator,
         packet_store=args.packet_store,
-        sedsnet_ref=args.sedsnet_ref or ("dev" if args.packet_store == "compact" else "main"),
+        sedsnet_ref=args.sedsnet_ref or "main",
         generator=args.generator,
         toolchain_file=toolchain,
         build_subdir=build_subdir,

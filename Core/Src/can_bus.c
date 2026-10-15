@@ -150,7 +150,7 @@ static inline void can_bus_notify_rx(const uint8_t *data, size_t len) {
 
 #define CAN_BUS_FRAG_MAGIC ((uint16_t)('S') | ((uint16_t)('D') << 8))
 #define CAN_BUS_NODE_ID 7U
-#define CAN_BUS_FRAG_WIRE_LEN 64   // always send 64B payload frames for frags
+#define CAN_BUS_FRAG_WIRE_LEN 64   // fixed stride for multi-fragment packets
 #define CAN_BUS_REASM_TIMEOUT_MS 1000u // tolerate interleaved multi-sender v4 packets
 
 typedef struct __attribute__((packed)) {
@@ -627,7 +627,7 @@ HAL_StatusTypeDef can_bus_send_bytes(const uint8_t *bytes, size_t len,
 }
 
 // Send an arbitrarily large buffer by fragmenting into multiple CAN FD frames.
-// This uses fixed 64B frames (DLC=64) and a small header in each frame.
+// Multi-fragment packets use 64-byte frames and a small header in each frame.
 HAL_StatusTypeDef can_bus_send_large(const uint8_t *bytes, size_t len,
                                      uint32_t std_id) {
   if (!g_hfdcan)
@@ -682,8 +682,11 @@ HAL_StatusTypeDef can_bus_send_large(const uint8_t *bytes, size_t len,
     memcpy(frame + hdr_sz, bytes + off, take);
     off += take;
 
-    // send a fixed 64-byte payload frame (pads zeros)
-    HAL_StatusTypeDef st = can_bus_send_bytes(frame, wire_len, std_id);
+    // Single fragments use the smallest legal DLC; multi-fragment stride stays 64 bytes.
+    /* Only a single fragment can shorten its first-frame stride.
+     * Keep multi-fragment frames fixed for existing reassembly code. */
+    const size_t used = frag_cnt == 1U ? hdr_sz + take : wire_len;
+    HAL_StatusTypeDef st = can_bus_send_bytes(frame, used, std_id);
     if (st != HAL_OK)
       return st;
   }

@@ -270,7 +270,8 @@ static uint64_t node_now_since_ms(void *user) {
   (void)user;
   const RouterState s = g_router;
   const uint64_t now = tx_raw_now_ms_locked();
-  return s.r ? (now - s.start_time) : 0ULL;
+  /* Construction and initial maintenance also need an advancing clock. */
+  return now - s.start_time;
 }
 
 #ifdef TELEMETRY_CAN_BUS
@@ -554,6 +555,8 @@ SedsResult init_telemetry_router(void) {
   result = board_packet_store_init();
   if (result != SEDS_OK) return result;
 
+  /* Keep one clock origin through construction and initial queue service. */
+  g_router.start_time = tx_raw_now_ms_locked();
   r = seds_router_new(node_now_since_ms, NULL, locals,
                       sizeof(locals) / sizeof(locals[0]));
   if (!r) {
@@ -680,7 +683,6 @@ SedsResult init_telemetry_router(void) {
   g_discovery_schema_announced = 0U;
   g_discovery_schema_requested = 0U;
   g_discovery_schema_retry_ms = 0ULL;
-  g_router.start_time = tx_raw_now_ms_locked();
   return SEDS_OK;
 #endif
 }

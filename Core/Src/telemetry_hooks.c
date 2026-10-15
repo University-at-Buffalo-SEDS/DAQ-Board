@@ -18,6 +18,11 @@ volatile uint32_t g_telemetry_lock_put_fail = 0U;
 volatile uint32_t g_telemetry_alloc_fail = 0U;
 volatile UINT g_telemetry_alloc_last_error = TX_SUCCESS;
 volatile size_t g_telemetry_alloc_failed_size = 0U;
+#ifdef SEDS_FIRMWARE_SIM_TEST
+volatile uint32_t g_telemetry_alloc_failure_psp;
+volatile uint32_t g_telemetry_alloc_failure_stack[128];
+volatile uint32_t g_telemetry_alloc_failure_stack_words;
+#endif
 volatile uint32_t g_telemetry_panic_count = 0U;
 volatile uint32_t g_telemetry_alloc_count = 0U;
 volatile uint32_t g_telemetry_free_count = 0U;
@@ -200,7 +205,25 @@ void *telemetryMalloc(size_t xSize)
 #ifdef TELEMETRY_USE_TLSF
     void *ptr = telemetry_tlsf_malloc(xSize);
     if (ptr) ++g_telemetry_alloc_count;
-    else ++g_telemetry_alloc_fail;
+    else {
+        ++g_telemetry_alloc_fail;
+        g_telemetry_alloc_failed_size = xSize;
+#ifdef SEDS_FIRMWARE_SIM_TEST
+        const uint32_t psp = __get_PSP();
+        TX_THREAD *thread = tx_thread_identify();
+        g_telemetry_alloc_failure_psp = psp;
+        g_telemetry_alloc_failure_stack_words = 0U;
+        if (thread != TX_NULL && psp >= (uintptr_t)thread->tx_thread_stack_start &&
+            psp <= (uintptr_t)thread->tx_thread_stack_end) {
+            const size_t words = ((uintptr_t)thread->tx_thread_stack_end - psp + 1U) / 4U;
+            const size_t count = words < 128U ? words : 128U;
+            const volatile uint32_t *stack = (const volatile uint32_t *)(uintptr_t)psp;
+            for (size_t i = 0; i < count; ++i)
+                g_telemetry_alloc_failure_stack[i] = stack[i];
+            g_telemetry_alloc_failure_stack_words = count;
+        }
+#endif
+    }
     telemetry_memory_profile_sample();
     return ptr;
 #else

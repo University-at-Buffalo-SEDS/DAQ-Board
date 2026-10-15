@@ -112,7 +112,7 @@ class AnalogInputTests(unittest.TestCase):
             t=schema['types'][i]
             self.assertEqual(t['name'],name)
             self.assertEqual(t['element'],dict(kind='Static',data_type='Float32',count=count))
-            self.assertFalse(t['reliable'])
+            self.assertEqual(t['reliable'], 'Off')
             self.assertEqual(t['endpoints'],['ActuatorGroundStation'])
 
     def test_publication_preserves_units_and_expires_missing_auxiliary_inputs(self):

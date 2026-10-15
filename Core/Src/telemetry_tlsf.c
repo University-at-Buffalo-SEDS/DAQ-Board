@@ -96,7 +96,10 @@ void *telemetry_tlsf_malloc(size_t size)
     __disable_irq();
     void *ptr = NULL;
     if (initialize() && size <= tlsf_block_size_max() - 64U)
-        ptr = tlsf_memalign(allocator, 8U, size ? size : 1U);
+        /* Rust reserves its own alignment/header in telemetryMalloc's raw
+         * allocation. CAN callers own byte storage. Extra memalign padding
+         * strands small free blocks even for a ten-byte request. */
+        ptr = tlsf_malloc(allocator, size ? size : 1U);
     if (ptr) {
         ++live_allocations;
         g_telemetry_tlsf_live_bytes += tlsf_block_size(ptr);

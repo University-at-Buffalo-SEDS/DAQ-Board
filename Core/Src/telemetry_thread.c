@@ -1,6 +1,7 @@
 #include "board_watchdog.h"
 // telemetry_thread.c
 #include "DAQ-Threads.h"
+#include "daq_rates.h"
 #ifdef TELEMETRY_BOARD_LINK_UART
 #include "board_link_uart.h"
 #endif
@@ -127,15 +128,17 @@ UINT create_telemetry_thread(TX_BYTE_POOL *byte_pool)
         return TX_POOL_ERROR;
     }
 
+    /* Discovery/queue work can span an acquisition deadline. Let acquisition
+     * preempt it and share a bounded slice with the other I/O workers. */
     UINT status = tx_thread_create(&telemetry_thread,
                                    "Telemetry Thread",
                                    telemetry_thread_entry,
                                    0,
                                    pointer,
                                    TELEMETRY_THREAD_STACK_SIZE,
-                                   5,
-                                   5,
-                                   TX_NO_TIME_SLICE,
+                                   DAQ_IO_THREAD_PRIORITY,
+                                   DAQ_IO_THREAD_PRIORITY,
+                                   (TX_TIMER_TICKS_PER_SECOND * DAQ_IO_THREAD_SLICE_MS + 999U) / 1000U,
                                    TX_AUTO_START);
 
     return status;
