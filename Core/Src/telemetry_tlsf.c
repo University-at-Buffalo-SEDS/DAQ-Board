@@ -137,12 +137,12 @@ void telemetry_tlsf_sample(void)
  * actual aligned scratch allocation uses TLSF's bitmap lookup and bounded
  * split/coalesce operations; walking every heap block here delayed CAN RX.
  * The probe is released before returning and cannot recurse into this hook. */
-bool telemetry_tlsf_admit(size_t additional, size_t largest)
+static bool admit_impl(size_t additional, size_t largest, bool protected_control)
 {
     const uint32_t saved = __get_PRIMASK();
     __disable_irq();
     bool allowed = initialize() != 0;
-    const size_t reserve = additional <= 512U ? 512U : 4096U;
+    const size_t reserve = protected_control || additional <= 512U ? 512U : 4096U;
     const size_t occupied = (size_t)g_telemetry_tlsf_live_bytes +
         ((size_t)live_allocations + region_count) * 2U * sizeof(void *);
     const size_t available = g_telemetry_tlsf_region_bytes > occupied ?
@@ -160,4 +160,18 @@ bool telemetry_tlsf_admit(size_t additional, size_t largest)
     if (!allowed) ++g_board_memory_admission_drops;
     __set_PRIMASK(saved);
     return allowed;
+}
+
+bool telemetry_tlsf_admit(size_t additional, size_t largest)
+{
+    return admit_impl(additional, largest, false);
+}
+
+/* The SDK validates CRC, wire size and fixed byte shape before this class.
+ * Retain its full working estimate and the allocator's emergency headroom. */
+bool telemetry_tlsf_admit_small_protected(size_t additional, size_t largest)
+{
+    if (additional < 2048U || additional > 2432U || largest == 0U || largest > 160U)
+        return telemetry_tlsf_admit(additional, largest);
+    return admit_impl(additional, largest, true);
 }

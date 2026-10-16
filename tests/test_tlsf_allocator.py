@@ -1,6 +1,7 @@
 import subprocess
 import tempfile
 import unittest
+import re
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -29,7 +30,29 @@ UINT tx_byte_allocate(TX_BYTE_POOL*,void**,ULONG,UINT);
 UINT tx_byte_pool_info_get(TX_BYTE_POOL*,void*,ULONG*,ULONG*,void*,void*,void*);
 #endif
 ''')
-            (p/'test.c').write_text(r'''
+            telemetry = (ROOT/'Core/Src/telemetry.c').read_text()
+            start = telemetry.index('static __attribute__((unused)) bool telemetry_memory_admission_probe(')
+            end = telemetry.index('\n}\n', start) + 3
+            registration = re.search(r'seds_set_memory_admission_probe(?:_v2)?\([^;]+\);', telemetry).group(0)
+            adapter_code = r'''
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include "telemetry_tlsf.h"
+#define SEDS_MEMORY_WORK_SMALL_PROTECTED 2U
+static bool (*registered_v2)(size_t,size_t,uint32_t);
+static bool (*registered_legacy)(size_t,size_t);
+static void seds_set_memory_admission_probe_v2(bool (*fn)(size_t,size_t,uint32_t)){
+ registered_v2=fn;registered_legacy=NULL;
+}
+static void seds_set_memory_admission_probe(bool (*fn)(size_t,size_t)){
+ registered_legacy=fn;registered_v2=NULL;
+}
+static bool registered_probe(size_t additional,size_t largest,uint32_t work){
+ return registered_v2 ? registered_v2(additional,largest,work) : registered_legacy(additional,largest);
+}
+''' + telemetry[start:end] + '\nstatic void register_board_probe(void){' + registration + '}\n'
+            (p/'test.c').write_text(adapter_code + r'''
 #include <assert.h>
 #include <stdint.h>
 #include <string.h>
@@ -66,6 +89,32 @@ int main(int argc,char**argv){
  assert(!telemetry_tlsf_admit(SIZE_MAX, 1));
  assert(!telemetry_tlsf_admit(0, SIZE_MAX));
  assert(mock_irq==0);
+ {
+  extern volatile uint32_t g_telemetry_tlsf_region_bytes;
+  void *held_controls[1024];unsigned held_count=0;
+  /* Reproduce the actuator's 5912-byte post-discovery admission refusal. */
+  while(g_telemetry_tlsf_region_bytes > g_telemetry_tlsf_live_bytes +
+        ((size_t)held_count+3U)*2U*sizeof(void*)+5912U){
+   assert(held_count<1024);
+   held_controls[held_count]=telemetry_tlsf_malloc(128);assert(held_controls[held_count++]);
+  }
+  assert(held_count>0);
+  assert(!telemetry_tlsf_admit(2225,91));
+  register_board_probe();
+  assert(registered_probe(2225,91,SEDS_MEMORY_WORK_SMALL_PROTECTED));
+  assert(!registered_probe(2225,91,0));
+  assert(!registered_probe(2225,91,99));
+  /* The former registration loses the protected class at this exact bound. */
+  seds_set_memory_admission_probe(telemetry_tlsf_admit);
+  assert(!registered_probe(2225,91,SEDS_MEMORY_WORK_SMALL_PROTECTED));
+  register_board_probe();
+  assert(telemetry_tlsf_admit_small_protected(2225,91));
+  assert(!telemetry_tlsf_admit_small_protected(4096,91));
+  assert(!telemetry_tlsf_admit_small_protected(2225,0));
+  void *work=telemetry_tlsf_malloc(2225);assert(work);telemetry_tlsf_free(work);
+  assert(telemetry_tlsf_admit(0,0));
+  for(unsigned i=0;i<held_count;i++)telemetry_tlsf_free(held_controls[i]);
+ }
  void *items[64]={0};size_t sizes[64]={0};uint32_t rng=42;
  for(unsigned step=0;step<100000;step++){
   rng=rng*1664525U+1013904223U;unsigned i=(rng>>16)%64;
