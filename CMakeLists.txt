@@ -46,6 +46,9 @@ target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
+# Use the scheduler's built-in idle wait; peripheral clocks stay running.
+# The Cortex-M4 assembly does not include tx_user.h, so set this on ThreadX.
+target_compile_definitions(ThreadX PRIVATE TX_ENABLE_WFI)
 
 # Keep SD status waits bounded without modifying CubeMX's vendor sources.
 target_compile_options(STM32_Drivers PRIVATE
@@ -78,6 +81,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     # STM32CubeMX generated application sources
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/can_bus.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/can_tx_queue.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/board_link_uart.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry_thread.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry.c 
@@ -198,4 +202,5 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 # Board-owned progress watchdog; deliberately independent of SEDSnet.
 option(ENABLE_BOARD_WATCHDOG "Enable independent hardware watchdog with task progress gating" ON)
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/Core/Src/board_watchdog.c)
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/Core/Src/board_health.c)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE BOARD_WATCHDOG_ENABLE=$<BOOL:${ENABLE_BOARD_WATCHDOG}>)

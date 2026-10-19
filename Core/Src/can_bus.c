@@ -25,9 +25,8 @@
 //  ensure the consumer sees the slot contents after observing `head` (acquire).
 
 #include "can_bus.h"
+#include "can_tx_queue.h"
 #include "main.h"
-#include "tx_api.h"
-#include "tx_thread.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -47,9 +46,6 @@
 #define CAN_BUS_POLLING 0
 #endif
 
-#ifndef CAN_BUS_TX_ENQUEUE_TIMEOUT_MS
-#define CAN_BUS_TX_ENQUEUE_TIMEOUT_MS 5U
-#endif
 
 // =========================
 // FD DLC helpers
@@ -186,6 +182,7 @@ static volatile uint16_t g_rx_head = 0;
 static volatile uint16_t g_rx_tail = 0;
 volatile uint32_t g_fdcan_bus_off_count = 0;
 volatile uint32_t g_fdcan_recovery_count = 0;
+static volatile uint8_t g_can_recovering;
 volatile uint32_t g_fdcan_rx_count = 0;
 volatile uint32_t g_fdcan_rx_hw_overflow_count = 0;
 volatile uint32_t g_fdcan_rx_ring_drop_count = 0;
@@ -193,37 +190,38 @@ volatile uint32_t g_fdcan_tx_ok_count = 0;
 volatile uint32_t g_fdcan_tx_fail_count = 0;
 
 static HAL_StatusTypeDef can_bus_recover_if_bus_off(void) {
-  FDCAN_ProtocolStatusTypeDef status;
-  if (g_hfdcan == NULL || HAL_FDCAN_GetProtocolStatus(g_hfdcan, &status) != HAL_OK)
+  FDCAN_ProtocolStatusTypeDef protocol_status;
+
+  if (g_hfdcan == NULL ||
+      HAL_FDCAN_GetProtocolStatus(g_hfdcan, &protocol_status) != HAL_OK) {
     return HAL_ERROR;
-  if (status.BusOff == 0U)
+  }
+
+  if (protocol_status.BusOff == 0U) {
     return HAL_OK;
+  }
+
   g_fdcan_bus_off_count++;
+  g_can_recovering = 1U;
+
+  /* Cancel every configured Tx FIFO element before restarting. */
   (void)HAL_FDCAN_AbortTxRequest(
       g_hfdcan, FDCAN_TX_BUFFER0 | FDCAN_TX_BUFFER1 | FDCAN_TX_BUFFER2);
-  if (HAL_FDCAN_Stop(g_hfdcan) != HAL_OK || HAL_FDCAN_Start(g_hfdcan) != HAL_OK)
+
+  if (HAL_FDCAN_Stop(g_hfdcan) != HAL_OK) {
+    g_can_recovering = 0U;
     return HAL_ERROR;
+  }
+  can_tx_queue_reset();
+  const HAL_StatusTypeDef restarted = HAL_FDCAN_Start(g_hfdcan);
+  g_can_recovering = 0U;
+  if (restarted != HAL_OK) return HAL_ERROR;
+
   g_fdcan_recovery_count++;
   return HAL_OK;
 }
 
-static HAL_StatusTypeDef can_bus_wait_for_tx_slot(void) {
-  const uint32_t started_ms = HAL_GetTick();
-  for (;;) {
-    if (can_bus_recover_if_bus_off() != HAL_OK)
-      return HAL_ERROR;
-    if (HAL_FDCAN_GetTxFifoFreeLevel(g_hfdcan) > 0U)
-      return HAL_OK;
-    if ((uint32_t)(HAL_GetTick() - started_ms) >= CAN_BUS_TX_ENQUEUE_TIMEOUT_MS)
-      return HAL_TIMEOUT;
-    /* An unacknowledged bus must not spend the whole timeout spinning at
-     * telemetry priority: lower-priority ADC/SD work must keep draining.
-     * Retain the deadline and never sleep in interrupt/startup context. */
-    if (__get_IPSR() == 0U && TX_THREAD_GET_SYSTEM_STATE() == 0U &&
-        tx_thread_identify() != TX_NULL)
-      (void)tx_thread_sleep(1U);
-  }
-}
+
 static can_bus_rx_frame_t g_rx_ring[CAN_BUS_RX_RING_DEPTH];
 
 static inline uint16_t rb_next(uint16_t v) {
@@ -521,27 +519,32 @@ static void handle_rx_frame(const can_bus_rx_frame_t *f, uint32_t now_ms) {
 // =========================
 
 void can_bus_init(FDCAN_HandleTypeDef *hfdcan) {
+  g_can_recovering = 1U;
+  can_tx_queue_reset();
   g_hfdcan = hfdcan;
   g_rx_head = 0;
   g_rx_tail = 0;
   for (unsigned i = 0; i < CAN_BUS_REASM_SLOTS; i++) {
     reasm_reset(&g_reasm[i]);
   }
-  // subscribers static-zeroed
   if (hfdcan != NULL) {
     (void)HAL_FDCAN_Stop(hfdcan);
     (void)can_bus_configure_filters(hfdcan);
-    /* HAL only permits RX reads in BUSY state. Start before enabling an
-     * interrupt that may already be pending from a retained RX FIFO. */
-    if (HAL_FDCAN_Start(hfdcan) != HAL_OK)
+    /* Retained RX interrupts must not run before HAL enters BUSY state. */
+    if (HAL_FDCAN_Start(hfdcan) != HAL_OK) {
+      g_can_recovering = 0U;
       return;
+    }
+    g_can_recovering = 0U;
 #if !CAN_BUS_POLLING
     (void)HAL_FDCAN_ActivateNotification(
         hfdcan, FDCAN_IT_RX_FIFO0_NEW_MESSAGE | FDCAN_IT_RX_FIFO1_NEW_MESSAGE |
-                    FDCAN_IT_RX_FIFO0_MESSAGE_LOST | FDCAN_IT_RX_FIFO1_MESSAGE_LOST, 0);
+                FDCAN_IT_RX_FIFO0_MESSAGE_LOST | FDCAN_IT_RX_FIFO1_MESSAGE_LOST |
+                FDCAN_IT_TX_FIFO_EMPTY | FDCAN_IT_TX_COMPLETE,
+        FDCAN_TX_BUFFER0 | FDCAN_TX_BUFFER1 | FDCAN_TX_BUFFER2);
 #endif
   }
-
+  g_can_recovering = 0U;
 }
 
 HAL_StatusTypeDef can_bus_subscribe_rx(can_bus_rx_cb_t cb, void *user) {
@@ -585,11 +588,8 @@ HAL_StatusTypeDef can_bus_send_bytes(const uint8_t *bytes, size_t len,
   if (!bytes || len == 0)
     return HAL_ERROR;
 
-  const HAL_StatusTypeDef slot_status = can_bus_wait_for_tx_slot();
-  if (slot_status != HAL_OK) {
-    g_fdcan_tx_fail_count++;
-    return slot_status;
-  }
+  if (g_can_recovering) return HAL_ERROR;
+  if (HAL_FDCAN_GetTxFifoFreeLevel(g_hfdcan) == 0U) return HAL_BUSY;
 
   if (len > 64)
     len = 64;
@@ -626,72 +626,22 @@ HAL_StatusTypeDef can_bus_send_bytes(const uint8_t *bytes, size_t len,
   return status;
 }
 
-// Send an arbitrarily large buffer by fragmenting into multiple CAN FD frames.
+// Retain a complete 1..128-byte side frame before asynchronous fragmentation.
 // Multi-fragment packets use 64-byte frames and a small header in each frame.
 HAL_StatusTypeDef can_bus_send_large(const uint8_t *bytes, size_t len,
                                      uint32_t std_id) {
-  if (!g_hfdcan)
-    return HAL_ERROR;
-  if (!bytes || len == 0)
-    return HAL_ERROR;
-  if (len > 0xFFFFu)
-    return HAL_ERROR; // header uses u16 total_len
+  if (!g_hfdcan || g_can_recovering) return HAL_ERROR;
+  return can_tx_queue_submit(bytes, len, std_id);
+}
 
-  static uint8_t g_seq = 0;
-  uint8_t seq = g_seq++;
+void HAL_FDCAN_TxFifoEmptyCallback(FDCAN_HandleTypeDef *hfdcan) {
+  if (hfdcan == g_hfdcan && !g_can_recovering) can_tx_queue_pump();
+}
 
-  const size_t hdr_sz = sizeof(can_bus_frag_hdr_t);
-  const size_t wire_len = CAN_BUS_FRAG_WIRE_LEN;
-  if (wire_len > 64)
-    return HAL_ERROR;
-  const size_t data_cap = wire_len - hdr_sz;
-  if (data_cap == 0)
-    return HAL_ERROR;
-
-  // frag_cnt must fit in u8 with current header design
-  size_t frag_cnt_sz = (len + data_cap - 1) / data_cap;
-  if (frag_cnt_sz == 0)
-    frag_cnt_sz = 1;
-  if (frag_cnt_sz > 255)
-    return HAL_ERROR;
-
-  uint8_t frag_cnt = (uint8_t)frag_cnt_sz;
-
-  size_t off = 0;
-  for (uint8_t idx = 0; idx < frag_cnt; idx++) {
-    uint8_t frame[64] = {0};
-
-    can_bus_frag_hdr_t hdr;
-    hdr.magic = CAN_BUS_FRAG_MAGIC;
-    hdr.source = CAN_BUS_NODE_ID;
-    hdr.seq = seq;
-    hdr.frag_idx = idx;
-    hdr.frag_cnt = frag_cnt;
-    hdr.flags = 0;
-    if (idx == 0)
-      hdr.flags |= CAN_BUS_FRAG_F_FIRST;
-    if (idx == (uint8_t)(frag_cnt - 1))
-      hdr.flags |= CAN_BUS_FRAG_F_LAST;
-    hdr.total_len = (uint16_t)len;
-
-    memcpy(frame, &hdr, hdr_sz);
-
-    size_t take = len - off;
-    if (take > data_cap)
-      take = data_cap;
-    memcpy(frame + hdr_sz, bytes + off, take);
-    off += take;
-
-    // Single fragments use the smallest legal DLC; multi-fragment stride stays 64 bytes.
-    /* Only a single fragment can shorten its first-frame stride.
-     * Keep multi-fragment frames fixed for existing reassembly code. */
-    const size_t used = frag_cnt == 1U ? hdr_sz + take : wire_len;
-    HAL_StatusTypeDef st = can_bus_send_bytes(frame, used, std_id);
-    if (st != HAL_OK)
-      return st;
-  }
-
-  return HAL_OK;
+void HAL_FDCAN_TxBufferCompleteCallback(FDCAN_HandleTypeDef *hfdcan,
+                                      uint32_t buffers) {
+  if (buffers != 0U && hfdcan == g_hfdcan && !g_can_recovering)
+    can_tx_queue_pump();
 }
 
 // Call this periodically from thread/main-loop context.
@@ -700,7 +650,8 @@ HAL_StatusTypeDef can_bus_send_large(const uint8_t *bytes, size_t len,
 void can_bus_process_rx(void) {
   uint32_t now = HAL_GetTick();
   reasm_expire_old(now);
-  (void)can_bus_recover_if_bus_off();
+  if (g_hfdcan != NULL && can_bus_recover_if_bus_off() == HAL_OK && !g_can_recovering)
+    can_tx_queue_service();
 
 #if CAN_BUS_POLLING
   if (g_hfdcan != NULL) {
@@ -759,3 +710,5 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan,
 
   can_bus_drain_rx_fifo(hfdcan, FDCAN_RX_FIFO1);
 }
+
+uint32_t board_health_can_rx_drops(void) { return g_fdcan_rx_ring_drop_count; }

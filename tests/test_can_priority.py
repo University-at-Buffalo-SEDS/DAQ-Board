@@ -45,7 +45,7 @@ int main(void) {
    for(unsigned p=0;p<256;p++) {
      result=HAL_OK;
      assert(tx_send_with_priority(opaque[i],8,p,NULL)==SEDS_OK);
-     assert(observed==(p>=200?NODE:0x100+NODE));
+     assert(observed==((i<2 && p>=200)?0x80+NODE:(p>=200?NODE:0x100+NODE)));
    }
    result=HAL_ERROR;
    assert(tx_send_with_priority(opaque[i],8,255,NULL)==SEDS_IO);
@@ -54,6 +54,7 @@ int main(void) {
  assert(tx_send_with_priority(opaque[0],0,255,NULL)==SEDS_BAD_ARG);
 }
 """
+        code=(ROOT/"Core/Inc/board_can_priority.h").read_text()+code
         code=code.replace("NODE",str(node))
         with tempfile.TemporaryDirectory() as tmp:
             exe=str(Path(tmp)/"priority")

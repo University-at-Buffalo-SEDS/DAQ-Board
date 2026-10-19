@@ -154,7 +154,12 @@
       {"name": "flight_state_restores", "symbol": "g_flight_state_cache_restores"},
       {"name": "flight_state_writes", "symbol": "g_flight_state_cache_writes"},
       {"name": "flight_state_updates", "symbol": "g_flight_state_cache_updates"},
-      {"name": "flight_state_errors", "symbol": "g_flight_state_cache_errors", "maximum": 0}
+      {"name": "flight_state_errors", "symbol": "g_flight_state_cache_errors", "maximum": 0},
+      {"name": "can_tx_queue_bytes", "symbol": "g_can_tx_queue_bytes"},
+      {"name": "can_tx_pending", "symbol": "g_can_tx_pending"},
+      {"name": "can_tx_high_water", "symbol": "g_can_tx_high_water"},
+      {"name": "can_tx_rejected", "symbol": "g_can_tx_rejected"},
+      {"name": "can_tx_expired", "symbol": "g_can_tx_expired", "maximum": 0}
     ]
   }
 }

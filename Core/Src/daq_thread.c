@@ -1,3 +1,4 @@
+#include "board_uptime.h"
 #include "board_watchdog.h"
 #include "DAQ-Threads.h"
 
@@ -107,7 +108,8 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
   }
   uint16_t count = 0U;
   const uint64_t unix_now = telemetry_unix_ms_cached();
-  const uint64_t mono_now = telemetry_now_ms();
+  const uint64_t mono_now = board_uptime_ticks();
+  static uint32_t raw_sequence;
   *window = (daq_loadcell_window_t){0};
 
   for (;;)
@@ -122,8 +124,10 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
       if (records != NULL)
       {
         records[count].channel = channel;
+        const uint64_t captured_uptime = board_uptime_project(mono_now, (uint32_t)sample.monotonic_ms);
         records[count].monotonic_ms = (uint32_t)sample.monotonic_ms;
-        records[count].network_unix_ms = daq_sample_network_ms(unix_now, mono_now, sample.monotonic_ms);
+        records[count].record_sequence = ++raw_sequence;
+        records[count].network_unix_ms = daq_sample_network_ms(unix_now, mono_now, captured_uptime);
         records[count].raw_adc_code = sample.code;
         records[count].raw_value = raw;
         records[count].adc_temperature_c = sample.temperature_c;

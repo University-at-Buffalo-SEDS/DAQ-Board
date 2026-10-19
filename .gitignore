@@ -90,3 +90,7 @@ __pycache__/
 # Misc
 *.db
 *.sqlite
+
+# Generated artifacts from the vendored CRC library
+third_party/embedded-crc32fast/target/
+third_party/embedded-crc32fast/Cargo.lock

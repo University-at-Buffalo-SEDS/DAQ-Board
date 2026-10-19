@@ -21,6 +21,7 @@ class Kg50AcquisitionTests(unittest.TestCase):
 #include <stdint.h>
 #include <stddef.h>
 #include "daq_timestamp.h"
+#include "board_uptime.h"
 #include "daq_filter.h"
 #include "mcp3564r_board_config.h"
 #define TX_SUCCESS 0
@@ -42,7 +43,7 @@ typedef struct {
 } mcp3564r_sample_t;
 typedef struct {
   uint8_t channel;
-  uint32_t monotonic_ms;
+  uint32_t monotonic_ms, record_sequence;
   uint64_t network_unix_ms;
   int32_t raw_adc_code;
   float raw_value, calibrated_value, adc_temperature_c;
@@ -53,7 +54,7 @@ static unsigned next, queued_count;
 static unsigned mcp3564r_pending_samples(void) { return queued_count - next; }
 static unsigned mcp3564r_get_sample(mcp3564r_sample_t *out) { *out = queued[next++]; return 0; }
 static uint64_t telemetry_unix_ms_cached(void) { return 10000; }
-static uint64_t telemetry_now_ms(void) { return 100; }
+uint64_t board_uptime_ticks(void) { return 100; }
 ''' + 'float daq_calibration_apply_kg50' + calibration + decode + drain + r'''
 int main(void) {
   /* Tagged 25-bit values: sign extension must not consume the channel nibble. */

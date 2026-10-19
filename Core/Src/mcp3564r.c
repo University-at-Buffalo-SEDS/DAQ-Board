@@ -776,3 +776,5 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
     mcp3564r_dma_error();
   }
 }
+
+uint32_t board_health_adc_overruns(void) { return g_mcp3564r.overrun_count; }

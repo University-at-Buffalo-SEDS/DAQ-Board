@@ -1,0 +1,37 @@
+{
+  "network": {
+    "exit": 1,
+    "wall_seconds": 5317.463777852012
+  },
+  "sd": {
+    "daq": {
+      "exit": 0,
+      "summary_path": "/home/rylan/seds-prefreeze-20261018/storage-evidence-10min-daq-csv.json",
+      "recorded_rows": 936147,
+      "expected": {
+        "accepted": 936179,
+        "processed": 936165,
+        "flushed": 936147,
+        "acquired": 936179,
+        "boots": 1
+      },
+      "files": 2,
+      "accepted_not_in_card_snapshot": 32
+    },
+    "flight": {
+      "exit": 0,
+      "summary_path": "/home/rylan/seds-prefreeze-20261018/storage-evidence-10min-flight-csv.json",
+      "recorded_rows": 19392,
+      "expected": {
+        "accepted": 19699,
+        "processed": 19568,
+        "flushed": 19392
+      },
+      "files": 2,
+      "accepted_not_in_card_snapshot": 307
+    }
+  },
+  "qualification": "SD reconciliation passed; the combined network qualification remains failed and is being rerun.",
+  "limits": "No physical card throughput/power-loss qualification. Export is a snapshot with pending writer buffers, not a clean stop.",
+  "network_failure_detail": "The first failed probe required RF CAN expiry=0 even inside an intentional ACK-loss window (149 expiries). Fault-scoped checks now require no expiry before the outage or after recovery. Separate GroundStation valve freshness gaps remain to qualify."
+}

@@ -42,20 +42,20 @@ insert a card containing data you want to retain unless it was already prepared
 by this firmware and contains that marker.
 
 Firmware creates a new `DAQ_<network-time>_<sequence>.CSV` raw ADC file on every boot.
-Only `mcp3564r_raw` samples go into this file. Filtered `kg1000_network` rows,
-other telemetry snapshots, and packet diagnostics go into separate
+Raw ADC channels go into this file. Filtered network rows, other telemetry
+snapshots and packet diagnostics go into separate
 `DAQ_TELEMETRY_<network-time>_<sequence>.CSV` files. Each stream rotates
-independently when its queued records change calibration; delayed telemetry
-cannot mix into or rotate the raw ADC log.
-The CSV contains the
-primary `timestamp_ms`, local `monotonic_ms`, sensor name, and value. Before
-network synchronization the primary timestamp uses local milliseconds since
-boot; afterward it uses network Unix milliseconds adjusted to acquisition time.
-The final `time_source` column identifies `local` versus `network`. Use the
-monotonic column across this clock-domain transition. Buffered raw records keep
-their captured time even if synchronization changes before writing. The
-`mcp3564r_raw` rows retain every drained raw sigma-delta ADC conversion while
-the network targets a 500 Hz average per loadcell. Every file begins with the four active
+independently when calibration changes or before a file reaches 3 GiB.
+Delayed telemetry cannot mix into or rotate the raw ADC log.
+
+DAQ and FC share the [SD CSV format](docs/sd-record-format.md). Records include
+network/local time, independent 64-bit boot uptime ticks, the nominal clock
+frequency (1000 Hz), and a per-stream sequence. Uptime remains usable when
+network UTC is corrected. Raw rows preserve ADC code, raw/calibrated values
+and ADC temperature. Failed and partial writes retain their pending records;
+queue rejection and storage errors are counted. Acquisition settings are
+unchanged; the default network target is 250 reports/s per loadcell.
+Every file begins with the four active
 load-cell calibration coefficients and contains both raw and calibrated sample
 values. Values use nine-significant-digit decimal scientific notation, preserving
 the original binary32 samples on replay without requiring newlib float printf.
@@ -68,7 +68,7 @@ Before removing the card, power the board down normally and wait a few seconds.
 The writer batches records into 4 KiB writes and flushes the FAT volume once per
 second (and immediately when the input-voltage power-loss threshold is crossed).
 Raw batches are serviced with bounded work so CSV rows and flushes cannot starve.
-The networking worker polls at a one-millisecond interval even with DAQ's 50 kHz
+The networking worker polls at a one-millisecond interval with the 1 kHz
 RTOS tick, and scans its stack only every 250 ms. Acquisition accounts for work
 time in its 2 ms period and exposes overruns as `g_daq_sample_overrun_count`.
 CAN reception drains the three-frame hardware FIFO from its interrupt into a
@@ -136,14 +136,15 @@ Edit `Core/Inc/daq_rates.h` and rebuild/reflash:
 - `DAQ_ADC_OSR`: hardware ADC oversampling filter (default 1024).
 - `DAQ_ADC_READ_RATE_HZ`: requested timer-paced ADC reads (default 3700).
 - `DAQ_ACQUISITION_PERIOD_MS`: raw queue drain cadence (default 2 ms).
-- `DAQ_BROADCAST_RATE_HZ`: filtered network/SD replay cadence (default 500 Hz).
+- `DAQ_BROADCAST_RATE_HZ`: filtered network/SD replay cadence (default 250 Hz per loadcell).
 
-The raw SD reserve remains 200 ms. Batch capacity scales with acquisition
-interval (12 records per batch and 101 slots at the defaults), rather than
-allocating a mostly empty 96-record batch for every 2 ms interval. No stale
+The raw SD byte pool budgets 800 ms at the configured acquisition rate.
+Batch capacity scales with the acquisition interval (12 records per batch and
+401 full-batch equivalents at the defaults); the pointer queue can hold
+smaller batches within that same byte budget. No stale
 reports are burst out after a missed deadline. Fresh ADC data, CPU scheduling,
 CAN capacity and the Gateway/Pico-Fi link constrain actual received cadence;
-500 Hz is a producer target, not measured end-to-end throughput.
+250 Hz per loadcell is a producer target, not measured end-to-end throughput.
 
 The report window preserves its phase across scheduler jitter. A low-voltage
 SD flush notification no longer permanently switches acquisition to a 100 ms
@@ -216,7 +217,7 @@ AGND. The schematic maps P7 through AMP1 to CH0 and P8 through AMP2 to CH1;
 the onboard amplifiers already convert each bridge's differential signal to
 a ground-referenced voltage. See [load-cell wiring and diagnostics](docs/loadcell-inputs.md).
 The ADC's 32-bit tagged output identifies the channel; only data-ready readings
-are queued. Both cells target independent sample-weighted 500 Hz raw telemetry
+are queued. Both cells target independent sample-weighted 250 Hz raw telemetry
 (`KG1000`, ID 118; `KG50`, ID 119). The configured 3700 Hz timer is a polling
 ceiling shared by both channels, not the per-cell sample rate. SCAN settling
 and SPI overhead reduce the acquired rate.

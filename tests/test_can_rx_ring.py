@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class CanRxRingTests(unittest.TestCase):
     def test_overflow_only_interrupt_drains_retained_frames(self):
         source = (ROOT / "Core/Src/can_bus.c").read_text()
-        callbacks = source[source.index("void HAL_FDCAN_RxFifo0Callback"):]
+        callbacks = source[source.index("void HAL_FDCAN_RxFifo0Callback"):].split("\nuint32_t board_health_can_rx_drops", 1)[0]
         code = r'''
 #include <stdint.h>
 #include <assert.h>

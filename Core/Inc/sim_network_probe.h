@@ -36,41 +36,35 @@ static inline SedsResult sim_probe_heartbeat_handler(const SedsPacketView *pkt, 
   return SEDS_OK;
 }
 
-static inline uint8_t sim_probe_read_uleb(const uint8_t *data, size_t len,
-                                          size_t *offset, uint64_t *value) {
-  uint64_t out = 0U;
-  uint32_t shift = 0U;
-  for (uint32_t i = 0U; i < 10U && *offset < len; ++i) {
+/* Decode only 32-bit wire IDs; skipped timestamps may still use 64 bits. */
+static inline uint8_t sim_probe_read_id(const uint8_t *data, size_t len,
+                                      size_t *offset, uint32_t *value) {
+  uint32_t out = 0U;
+  for (uint32_t shift = 0U; shift < 35U && *offset < len; shift += 7U) {
     const uint8_t byte = data[(*offset)++];
-    out |= ((uint64_t)(byte & 0x7FU)) << shift;
-    if ((byte & 0x80U) == 0U) {
-      *value = out;
-      return 1U;
-    }
-    shift += 7U;
+    if (shift == 28U && byte > 0x0FU) return 0U;
+    out |= ((uint32_t)(byte & 0x7FU)) << shift;
+    if ((byte & 0x80U) == 0U) { *value = out; return 1U; }
   }
   return 0U;
 }
-
-static inline uint32_t sim_probe_sender_address(const char *sender) {
-  uint64_t hash = 0xA6D38C214B7F19E5ULL;
-  while (*sender != '\0') {
-    hash ^= (uint8_t)*sender++;
-    hash *= 0x9E3779B1ULL;
-    hash ^= hash >> 27U;
+static inline uint8_t sim_probe_skip_uleb(const uint8_t *data, size_t len,
+                                        size_t *offset) {
+  for (uint32_t i = 0U; i < 10U && *offset < len; ++i) {
+    const uint8_t byte = data[(*offset)++];
+    if (i == 9U && byte > 1U) return 0U;
+    if ((byte & 0x80U) == 0U) return 1U;
   }
-  const uint32_t address = (uint32_t)hash;
-  return address == 0U ? 1U : address;
+  return 0U;
 }
 
 static inline uint32_t sim_probe_packed_data_type(const uint8_t *data,
                                                   size_t len) {
   size_t offset = 2U;
-  uint64_t data_type = 0U;
+  uint32_t data_type = 0U;
   if (data != NULL && len >= 3U &&
-      sim_probe_read_uleb(data, len, &offset, &data_type) &&
-      data_type <= UINT32_MAX) {
-    return (uint32_t)data_type;
+      sim_probe_read_id(data, len, &offset, &data_type)) {
+    return data_type;
   }
   return UINT32_MAX;
 }
@@ -89,26 +83,25 @@ static inline void sim_probe_observe_can_tx(const uint8_t *data, size_t len) {
 /* Allocation-free observation of SEDSNet v4's packed source-address field. */
 static inline void sim_probe_observe_packed(const uint8_t *data, size_t len) {
 #ifdef SEDS_FIRMWARE_SIM_TEST
-  static const struct {
-    const char *sender;
-    uint32_t bit;
-  } peers[] = {{"RF", 1U},  {"PB", 2U},  {"FC", 4U},  {"GB", 8U},
-               {"AB", 16U}, {"VB", 32U}, {"DAQ", 64U}};
+  /* Stable SEDSNet source addresses for RF, PB, FC, GB, AB, VB, DAQ.
+   * Tests compare these with the wire encoder; never recompute seven
+   * 64-bit sender hashes for each observed packet. */
+  static const uint32_t peer_addresses[] = {
+      UINT32_C(0xEE4B3E5B), UINT32_C(0x0CC12D6E), UINT32_C(0x3C3A3E96), UINT32_C(0x1283C6CE), UINT32_C(0x1CD0258F), UINT32_C(0xE59A119E), UINT32_C(0x00D8168E)};
   size_t offset = 0U;
-  uint64_t ignored = 0U;
-  uint64_t source_address = 0U;
+  uint32_t source_address = 0U;
   if (data == NULL || len < 3U) return;
   const uint8_t flags = data[offset++];
   offset++; /* selected endpoint count */
-  if (!sim_probe_read_uleb(data, len, &offset, &ignored) ||
-      !sim_probe_read_uleb(data, len, &offset, &ignored) ||
-      !sim_probe_read_uleb(data, len, &offset, &ignored)) return;
+  if (!sim_probe_skip_uleb(data, len, &offset) ||
+      !sim_probe_skip_uleb(data, len, &offset) ||
+      !sim_probe_skip_uleb(data, len, &offset)) return;
   if ((flags & 0x08U) != 0U &&
-      !sim_probe_read_uleb(data, len, &offset, &ignored)) return;
-  if (!sim_probe_read_uleb(data, len, &offset, &source_address)) return;
-  for (size_t i = 0U; i < sizeof(peers) / sizeof(peers[0]); ++i) {
-    if ((uint32_t)source_address == sim_probe_sender_address(peers[i].sender)) {
-      g_telemetry_peer_mask |= peers[i].bit;
+      !sim_probe_skip_uleb(data, len, &offset)) return;
+  if (!sim_probe_read_id(data, len, &offset, &source_address)) return;
+  for (size_t i = 0U; i < sizeof(peer_addresses) / sizeof(peer_addresses[0]); ++i) {
+    if (source_address == peer_addresses[i]) {
+      g_telemetry_peer_mask |= UINT32_C(1) << i;
       return;
     }
   }

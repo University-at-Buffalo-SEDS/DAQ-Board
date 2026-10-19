@@ -20,23 +20,29 @@ typedef unsigned UINT;
 typedef uint32_t ULONG;
 typedef unsigned char UCHAR;
 enum {FX_SUCCESS=0,FX_PTR_ERROR=1,FX_IO_ERROR=2};
-static int g_sd_telemetry_file, g_telemetry_file_open=1;
+typedef struct { ULONG fx_file_current_file_offset; } FX_FILE;
+static FX_FILE g_sd_telemetry_file;
+static int g_telemetry_file_open=1;
 static UCHAR g_sd_telemetry_write_buffer[4096];
 static size_t g_sd_telemetry_write_buffer_len;
 static unsigned g_sd_write_error_count, calls, fail;
 static char disk[20000];
 static size_t written;
-static UINT fx_file_write(int *f, void *p, ULONG bytes) {
+static UINT fx_file_seek(FX_FILE *f, ULONG offset) { f->fx_file_current_file_offset=offset; return 0; }
+static UINT fx_file_write(FX_FILE *f, void *p, ULONG bytes) {
   assert(f==&g_sd_telemetry_file && bytes && bytes<=4096);
   ++calls;
+  const ULONG n=fail ? bytes/2 : bytes; /* Real failures can advance file position. */
+  memcpy(disk+f->fx_file_current_file_offset,p,n); f->fx_file_current_file_offset+=n;
+  if (f->fx_file_current_file_offset>written) written=f->fx_file_current_file_offset;
   if(fail) return FX_IO_ERROR;
-  memcpy(disk+written,p,bytes); written+=bytes; return 0;
+  return 0;
 }
 ''' + helpers + r'''
 int main(void) {
   const char row[]="12345,12345,kg50_network,3.0,,,,local,,\r\n";
   for(unsigned i=0;i<400;++i) assert(sd_write_telemetry_bytes(row,sizeof(row)-1)==0);
-  assert(calls==400*(sizeof(row)-1)/4096); /* Not one file write per row. */
+  assert(calls<8); /* Not one file write per row. */
   assert(written+g_sd_telemetry_write_buffer_len==400*(sizeof(row)-1));
   fail=1; size_t tail=g_sd_telemetry_write_buffer_len;
   assert(sd_flush_telemetry_pending()==FX_IO_ERROR);

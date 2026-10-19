@@ -25,15 +25,18 @@ typedef struct {float slope;} daq_calibration_t;
 typedef struct {int code;} sd_raw_adc_record_t;
 typedef struct {
   daq_calibration_t calibration;
+  uint64_t uptime_reference;
   uint64_t session;
   sd_raw_adc_record_t samples[SD_RAW_BATCH_MAX];
   unsigned count;
 } sd_raw_slot_t;
 static unsigned g_sd_services_initialized, g_sd_raw_batch_drop_count;
+static unsigned g_sd_raw_records_dropped_count, g_sd_raw_records_enqueued_count;
 static unsigned full, closed, send_failure, freed, sent;
 static int g_sd_raw_queue;
 static sd_raw_slot_t slot;
 static int sd_launch_finished(void) {return closed;}
+static uint64_t board_uptime_ticks(void) {return 456;}
 static uint64_t sd_run_snapshot(void) {return 123;}
 static sd_raw_slot_t *sd_alloc_raw_slot(uint16_t count) {assert(count<=12); return full ? 0 : &slot;}
 static void sd_free_raw_slot(sd_raw_slot_t *s) {assert(s==&slot); ++freed;}
@@ -62,6 +65,7 @@ int main(void) {
   closed=1;
   assert(sd_card_enqueue_raw_adc_samples(samples,2,&calibration)==SD_CARD_STATUS_BUSY);
   assert(sent==2);
+  assert(g_sd_raw_records_enqueued_count==2 && g_sd_raw_records_dropped_count==8);
 }
 '''
         with tempfile.TemporaryDirectory() as tmp:

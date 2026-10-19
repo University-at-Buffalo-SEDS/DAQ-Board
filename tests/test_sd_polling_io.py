@@ -20,6 +20,7 @@ class SdPollingTests(unittest.TestCase):
 #include <stddef.h>
 #include <string.h>
 #include "daq_timestamp.h"
+#include "sd_record_format.h"
 typedef int sd_card_status_t;
 #define SD_LINE_MAX 384U
 typedef struct { float slope; } daq_calibration_t;
@@ -32,8 +33,8 @@ static sd_line_slot_t *sd_alloc_slot(uint16_t len) { assert(len < 384); return f
 static unsigned sd_calibration_snapshot(daq_calibration_t *c) { c->slope=1; return 0; }
 static uint64_t sd_run_snapshot(void) { return 0; }
 static unsigned sd_launch_finished(void) { return 0; }
-static void sd_format_float(char *s, float v) { snprintf(s,24,"%.3f",(double)v); }
-static void sd_format_u64(char *s, uint64_t v) { snprintf(s,21,"%llu",(unsigned long long)v); }
+static uint64_t sd_next_row_sequence(void) { static unsigned sequence; return ++sequence; }
+uint64_t board_uptime_ticks(void) { return 30; }
 static uint64_t network_ms = 1234;
 static uint64_t telemetry_unix_ms(void) { return network_ms; }
 static uint64_t telemetry_now_ms(void) { return 30; }
@@ -46,10 +47,10 @@ int main(void) {
    * must be usable before mounting completes. */
   assert(sd_card_enqueue_csv_row("kg1000_network", 20, 0.25f, NULL)==SD_CARD_STATUS_OK);
   assert(enqueued==1);
-  assert(strcmp(slot.line, "1224,20,kg1000_network,0.250,,,,network,,\r\n")==0);
+  assert(strcmp(slot.line, "1224,20,kg1000_network,\"2.50000000e-01\",,,,network,,,20,1000,1\r\n")==0);
   network_ms=0;
   assert(sd_card_enqueue_csv_row("kg1000_network", 25, 0.25f, NULL)==SD_CARD_STATUS_OK);
-  assert(strcmp(slot.line, "25,25,kg1000_network,0.250,,,,local,,\r\n")==0);
+  assert(strcmp(slot.line, "25,25,kg1000_network,\"2.50000000e-01\",,,,local,,,25,1000,2\r\n")==0);
   enqueued=1;
   full=1;
   assert(sd_card_enqueue_csv_row("kg1000_network", 40, 0.25f, NULL)==SD_CARD_STATUS_BACKPRESSURE);

@@ -35,6 +35,7 @@ static uint64_t telemetry_now_ms(void) { return now; }
 static int seds_router_announce_discovery(void *r) { assert(r); ++attempts; return fail; }
 static int seds_router_log_bytes(void *r,unsigned ty,const uint8_t *p,size_t n) { assert(r && ty==12 && p && n==0); ++requests; return fail; }
 static int seds_router_poll_discovery(void *r, bool *queued) { assert(r && queued); ++polls; return SEDS_OK; }
+static void board_health_poll(void *r) { assert(r); }
 static void telemetry_update_network_health(void *r) { assert(r); ++health; }
 static void sim_probe_emit_heartbeat(void *r,uint64_t t) { (void)r;(void)t; }
 static int flight_state_cache_poll(void *r) { (void)r;return 0; }

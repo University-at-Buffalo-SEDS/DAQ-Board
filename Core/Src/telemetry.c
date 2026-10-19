@@ -1,9 +1,12 @@
+#include "can_tx_queue.h"
+#include "board_health.h"
 // telemetry.c
 #include "telemetry.h"
 #include "daq_calibration.h"
 #include "daq_log_clock.h"
 #include "flight_state_cache.h"
 #include "sim_network_probe.h"
+#include "board_can_priority.h"
 #include "ota_stream.h"
 #include "sedsnet_hardware_crypto.h"
 
@@ -74,7 +77,7 @@ static uint8_t g_board_link_rx_subscribed = 0U;
 #endif
 #ifdef TELEMETRY_CAN_BUS
 static int32_t g_can_side_id = -1;
-#define BOARD_CAN_MAX_FRAME_BYTES 128U
+#define BOARD_CAN_MAX_FRAME_BYTES CAN_TX_ALIGNED_FRAME_BYTES
 #define BOARD_SIDE_TRANSPORT_TEMPLATES 4U
 #endif
 #ifdef TELEMETRY_BOARD_LINK_UART
@@ -285,10 +288,8 @@ static SedsResult tx_send_with_priority(const uint8_t *bytes, size_t len,
     return SEDS_BAD_ARG;
   }
   const uint32_t can_id =
-      (priority >= 200U ||
-       sim_probe_packed_data_type(bytes, len) == (uint32_t)SEDS_DT_HEARTBEAT)
-          ? 0x007U
-          : 0x107U;
+      board_can_arbitration_id(bytes, len, priority,
+          sim_probe_packed_data_type(bytes, len), (uint32_t)SEDS_DT_HEARTBEAT, 0x007U);
   if (can_bus_send_large(bytes, len, can_id) == HAL_OK) {
     if (sim_probe_packed_data_type(bytes, len) == (uint32_t)SEDS_DT_KG1000)
       g_daq_loadcell_wire_tx_count++;
@@ -459,6 +460,10 @@ SedsResult telemetry_announce_discovery(void) {
 }
 
 SedsResult telemetry_poll_discovery(void) {
+#ifdef TELEMETRY_ENABLED
+  if (g_router.r) board_health_poll(g_router.r);
+#endif
+
 #ifndef TELEMETRY_ENABLED
   return SEDS_OK;
 #else

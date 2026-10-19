@@ -42,10 +42,13 @@ int main(void) {
   queued=24;
   assert(sd_service_telemetry_rows() && queued==20); /* bounded fairness */
   fail=1;
-  assert(sd_service_telemetry_rows() && queued==16);
-  assert(g_sd_write_error_count==4 && freed==600008);
-  queued=0;
+  assert(sd_service_telemetry_rows() && queued==19);
+  assert(g_sd_write_error_count==1 && freed==600004); /* Failed row remains owned. */
+  assert(sd_service_telemetry_rows() && queued==19 && freed==600004);
+  fail=0;
+  while (queued) assert(sd_service_telemetry_rows());
   assert(!sd_service_telemetry_rows());
+  assert(g_sd_csv_rows_written_count==600024 && freed==600024);
 }
 ''')
 

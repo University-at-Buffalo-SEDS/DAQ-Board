@@ -21,6 +21,7 @@ typedef struct
 {
   uint64_t network_unix_ms;
   uint32_t monotonic_ms;
+  uint32_t record_sequence;
   int32_t raw_adc_code;
   float raw_value;
   float calibrated_value;

@@ -10,10 +10,17 @@ static inline void sd_format_u64(char output[21], uint64_t value)
 {
   char reverse[20];
   unsigned count = 0;
-  do {
+  /* Cortex-M's 64-bit division is a library call. Once the remaining
+   * prefix fits in 32 bits, finish with native constant-divisor arithmetic. */
+  while (value > UINT32_MAX) {
     reverse[count++] = (char)('0' + value % 10U);
     value /= 10U;
-  } while (value != 0U);
+  }
+  uint32_t prefix = (uint32_t)value;
+  do {
+    reverse[count++] = (char)('0' + prefix % 10U);
+    prefix /= 10U;
+  } while (prefix != 0U);
   unsigned i = 0;
   while (count != 0U) output[i++] = reverse[--count];
   output[i] = '\0';

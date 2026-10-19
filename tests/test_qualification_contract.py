@@ -98,10 +98,10 @@ class QualificationContractTests(unittest.TestCase):
         self.assertIn("seds_router_add_side_packed_profile_with_priority(", telemetry)
         self.assertIn("SEDS_SIDE_TRANSPORT_PROFILE_IPV6_LIKE", telemetry)
         can_bus = (root / "Core" / "Src" / "can_bus.c").read_text(encoding="utf-8")
-        self.assertIn("can_bus_wait_for_tx_slot", can_bus)
-        self.assertIn("CAN_BUS_TX_ENQUEUE_TIMEOUT_MS 5U", can_bus)
+        self.assertIn("can_tx_queue_submit(bytes, len, std_id)", can_bus)
+        self.assertNotIn("can_bus_wait_for_tx_slot", can_bus)
         self.assertNotIn("< (uint32_t)frag_cnt", can_bus)
-        self.assertIn("BOARD_CAN_MAX_FRAME_BYTES 128U", telemetry)
+        self.assertIn("BOARD_CAN_MAX_FRAME_BYTES CAN_TX_ALIGNED_FRAME_BYTES", telemetry)
         self.assertIn('SEDSNET_MAX_QUEUE_BUDGET "12288"', cmake)
 
 
@@ -176,10 +176,10 @@ class QualificationContractTests(unittest.TestCase):
         self.assertIn("g_sd_csv_rows_written_count", sd)
         self.assertIn("HAL_SD_Init(&hsd1)", sd)
         self.assertNotIn("return TX_NOT_DONE;", sd[sd.index("UINT sd_card_init") :])
-        self.assertIn("timestamp_ms,monotonic_ms,sensor,value,raw_adc_code,raw_value,calibrated_value,time_source", sd)
+        self.assertIn("timestamp_ms,monotonic_ms,sensor,value,raw_adc_code,raw_value,calibrated_value,time_source", (root / "Core/Inc/sd_record_format.h").read_text())
         self.assertIn("# calibration,kg1000_slope=", sd)
         self.assertIn("sd_calibration_snapshot", sd)
-        drain = sd.index("if (tx_queue_receive(&g_sd_raw_queue")
+        drain = sd.index("if (pending_raw == NULL && tx_queue_receive(&g_sd_raw_queue")
         self.assertLess(sd.index("sd_select_calibration(&slot->calibration)", drain),
                         sd.index("for (uint16_t i", drain))
         self.assertIn("slot->calibration = *calibration;", sd)

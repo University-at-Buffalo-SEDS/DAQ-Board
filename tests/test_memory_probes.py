@@ -40,7 +40,7 @@ class MemoryProbeContractTests(unittest.TestCase):
         mcp3564r = (root / "Core" / "Src" / "mcp3564r.c").read_text()
         sd_card = (root / "Core" / "Src" / "sd_card.c").read_text()
         app_threadx = (root / "Core" / "Src" / "app_threadx.c").read_text()
-        sources = hooks + telemetry + telemetry_thread + can_bus + flight_state_cache + daq_thread + daq_board + daq_adc1 + mcp3564r + sd_card + app_threadx
+        sources = (root / "Core/Src/can_tx_queue.c").read_text() + hooks + telemetry + telemetry_thread + can_bus + flight_state_cache + daq_thread + daq_board + daq_adc1 + mcp3564r + sd_card + app_threadx
         for symbol in probes:
             self.assertIn(symbol, sources)
 
