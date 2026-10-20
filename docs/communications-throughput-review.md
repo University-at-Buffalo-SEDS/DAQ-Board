@@ -137,3 +137,35 @@ validation ceiling would not qualify the hardware or firmware at a higher rate.
 The earlier live run restored the actuator and all four extra DAQ analog
 packet types. It did not establish 500 Hz per loadcell or >5,000 network
 messages/s. Those targets remain unverified.
+
+## 2026-10-20 loadcell admission correction
+
+The running DAQ application was read back through ST-Link hot-plug and matched
+its local ELF's binary exactly. Across two approximately three-second intervals,
+KG1000 publication accepts advanced by 739 and 731; selected KG50 accepts advanced
+by 706 and 700. KG1000 publication failures did not increase and ADC/software
+sample overruns remained zero. These are acquisition/publication observations,
+not proof of delivery or SD persistence. GroundStation's recent window contained
+roughly 29,000 KG50 rows versus 139 KG1000 rows in the earlier capture.
+
+The gateway's matching-image capture showed increasing DAQ CAN-ring drops and
+roughly 95% of measured service time in CAN/network work, while UART TX pending
+remained zero. This establishes a gateway processing bottleneck in that capture;
+using Pico's second core alone cannot recover packets dropped before UART.
+
+KG1000 and native KG50 previously had application priority 0, while selected P6
+KG50 had priority 16. A regression using the actual SEDSnet bounded queue shows
+that a queue saturated by P6 reports refuses KG1000 indefinitely at those
+priorities. All three fast loadcell types now use priority 16 in the board and
+GroundStation schemas, below protected valve status and command traffic. The
+same regression accepts KG1000 after the change and verifies that telemetry does
+not evict protected status/commands. This fixes that admission asymmetry; it does
+not establish a zero-loss capacity guarantee.
+
+Gateway and DAQ comparison images also use SEDSnet main 13c74ab, including borrowed
+immutable embedded metadata, with the existing TLSF/compact settings retained.
+The Pico UART/Ethernet bridge has separate executors/IRQ ownership on its two
+cores, bounded whole-frame mailboxes and independent TCP RX/TX. Qualification
+must compare end-to-end timestamps and CAN/bridge loss counters after installing
+all matching images. A successful build, a queue accept, or a fresh single sample
+is insufficient to declare sustained delivery fixed.
