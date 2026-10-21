@@ -763,8 +763,30 @@ SedsResult log_telemetry_asynchronous(SedsDataType data_type, const void *data,
     return SEDS_ERR;
   }
 
-  return seds_router_log_queue_typed(g_router.r, data_type, data, element_count, element_size,
-                                     guess_kind_from_elem_size(element_size));
+  const SedsResult result = seds_router_log_queue_typed(
+      g_router.r, data_type, data, element_count, element_size,
+      guess_kind_from_elem_size(element_size));
+#ifdef SEDS_FIRMWARE_SIM_TEST
+  /* Preserve the first publication refusal before bootstrap queues drain.
+   * Reuse the simulator fault buffer; no production RAM or acquisition work
+   * is added. A real allocator failure still overwrites it with its stack. */
+  extern volatile uint32_t g_telemetry_alloc_failure_stack[128];
+  extern volatile uint32_t g_telemetry_alloc_failure_stack_words;
+  if (result != SEDS_OK && g_telemetry_alloc_failure_stack_words == 0U) {
+    uint32_t counters[16];
+    if (seds_router_copy_memory_counters(g_router.r, counters, 16U) == 16) {
+      for (unsigned i = 0U; i < 16U; ++i)
+        g_telemetry_alloc_failure_stack[i] = counters[i];
+      g_telemetry_alloc_failure_stack[16] = (uint32_t)result;
+      g_telemetry_alloc_failure_stack[17] = (uint32_t)data_type;
+      g_telemetry_alloc_failure_stack[18] = HAL_GetTick();
+      g_telemetry_alloc_failure_stack[19] = (uint32_t)element_count;
+      g_telemetry_alloc_failure_stack[20] = (uint32_t)seds_memory_admission_rejected();
+      g_telemetry_alloc_failure_stack_words = 21U;
+    }
+  }
+#endif
+  return result;
 #else
   (void)data_type;
   print_data_no_telem((void *)data, element_count * element_size);

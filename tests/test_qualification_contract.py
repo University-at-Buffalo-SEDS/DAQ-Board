@@ -102,7 +102,7 @@ class QualificationContractTests(unittest.TestCase):
         self.assertNotIn("can_bus_wait_for_tx_slot", can_bus)
         self.assertNotIn("< (uint32_t)frag_cnt", can_bus)
         self.assertIn("BOARD_CAN_MAX_FRAME_BYTES CAN_TX_ALIGNED_FRAME_BYTES", telemetry)
-        self.assertIn('SEDSNET_MAX_QUEUE_BUDGET "12288"', cmake)
+        self.assertIn('SEDSNET_MAX_QUEUE_BUDGET "16384"', cmake)
 
 
     def test_periodic_health_check_does_not_serialize_topology(self):
