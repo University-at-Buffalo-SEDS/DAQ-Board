@@ -10,6 +10,7 @@
  * coupling application code to the fetched dependency's source tree.
  */
 #define SEDS_EP_SD_CARD ((SedsDataEndpoint)100U)
+#define SEDS_EP_VALVE_PRESSURE_LOG ((SedsDataEndpoint)118747172U)
 #define SEDS_EP_GROUND_STATION ((SedsDataEndpoint)191579769U)
 #define SEDS_EP_FLIGHT_CONTROLLER ((SedsDataEndpoint)266702084U)
 #define SEDS_EP_VALVE_BOARD ((SedsDataEndpoint)61303946U)
@@ -74,3 +75,5 @@
 #define SEDS_DT_DAQ_KG50_SELECTED ((SedsDataType)15322788U)
 
 #define SEDS_DT_BOARD_HEALTH ((SedsDataType)215170867U)
+
+#define SEDS_DT_VALVE_PRESSURE_SD_V1 ((SedsDataType)157797238U)

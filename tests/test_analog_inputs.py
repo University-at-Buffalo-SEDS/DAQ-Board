@@ -128,7 +128,12 @@ class AnalogInputTests(unittest.TestCase):
 #include "daq_rates.h"
 #include "mcp3564r_board_config.h"
 typedef unsigned SedsDataType;
+typedef int SedsResult;
 #define SEDS_OK 0
+#define SEDS_IO (-14)
+#define TX_TIMER_TICKS_PER_SECOND 1000U
+static uint32_t HAL_GetTick(void) { return 0; }
+static void tx_thread_sleep(unsigned ticks) { (void)ticks; }
 #define SEDS_DT_DAQ_SAR_VOLTAGES 143
 #define SEDS_DT_DAQ_SDADC_VOLTAGES 144
 #define SEDS_DT_DAQ_CURRENT_SENSE 145

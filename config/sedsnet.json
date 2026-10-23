@@ -45,6 +45,11 @@
       "rust": "ActuatorAvBayUnderglowOwner",
       "name": "AV_BAY_UNDERGLOW_OWNER",
       "doc": "Boards that own the persistent avionics-bay underglow variable"
+    },
+    {
+      "rust": "FillValvePressureLog",
+      "name": "VALVE_PRESSURE_LOG",
+      "doc": "Only the DAQ pressure batch recorder; does not subscribe to general SD_CARD traffic."
     }
   ],
   "types": [
@@ -858,6 +863,22 @@
         "ActuatorGroundStation"
       ],
       "reliable": "Off",
+      "priority": 0
+    },
+    {
+      "rust": "ValvePressureSdV1",
+      "name": "VALVE_PRESSURE_SD_V1",
+      "doc": "DAQ-only 250 Hz pressure log: four samples, little-endian uptime_ms u64, UTC_ms u64, first sequence u32, then four (ADC u16, PSI f32) records at 4 ms spacing. Raw and converted values; not a GroundStation stream.",
+      "class": "Data",
+      "element": {
+        "kind": "Static",
+        "data_type": "UInt8",
+        "count": 44
+      },
+      "endpoints": [
+        "FillValvePressureLog"
+      ],
+      "reliable": "Unordered",
       "priority": 0
     }
   ]

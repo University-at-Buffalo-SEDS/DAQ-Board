@@ -213,13 +213,28 @@ static void daq_store_snapshot_csv(const daq_snapshot_t *snapshot,
 
 volatile uint32_t g_daq_analog_publish_ok_count;
 volatile uint32_t g_daq_analog_publish_fail_count;
+volatile uint32_t g_daq_analog_publish_retry_count;
 
-static void daq_publish_analog_packet(SedsDataType type, const float *values, size_t count)
+static void daq_publish_analog_packet(SedsDataType type, const float *values, size_t count,
+                                     uint32_t batch_started_ms)
 {
-  if (log_telemetry_asynchronous(type, values, count, sizeof(float)) == SEDS_OK)
-    g_daq_analog_publish_ok_count++;
-  else
-    g_daq_analog_publish_fail_count++;
+  /* A startup loadcell burst can temporarily fill the logical TX budget.
+   * Yield this independent analog worker so networking can release that work.
+   * All packets in one snapshot share one 100ms deadline: acquisition, raw SD
+   * capture and the bounded three-snapshot queue must not wait indefinitely. */
+  for (;;) {
+    const SedsResult result = log_telemetry_asynchronous(type, values, count, sizeof(float));
+    if (result == SEDS_OK) {
+      g_daq_analog_publish_ok_count++;
+      return;
+    }
+    if (result != SEDS_IO || (uint32_t)(HAL_GetTick() - batch_started_ms) >= 100U) {
+      g_daq_analog_publish_fail_count++;
+      return;
+    }
+    g_daq_analog_publish_retry_count++;
+    tx_thread_sleep((TX_TIMER_TICKS_PER_SECOND + 999U) / 1000U);
+  }
 }
 
 static void daq_publish_analog(const daq_snapshot_t *snapshot, const daq_loadcell_window_t *window)
@@ -229,6 +244,7 @@ static void daq_publish_analog(const daq_snapshot_t *snapshot, const daq_loadcel
   static uint8_t valid;
   static uint32_t last_report;
   const uint32_t now = (uint32_t)snapshot->monotonic_ms;
+  const uint32_t batch_started_ms = HAL_GetTick();
   for (unsigned i = 0; i < 6U; ++i)
   {
     if (window->count[i + 2U] != 0U)
@@ -245,7 +261,7 @@ static void daq_publish_analog(const daq_snapshot_t *snapshot, const daq_loadcel
     for (unsigned i = 0; i < 6U; ++i)
       values[i] = (valid & (1U << i)) && (uint32_t)(now - updated[i]) <= 3U * MCP3564R_AUX_INTERVAL_MS
           ? auxiliary[i] : NAN;
-    daq_publish_analog_packet(SEDS_DT_DAQ_SDADC_VOLTAGES, values, 6U);
+    daq_publish_analog_packet(SEDS_DT_DAQ_SDADC_VOLTAGES, values, 6U, batch_started_ms);
   }
   if (snapshot->analog_sample_fresh)
   {
@@ -253,9 +269,9 @@ static void daq_publish_analog(const daq_snapshot_t *snapshot, const daq_loadcel
                             snapshot->current_sense_a[0], snapshot->current_sense_a[1]};
     const float power[] = {snapshot->power_monitor_v[0], snapshot->power_monitor_v[1],
                           snapshot->input_voltage_v, snapshot->input_current_a};
-    daq_publish_analog_packet(SEDS_DT_DAQ_SAR_VOLTAGES, snapshot->analog_inputs_v, 8U);
-    daq_publish_analog_packet(SEDS_DT_DAQ_CURRENT_SENSE, current, 4U);
-    daq_publish_analog_packet(SEDS_DT_DAQ_POWER_MONITOR, power, 4U);
+    daq_publish_analog_packet(SEDS_DT_DAQ_SAR_VOLTAGES, snapshot->analog_inputs_v, 8U, batch_started_ms);
+    daq_publish_analog_packet(SEDS_DT_DAQ_CURRENT_SENSE, current, 4U, batch_started_ms);
+    daq_publish_analog_packet(SEDS_DT_DAQ_POWER_MONITOR, power, 4U, batch_started_ms);
   }
 }
 

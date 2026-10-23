@@ -10,8 +10,13 @@ ROOT = Path(__file__).resolve().parents[1]
 class SdLifecycleTests(unittest.TestCase):
     def test_report_rows_drain_faster_than_two_channel_producer(self):
         source = (ROOT / "Core/Src/sd_card.c").read_text()
-        functions = source[source.index("static uint8_t sd_service_telemetry_rows"):
-                           source.index("void sd_card_writer_thread_entry")]
+        start = source.index("static uint8_t sd_service_telemetry_rows")
+        end = source.index("{", start) + 1
+        depth = 1
+        while depth:
+            depth += (source[end] == "{") - (source[end] == "}")
+            end += 1
+        functions = source[start:end]
         self.run_c(r'''
 #include <stdint.h>
 #include <stddef.h>

@@ -8,6 +8,7 @@ extern "C" {
 #include "sedsnet_config.h"
 #include "tx_api.h"
 #include "daq_calibration.h"
+#include "pressure_sd_wire.h"
 
 typedef enum
 {
@@ -34,6 +35,9 @@ UINT sd_card_init(TX_BYTE_POOL *byte_pool);
 void sd_card_set_hardware_ready(uint8_t ready);
 void sd_card_writer_thread_entry(ULONG initial_input);
 sd_card_status_t sd_card_log_packet(const SedsPacketView *pkt);
+/* Copies a fixed batch without CSV, allocation or media I/O. OK means queued;
+ * writer/flushed counters separately report storage progress. */
+sd_card_status_t sd_card_log_pressure_batch(const pressure_sd_batch_t *batch);
 sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,
                                          uint64_t timestamp_ms,
                                          float value,

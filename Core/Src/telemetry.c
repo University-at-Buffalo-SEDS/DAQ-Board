@@ -4,6 +4,7 @@
 #include "telemetry.h"
 #include "daq_calibration.h"
 #include "daq_log_clock.h"
+#include "sd_card.h"
 #include "flight_state_cache.h"
 #include "sim_network_probe.h"
 #include "board_can_priority.h"
@@ -515,6 +516,26 @@ static __attribute__((unused)) bool telemetry_memory_admission_probe(
 }
 #endif
 
+volatile uint32_t g_pressure_sd_batches_received;
+volatile uint32_t g_pressure_sd_invalid_batches;
+static SedsResult pressure_sd_receive(const SedsPacketView *packet, void *context)
+{
+  (void)context;
+  /* This endpoint belongs only to the pressure recorder. Keep the explicit
+   * type check so another layout can never be interpreted as a batch. */
+  if (!packet || packet->ty != SEDS_DT_VALVE_PRESSURE_SD_V1) return SEDS_OK;
+  pressure_sd_batch_t batch;
+  if (pressure_sd_decode(&batch, packet->payload, packet->payload_len) != 0) {
+    ++g_pressure_sd_invalid_batches; return SEDS_HANDLER_ERROR;
+  }
+  /* The SD handoff accepts the entire batch atomically. A refused handoff
+   * must not generate a successful delivery receipt; let the reliable sender
+   * retry the same packet after the writer drains its bounded queue. */
+  if (sd_card_log_pressure_batch(&batch) != SD_CARD_STATUS_OK) return SEDS_IO;
+  ++g_pressure_sd_batches_received;
+  return SEDS_OK;
+}
+
 SedsResult init_telemetry_router(void) {
 #ifndef TELEMETRY_ENABLED
   return SEDS_OK;
@@ -550,6 +571,7 @@ SedsResult init_telemetry_router(void) {
 #endif
 
   static const SedsLocalEndpointDesc locals[] = {
+      {.endpoint = SEDS_EP_VALVE_PRESSURE_LOG, .packet_handler = pressure_sd_receive, .packed_handler = NULL, .user = NULL},
       {
           .endpoint = SEDS_EP_HEART_BEAT,
           .packet_handler = telemetry_heartbeat_handler,
@@ -767,22 +789,30 @@ SedsResult log_telemetry_asynchronous(SedsDataType data_type, const void *data,
       g_router.r, data_type, data, element_count, element_size,
       guess_kind_from_elem_size(element_size));
 #ifdef SEDS_FIRMWARE_SIM_TEST
-  /* Preserve the first publication refusal before bootstrap queues drain.
-   * Reuse the simulator fault buffer; no production RAM or acquisition work
-   * is added. A real allocator failure still overwrites it with its stack. */
+  /* Preserve first and latest refusals in the existing simulator fault
+   * buffer. This distinguishes bootstrap bursts from persistent queue pressure;
+   * production RAM and the allocator-fault stack remain unchanged. */
+  extern int32_t seds_router_copy_queue_counters(SedsRouter *, uint32_t *, size_t);
   extern volatile uint32_t g_telemetry_alloc_failure_stack[128];
   extern volatile uint32_t g_telemetry_alloc_failure_stack_words;
-  if (result != SEDS_OK && g_telemetry_alloc_failure_stack_words == 0U) {
+  if (result != SEDS_OK && (g_telemetry_alloc_failure_stack_words == 0U ||
+      g_telemetry_alloc_failure_stack_words == 21U || g_telemetry_alloc_failure_stack_words == 85U || g_telemetry_alloc_failure_stack_words == 113U)) {
     uint32_t counters[16];
     if (seds_router_copy_memory_counters(g_router.r, counters, 16U) == 16) {
+      const unsigned offset=g_telemetry_alloc_failure_stack_words==0U?0U:64U;
       for (unsigned i = 0U; i < 16U; ++i)
-        g_telemetry_alloc_failure_stack[i] = counters[i];
-      g_telemetry_alloc_failure_stack[16] = (uint32_t)result;
-      g_telemetry_alloc_failure_stack[17] = (uint32_t)data_type;
-      g_telemetry_alloc_failure_stack[18] = HAL_GetTick();
-      g_telemetry_alloc_failure_stack[19] = (uint32_t)element_count;
-      g_telemetry_alloc_failure_stack[20] = (uint32_t)seds_memory_admission_rejected();
-      g_telemetry_alloc_failure_stack_words = 21U;
+        g_telemetry_alloc_failure_stack[offset+i] = counters[i];
+      g_telemetry_alloc_failure_stack[offset+16] = (uint32_t)result;
+      g_telemetry_alloc_failure_stack[offset+17] = (uint32_t)data_type;
+      g_telemetry_alloc_failure_stack[offset+18] = HAL_GetTick();
+      g_telemetry_alloc_failure_stack[offset+19] = (uint32_t)element_count;
+      g_telemetry_alloc_failure_stack[offset+20] = (uint32_t)seds_memory_admission_rejected();
+      g_telemetry_alloc_failure_stack_words = offset+21U;
+      if (seds_router_copy_queue_counters(g_router.r,counters,16U)==16) {
+        for (unsigned i=0U;i<16U;++i)g_telemetry_alloc_failure_stack[96U+i]=counters[i];
+        g_telemetry_alloc_failure_stack[112]=HAL_GetTick();
+        g_telemetry_alloc_failure_stack_words=113U;
+      }
     }
   }
 #endif
@@ -887,7 +917,9 @@ SedsResult process_all_queues_timeout(uint32_t timeout_ms) {
     return SEDS_ERR;
   }
 
-  const SedsResult result = seds_router_process_all_queues_with_timeout(g_router.r, timeout_ms);
+  /* The worker explicitly polls board discovery and time sync once per pass.
+   * Drain here without running the same maintenance a second time. */
+  const SedsResult result = seds_router_drain_queues_with_timeout(g_router.r, timeout_ms);
   g_daq_queue_service_last_result = result;
   if (result != SEDS_OK) g_daq_queue_service_error_count++;
   return result;

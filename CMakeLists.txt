@@ -130,7 +130,10 @@ set(SEDSNET_MAX_STACK_PAYLOAD "128" CACHE STRING "" FORCE)
 # Bootstrap discovery and the first ADC publications overlap. The 12 KiB
 # ceiling rejected auxiliary reports at 12,133 retained bytes despite >96 KiB
 # of allocator headroom. Keep this bounded, with room for that startup burst.
-set(SEDSNET_MAX_QUEUE_BUDGET "16384" CACHE STRING "" FORCE)
+# Fair dispatch drains the steady workload; retain the bounded discovery/CAN
+# bootstrap burst with the new250Hz valve SD stream. Keep allocator reserves
+# and source rates unchanged (qualification records the failed16KiB control).
+set(SEDSNET_MAX_QUEUE_BUDGET "24576" CACHE STRING "" FORCE)
 set(SEDSNET_MAX_RECENT_RX_IDS "16" CACHE STRING "" FORCE)
 set(SEDSNET_ENV_STARTING_QUEUE_SIZE "1024" CACHE STRING "" FORCE)
 set(SEDSNET_ENV_QUEUE_GROW_STEP "1.25" CACHE STRING "" FORCE)

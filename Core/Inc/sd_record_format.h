@@ -28,4 +28,22 @@ static inline int sd_format_csv_record(char *dst, size_t capacity, uint64_t utc_
     if (length < 0 || (size_t)length >= capacity - used) { dst[0] = 0; return -1; }
     return (int)(used + (size_t)length);
 }
+/* Acquisition values are formatter-generated numeric vectors, containing no
+ * CSV metacharacters. Raw codes and converted values belong to one sample. */
+static inline int sd_format_csv_sensor_record(char *dst, size_t capacity,
+    uint64_t utc_ms, uint64_t uptime, const char *sensor,
+    const char *raw, const char *converted, uint64_t sequence)
+{
+    if (!dst || !capacity || !sensor || !raw || !converted) return -1;
+    char stamp[21], ticks[21], seq[21];
+    sd_format_u64(stamp, utc_ms ? utc_ms : uptime);
+    sd_format_u64(ticks, uptime); sd_format_u64(seq, sequence);
+    int n = snprintf(dst, capacity,
+        "%s,%s,%s,\"%s\",\"%s\",\"%s\",\"%s\",%s,,,%s,%u,%s\r\n",
+        stamp, ticks, sensor, converted, raw, raw, converted,
+        utc_ms ? "network" : "local", ticks, BOARD_UPTIME_FREQUENCY_HZ, seq);
+    if (n < 0 || (size_t)n >= capacity) { dst[0] = 0; return -1; }
+    return n;
+}
+
 #endif

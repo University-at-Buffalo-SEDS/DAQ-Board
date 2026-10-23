@@ -19,6 +19,7 @@ class PublicationDiagnosticsTests(unittest.TestCase):
 #define TELEMETRY_ENABLED
 typedef int32_t SedsResult;
 typedef uint32_t SedsDataType;
+typedef void SedsRouter;
 enum {SEDS_OK=0, SEDS_BAD_ARG=-10, SEDS_ERR=-1};
 struct {void *r;} g_router={(void *)1};
 volatile uint32_t g_telemetry_alloc_failure_stack[128];
@@ -34,6 +35,9 @@ int seds_router_copy_memory_counters(void *r,uint32_t *out,size_t capacity){
  for(unsigned i=0;i<16;++i)out[i]=100+i;
  return copy_result;
 }
+int seds_router_copy_queue_counters(SedsRouter *r,uint32_t *out,size_t capacity){
+ assert(r && capacity==16);for(unsigned i=0;i<16;++i)out[i]=1000+i;return 16;
+}
 uint32_t HAL_GetTick(void){return 123;}
 size_t seds_memory_admission_rejected(void){return 7;}
 ''' + source[start:end] + r'''
@@ -42,7 +46,7 @@ int main(void){
  assert(log_telemetry_asynchronous(101,values,6,4)==0);assert(!copies);
  result=-14;assert(log_telemetry_asynchronous(101,values,6,4)==-14);
 #ifdef SEDS_FIRMWARE_SIM_TEST
- assert(copies==1 && g_telemetry_alloc_failure_stack_words==21);
+ assert(copies==1 && g_telemetry_alloc_failure_stack_words==113);
  assert(g_telemetry_alloc_failure_stack[0]==100);
  assert(g_telemetry_alloc_failure_stack[15]==115);
  assert((int32_t)g_telemetry_alloc_failure_stack[16]==-14);
@@ -50,11 +54,18 @@ int main(void){
  assert(g_telemetry_alloc_failure_stack[18]==123);
  assert(g_telemetry_alloc_failure_stack[19]==6);
  assert(g_telemetry_alloc_failure_stack[20]==7);
+ assert(g_telemetry_alloc_failure_stack[96]==1000 && g_telemetry_alloc_failure_stack[111]==1015 && g_telemetry_alloc_failure_stack[112]==123);
  result=-18;assert(log_telemetry_asynchronous(102,values,6,4)==-18);
- assert(copies==1 && (int32_t)g_telemetry_alloc_failure_stack[16]==-14);
+ assert(copies==2 && (int32_t)g_telemetry_alloc_failure_stack[16]==-14);
+ assert(g_telemetry_alloc_failure_stack_words==113);
+ assert((int32_t)g_telemetry_alloc_failure_stack[80]==-18);
+ assert(g_telemetry_alloc_failure_stack[81]==102);
+ g_telemetry_alloc_failure_stack_words=128;
+ assert(log_telemetry_asynchronous(103,values,6,4)==-18);
+ assert(copies==2 && g_telemetry_alloc_failure_stack_words==128);
  g_telemetry_alloc_failure_stack_words=0;copy_result=-10;
  assert(log_telemetry_asynchronous(102,values,6,4)==-18);
- assert(copies==2 && g_telemetry_alloc_failure_stack_words==0);
+ assert(copies==3 && g_telemetry_alloc_failure_stack_words==0);
 #else
  assert(!copies && !g_telemetry_alloc_failure_stack_words);
 #endif

@@ -59,6 +59,22 @@ static TX_QUEUE g_sd_queue;
 static ULONG g_sd_queue_storage[SD_QUEUE_DEPTH];
 static TX_QUEUE g_sd_raw_queue;
 static ULONG g_sd_raw_queue_storage[SD_RAW_QUEUE_DEPTH];
+/* The receive callback copies one fixed message; CSV and file operations stay
+ * in the SD writer. Include the acquisition's session across a launch change. */
+typedef struct {
+  pressure_sd_batch_t batch;
+  uint64_t session;
+} sd_pressure_message_t;
+#define SD_PRESSURE_MESSAGE_WORDS ((sizeof(sd_pressure_message_t) + sizeof(ULONG) - 1U) / sizeof(ULONG))
+_Static_assert(SD_PRESSURE_MESSAGE_WORDS <= 16U, "ThreadX pressure message bounds");
+static TX_QUEUE g_sd_pressure_queue;
+static ULONG g_sd_pressure_queue_storage[16U * SD_PRESSURE_MESSAGE_WORDS];
+static uint8_t g_sd_pressure_pending;
+volatile uint32_t g_sd_pressure_records_enqueued;
+volatile uint32_t g_sd_pressure_records_dropped;
+volatile uint32_t g_sd_pressure_records_written;
+volatile uint32_t g_sd_pressure_records_flushed;
+
 static TX_MUTEX g_sd_pool_mutex;
 static TX_EVENT_FLAGS_GROUP g_sd_flags;
 /* Preserve the old RAM budgets, but allocate only the samples/CSV bytes
@@ -789,6 +805,55 @@ static uint8_t sd_service_telemetry_rows(void)
   return serviced;
 }
 
+/* Retain a failed row and its batch until the media accepts it. A bounded
+ * four-row turn leaves the existing raw and telemetry services runnable. */
+static uint8_t sd_service_pressure_rows(void)
+{
+  static union {
+    sd_pressure_message_t message;
+    ULONG words[SD_PRESSURE_MESSAGE_WORDS];
+  } pending;
+  static union {
+    uint64_t alignment;
+    UCHAR bytes[offsetof(sd_line_slot_t, line) + SD_LINE_MAX];
+  } storage;
+  static unsigned index;
+  sd_line_slot_t *slot = (sd_line_slot_t *)(void *)storage.bytes;
+  uint8_t serviced = 0U;
+  for (unsigned budget = 0U; budget < PRESSURE_SD_SAMPLES; ++budget) {
+    if (!g_sd_pressure_pending) {
+      if (tx_queue_receive(&g_sd_pressure_queue, pending.words, TX_NO_WAIT) != TX_SUCCESS) break;
+      g_sd_pressure_pending = 1U; index = 0U; slot->len = 0U;
+      slot->session = pending.message.session;
+      /* Pressure raw/converted values come from VB; DAQ coefficients are only
+       * the common file metadata and never transform a pressure record. */
+      (void)sd_calibration_snapshot(&slot->calibration);
+    }
+    serviced = 1U;
+    const pressure_sd_batch_t *batch = &pending.message.batch;
+    if (slot->len == 0U) {
+      char raw[12], converted[24];
+      snprintf(raw, sizeof(raw), "%u", (unsigned)batch->raw[index]);
+      sd_format_float(converted, batch->psi[index]);
+      const int n = sd_format_csv_sensor_record(slot->line, SD_LINE_MAX,
+          batch->unix_ms ? batch->unix_ms + index * PRESSURE_SD_PERIOD_MS : 0U,
+          batch->uptime_ms + index * PRESSURE_SD_PERIOD_MS, "valve_pressure_psi",
+          raw, converted, (uint32_t)(batch->first_sequence + index));
+      if (n < 0) {
+        ++g_sd_pressure_records_dropped; ++g_sd_write_error_count;
+        if (++index == PRESSURE_SD_SAMPLES) g_sd_pressure_pending = 0U;
+        continue;
+      }
+      slot->len = (uint16_t)n;
+    }
+    if (sd_write_telemetry_row(slot) != FX_SUCCESS) { ++g_sd_write_error_count; break; }
+    ++g_sd_pressure_records_written; ++g_sd_csv_rows_written_count;
+    slot->len = 0U;
+    if (++index == PRESSURE_SD_SAMPLES) g_sd_pressure_pending = 0U;
+  }
+  return serviced;
+}
+
 void sd_card_writer_thread_entry(ULONG initial_input)
 {
   ULONG message = 0U;
@@ -934,6 +999,7 @@ void sd_card_writer_thread_entry(ULONG initial_input)
     if (raw_ms > g_sd_max_raw_service_ms) g_sd_max_raw_service_ms = raw_ms;
     const uint32_t telemetry_start_ms = HAL_GetTick();
     serviced_work |= sd_service_telemetry_rows();
+    serviced_work |= sd_service_pressure_rows();
     const uint32_t telemetry_ms = HAL_GetTick() - telemetry_start_ms;
     if (telemetry_ms > g_sd_max_telemetry_service_ms) g_sd_max_telemetry_service_ms = telemetry_ms;
 
@@ -956,6 +1022,7 @@ void sd_card_writer_thread_entry(ULONG initial_input)
       {
         g_sd_flush_count++;
         g_sd_raw_records_flushed_count = g_sd_raw_records_written_count;
+        g_sd_pressure_records_flushed = g_sd_pressure_records_written;
       }
       else
       {
@@ -971,7 +1038,8 @@ void sd_card_writer_thread_entry(ULONG initial_input)
     if ((g_file_open != 0U || g_telemetry_file_open != 0U) &&
         sd_launch_finished() && pending_raw == NULL && g_sd_raw_slots_used == 0U &&
         g_sd_line_slots_used == 0U && g_sd_raw_queue.tx_queue_enqueued == 0U &&
-        g_sd_queue.tx_queue_enqueued == 0U)
+        g_sd_queue.tx_queue_enqueued == 0U && g_sd_pressure_pending == 0U &&
+        g_sd_pressure_queue.tx_queue_enqueued == 0U)
     {
       if (g_file_open != 0U && sd_flush_pending() == FX_SUCCESS &&
           sd_close_log(&g_sd_file, g_sd_filename) == FX_SUCCESS) g_file_open = 0U;
@@ -1018,6 +1086,9 @@ UINT sd_card_init(TX_BYTE_POOL *byte_pool)
   {
     return TX_QUEUE_ERROR;
   }
+  if (tx_queue_create(&g_sd_pressure_queue, "sd_pressure", SD_PRESSURE_MESSAGE_WORDS,
+                      g_sd_pressure_queue_storage, sizeof(g_sd_pressure_queue_storage)) != TX_SUCCESS)
+    return TX_QUEUE_ERROR;
   if (tx_event_flags_create(&g_sd_flags, "sd_flags") != TX_SUCCESS)
   {
     return TX_GROUP_ERROR;
@@ -1078,6 +1149,29 @@ sd_card_status_t sd_card_log_packet(const SedsPacketView *pkt)
   slot->session = sd_run_snapshot(); slot->len = (uint16_t)len;
   memcpy(slot->line, line, (size_t)len + 1U);
   return sd_enqueue_line(slot);
+}
+
+sd_card_status_t sd_card_log_pressure_batch(const pressure_sd_batch_t *batch)
+{
+  if (!batch) return SD_CARD_STATUS_IO_ERROR;
+  /* The writer updates the closed latch at its monotonic launch deadline.
+   * Never take router-clock or SD-pool locks from the receive callback. */
+  if (!g_sd_services_initialized || g_sd_launch_closed) {
+    g_sd_pressure_records_dropped += PRESSURE_SD_SAMPLES;
+    return SD_CARD_STATUS_BUSY;
+  }
+  union {
+    sd_pressure_message_t message;
+    ULONG words[SD_PRESSURE_MESSAGE_WORDS];
+  } queued = {0};
+  queued.message.batch = *batch;
+  queued.message.session = sd_run_snapshot();
+  if (tx_queue_send(&g_sd_pressure_queue, queued.words, TX_NO_WAIT) != TX_SUCCESS) {
+    g_sd_pressure_records_dropped += PRESSURE_SD_SAMPLES;
+    return SD_CARD_STATUS_BACKPRESSURE;
+  }
+  g_sd_pressure_records_enqueued += PRESSURE_SD_SAMPLES;
+  return SD_CARD_STATUS_OK;
 }
 
 sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,

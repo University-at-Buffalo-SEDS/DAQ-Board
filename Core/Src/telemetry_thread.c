@@ -68,6 +68,23 @@ extern FDCAN_HandleTypeDef hfdcan1;
 extern UART_HandleTypeDef huart1;
 #endif
 
+/* A fixed idle sleep capped dispatch near500 packets/s when each busy pass
+ * consumed its 1 ms budget. Two250 Hz loadcell streams plus pressure receipts
+ * exceed that cap. Keep draining a bounded burst, yielding to equal-priority
+ * SD/report workers each time; acquisition remains higher priority. */
+static uint8_t immediate_work_passes;
+static void wait_for_telemetry_work(ULONG poll_ticks)
+{
+    if(g_router.r != NULL && seds_router_has_queued_work(g_router.r)>0 &&
+       immediate_work_passes<4U){
+        ++immediate_work_passes;
+        tx_thread_relinquish();
+    }else{
+        immediate_work_passes=0U;
+        tx_thread_sleep(poll_ticks);
+    }
+}
+
 void telemetry_thread_entry(ULONG initial_input)
 {
     (void)initial_input;
@@ -112,7 +129,7 @@ void telemetry_thread_entry(ULONG initial_input)
             last_stack_sample = now;
         }
 
-        tx_thread_sleep(poll_ticks);
+        wait_for_telemetry_work(poll_ticks);
     }
 }
 
