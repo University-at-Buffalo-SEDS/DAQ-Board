@@ -6,7 +6,8 @@
 #include "main.h"
 #include "stm32u5xx_hal_gpio.h"
 #include "sd_card.h"
-#include "telemetry.h"
+#include "daq_log_time.h"
+#include "sedsnet_config.h"
 #include "mcp3564r.h"
 #include "daq_calibration.h"
 #include "daq_rates.h"
@@ -107,7 +108,7 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
     filter_calibration = *calibration;
   }
   uint16_t count = 0U;
-  const uint64_t unix_now = telemetry_unix_ms_cached();
+  const uint64_t unix_now = daq_log_unix_ms_cached();
   const uint64_t mono_now = board_uptime_ticks();
   static uint32_t raw_sequence;
   *window = (daq_loadcell_window_t){0};
@@ -215,9 +216,10 @@ volatile uint32_t g_daq_analog_publish_ok_count;
 volatile uint32_t g_daq_analog_publish_fail_count;
 volatile uint32_t g_daq_analog_publish_retry_count;
 
-static void daq_publish_analog_packet(SedsDataType type, const float *values, size_t count,
+static void daq_publish_analog_packet(uint32_t type, const float *values, size_t count,
                                      uint32_t batch_started_ms)
 {
+#ifdef TELEMETRY_ENABLED
   /* A startup loadcell burst can temporarily fill the logical TX budget.
    * Yield this independent analog worker so networking can release that work.
    * All packets in one snapshot share one 100ms deadline: acquisition, raw SD
@@ -235,6 +237,9 @@ static void daq_publish_analog_packet(SedsDataType type, const float *values, si
     g_daq_analog_publish_retry_count++;
     tx_thread_sleep((TX_TIMER_TICKS_PER_SECOND + 999U) / 1000U);
   }
+#else
+  (void)type; (void)values; (void)count; (void)batch_started_ms;
+#endif
 }
 
 static void daq_publish_analog(const daq_snapshot_t *snapshot, const daq_loadcell_window_t *window)
@@ -302,6 +307,7 @@ static void daq_publish_loadcell(const daq_snapshot_t *snapshot, const daq_calib
   }
 #endif
 
+#ifdef TELEMETRY_ENABLED
   if (log_telemetry_captured(SEDS_DT_KG1000,
                                  &loadcell_kg1000,
                                  1U,
@@ -313,6 +319,7 @@ static void daq_publish_loadcell(const daq_snapshot_t *snapshot, const daq_calib
   {
     g_daq_loadcell_publish_fail_count++;
   }
+#endif
 }
 
 static void daq_publish_kg50(float raw, uint8_t input, uint64_t monotonic_ms,
@@ -327,6 +334,7 @@ static void daq_publish_kg50(float raw, uint8_t input, uint64_t monotonic_ms,
   (void)monotonic_ms;
   (void)calibration;
 #endif
+#ifdef TELEMETRY_ENABLED
   const float tagged[] = {(float)input, raw};
   const SedsResult result = input == 0U
       ? log_telemetry_captured(SEDS_DT_KG50, &raw, 1U, sizeof(raw), monotonic_ms)
@@ -335,6 +343,7 @@ static void daq_publish_kg50(float raw, uint8_t input, uint64_t monotonic_ms,
     g_daq_kg50_publish_ok_count++;
   else
     g_daq_kg50_publish_fail_count++;
+#endif
 }
 
 /* Acquisition never waits for network publication. A work item keeps the
@@ -385,7 +394,7 @@ static void daq_report_thread_entry(ULONG argument)
     ULONG message;
     if (tx_queue_receive(&g_report_queue, &message, TX_WAIT_FOREVER) != TX_SUCCESS) continue;
     daq_report_t *work = (daq_report_t *)(uintptr_t)message;
-    const uint64_t now = telemetry_now_ms();
+    const uint64_t now = daq_log_monotonic_ms();
     const uint32_t age = now >= work->monotonic_ms ? (uint32_t)(now - work->monotonic_ms) : 0U;
     if (age > g_daq_report_max_age_ms) g_daq_report_max_age_ms = age;
     if (work->flags & DAQ_REPORT_KG1000) {
@@ -397,12 +406,14 @@ static void daq_report_thread_entry(ULONG argument)
     }
     if (work->flags & DAQ_REPORT_KG50)
       daq_publish_kg50(work->kg50, work->kg50_input, work->monotonic_ms, &work->calibration);
+#ifdef TELEMETRY_ENABLED
     if (work->flags & DAQ_REPORT_TEMPERATURE) {
       if (log_telemetry_captured(SEDS_DT_DAQ_ADC_TEMPERATURE, &work->temperature,
                                  1U, sizeof(float), work->monotonic_ms) == SEDS_OK)
         g_daq_temperature_publish_ok_count++;
       else g_daq_temperature_publish_fail_count++;
     }
+#endif
     g_daq_report_completed_count++;
     (void)tx_block_release(work);
   }

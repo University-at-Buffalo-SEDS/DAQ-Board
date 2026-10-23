@@ -53,7 +53,7 @@ static mcp3564r_sample_t queued[8];
 static unsigned next, queued_count;
 static unsigned mcp3564r_pending_samples(void) { return queued_count - next; }
 static unsigned mcp3564r_get_sample(mcp3564r_sample_t *out) { *out = queued[next++]; return 0; }
-static uint64_t telemetry_unix_ms_cached(void) { return 10000; }
+static uint64_t daq_log_unix_ms_cached(void) { return 10000; }
 uint64_t board_uptime_ticks(void) { return 100; }
 ''' + 'float daq_calibration_apply_kg50' + calibration + decode + drain + r'''
 int main(void) {

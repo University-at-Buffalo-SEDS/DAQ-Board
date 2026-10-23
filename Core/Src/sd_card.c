@@ -3,7 +3,7 @@
 
 #include "fx_api.h"
 #include "main.h"
-#include "telemetry.h"
+#include "daq_log_time.h"
 #include "sd_float_format.h"
 #include "sd_record_format.h"
 #include "sd_file_limit.h"
@@ -137,8 +137,8 @@ static uint8_t sd_launch_finished(void)
   if (deadline == 0U || finished_before) return finished_before;
   /* Never acquire the router clock lock for every raw/report row. Once mapped,
    * the local deadline is sufficient until a new managed clock arrives. */
-  const uint64_t utc = needs_utc ? telemetry_unix_ms() : 0U;
-  const uint64_t local = telemetry_now_ms();
+  const uint64_t utc = needs_utc ? daq_log_unix_ms() : 0U;
+  const uint64_t local = daq_log_monotonic_ms();
   mask = __get_PRIMASK();
   __disable_irq();
   if (g_sd_close_unix_ms != 0U && g_sd_close_local_ms == 0U && utc != 0U)
@@ -153,8 +153,8 @@ static uint8_t sd_launch_finished(void)
 
 void sd_card_set_launch_clock(uint64_t session, uint64_t close_unix_ms)
 {
-  const uint64_t now = session != 0U ? telemetry_unix_ms() : 0U;
-  const uint64_t local = session != 0U ? telemetry_now_ms() : 0U;
+  const uint64_t now = session != 0U ? daq_log_unix_ms() : 0U;
+  const uint64_t local = session != 0U ? daq_log_monotonic_ms() : 0U;
   const uint32_t mask = __get_PRIMASK();
   __disable_irq();
   if (session == 0U) {
@@ -353,7 +353,7 @@ static VOID sd_filex_driver(FX_MEDIA *media)
 static void sd_update_filesystem_clock(void)
 {
   sd_calendar_t now;
-  if (sd_calendar_from_unix_ms(telemetry_unix_ms(), &now))
+  if (sd_calendar_from_unix_ms(daq_log_unix_ms(), &now))
   {
     (void)fx_system_date_set(now.year, now.month, now.day);
     (void)fx_system_time_set(now.hour, now.minute, now.second);
@@ -365,7 +365,7 @@ static UINT sd_close_log(FX_FILE *file, char *name)
   sd_update_filesystem_clock();
   UINT status = fx_file_close(file);
   sd_calendar_t now;
-  if (status == FX_SUCCESS && sd_calendar_from_unix_ms(telemetry_unix_ms(), &now) &&
+  if (status == FX_SUCCESS && sd_calendar_from_unix_ms(daq_log_unix_ms(), &now) &&
       fx_file_date_time_set(&g_sd_media, name, now.year, now.month,
                            now.day, now.hour, now.minute, now.second) != FX_SUCCESS)
     g_sd_write_error_count++;
@@ -377,14 +377,14 @@ static UINT sd_open_log(FX_FILE *file, char *g_sd_filename, size_t filename_size
                         const char *prefix, const daq_calibration_t *requested)
 {
   sd_update_filesystem_clock();
-  const uint64_t stamp = telemetry_unix_ms();
+  const uint64_t stamp = daq_log_unix_ms();
   daq_calibration_t calibration;
   (void)sd_calibration_snapshot(&calibration);
   if (requested != NULL) calibration = *requested;
 
   for (uint32_t suffix = 0U; suffix < 1000U; ++suffix)
   {
-    const uint64_t name_stamp = (stamp != 0U) ? stamp : telemetry_now_ms();
+    const uint64_t name_stamp = (stamp != 0U) ? stamp : daq_log_monotonic_ms();
     char stamp_text[21];
     sd_format_u64(stamp_text, name_stamp);
     (void)snprintf(g_sd_filename, filename_size,
@@ -907,12 +907,14 @@ void sd_card_writer_thread_entry(ULONG initial_input)
           g_sd_init_failures++;
           if ((failed_retries == 0U) || ((failed_retries % 60U) == 0U))
           {
+#ifdef TELEMETRY_ENABLED
             if (log_telemetry_string_asynchronous(
                     SEDS_DT_WARNING,
                     "DAQ SD card unavailable; acquisition continues without logging") == SEDS_OK)
             {
               g_sd_warning_publish_count++;
             }
+#endif
           }
           failed_retries++;
         }
@@ -1133,6 +1135,7 @@ static uint64_t sd_next_row_sequence(void) {
   const uint32_t saved = __get_PRIMASK(); __disable_irq();
   const uint64_t value = ++sd_row_sequence; __set_PRIMASK(saved); return value;
 }
+#ifdef TELEMETRY_ENABLED
 sd_card_status_t sd_card_log_packet(const SedsPacketView *pkt)
 {
   if (!g_sd_ready || !pkt || sd_launch_finished()) return SD_CARD_STATUS_BUSY;
@@ -1140,7 +1143,7 @@ sd_card_status_t sd_card_log_packet(const SedsPacketView *pkt)
   char value[SD_LINE_MAX], line[SD_LINE_MAX];
   if (want < 0 || (size_t)want >= sizeof(value) ||
       seds_pkt_to_string(pkt, value, (size_t)want + 1U) != SEDS_OK) return SD_CARD_STATUS_IO_ERROR;
-  const uint64_t uptime = board_uptime_ticks(), utc = telemetry_unix_ms();
+  const uint64_t uptime = board_uptime_ticks(), utc = daq_log_unix_ms();
   const int len = sd_format_csv_record(line, sizeof(line), utc, uptime, "seds_packet", value, sd_next_row_sequence());
   if (len < 0) return SD_CARD_STATUS_IO_ERROR;
   sd_line_slot_t *slot = sd_alloc_slot((uint16_t)len);
@@ -1150,6 +1153,8 @@ sd_card_status_t sd_card_log_packet(const SedsPacketView *pkt)
   memcpy(slot->line, line, (size_t)len + 1U);
   return sd_enqueue_line(slot);
 }
+
+#endif
 
 sd_card_status_t sd_card_log_pressure_batch(const pressure_sd_batch_t *batch)
 {
@@ -1194,10 +1199,10 @@ sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,
   const uint64_t session = sd_run_snapshot();
   char value_text[24];
   sd_format_float(value_text, value);
-  const uint64_t age = (uint32_t)(telemetry_now_ms() - timestamp_ms);
+  const uint64_t age = (uint32_t)(daq_log_monotonic_ms() - timestamp_ms);
   const uint64_t now = board_uptime_ticks();
   const uint64_t uptime = now >= age ? now - age : 0U;
-  const uint64_t network_ms = daq_sample_network_ms(telemetry_unix_ms(), now, uptime);
+  const uint64_t network_ms = daq_sample_network_ms(daq_log_unix_ms(), now, uptime);
   const int len = sd_format_csv_record(line, sizeof(line), network_ms, uptime,
                                        sensor_name, value_text, sd_next_row_sequence());
   if ((len <= 0) || ((size_t)len >= sizeof(line)))

@@ -76,7 +76,7 @@ int main(void) {
             with self.subTest(frequency=frequency), tempfile.TemporaryDirectory() as tmp:
                 binary = Path(tmp) / "analog-backpressure"
                 subprocess.run(
-                    ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
+                    ["cc", "-DTELEMETRY_ENABLED=1", "-std=c11", "-Wall", "-Wextra", "-Werror",
                      "-fsanitize=address,undefined",
                      f"-DTX_TIMER_TICKS_PER_SECOND={frequency}U", "-x", "c", "-",
                      "-o", str(binary)], input=harness, text=True, check=True,

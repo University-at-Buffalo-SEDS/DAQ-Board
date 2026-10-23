@@ -5,7 +5,7 @@
 #include "daq_dac.h"
 #include "main.h"
 #include "mcp3564r.h"
-#include "telemetry.h"
+#include "daq_log_time.h"
 #include "daq_rates.h"
 
 #include <string.h>
@@ -62,7 +62,7 @@ UINT daq_board_sample(daq_snapshot_t *snapshot)
   }
 
   memset(snapshot, 0, sizeof(*snapshot));
-  snapshot->monotonic_ms = telemetry_now_ms();
+  snapshot->monotonic_ms = daq_log_monotonic_ms();
 
   if (!analog_started || (uint32_t)(snapshot->monotonic_ms - last_analog_ms) >= DAQ_ANALOG_REPORT_PERIOD_MS)
   {

@@ -36,8 +36,8 @@ static unsigned sd_launch_finished(void) { return 0; }
 static uint64_t sd_next_row_sequence(void) { static unsigned sequence; return ++sequence; }
 uint64_t board_uptime_ticks(void) { return 30; }
 static uint64_t network_ms = 1234;
-static uint64_t telemetry_unix_ms(void) { return network_ms; }
-static uint64_t telemetry_now_ms(void) { return 30; }
+static uint64_t daq_log_unix_ms(void) { return network_ms; }
+static uint64_t daq_log_monotonic_ms(void) { return 30; }
 static int sd_enqueue_line(sd_line_slot_t *s) { assert(s->len); enqueued++; return SD_CARD_STATUS_OK; }
 ''' + adapter + r'''
 int main(void) {

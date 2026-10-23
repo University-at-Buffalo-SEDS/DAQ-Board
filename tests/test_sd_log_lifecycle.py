@@ -79,7 +79,7 @@ typedef unsigned FX_FILE;
 #define FX_SUCCESS 0U
 static unsigned g_sd_media, g_sd_write_error_count, closes, year, day;
 static uint64_t utc=1790035200000ULL;
-static uint64_t telemetry_unix_ms(void) { return utc; }
+static uint64_t daq_log_unix_ms(void) { return utc; }
 static UINT fx_system_date_set(unsigned y,unsigned m,unsigned d) {
   year=y; day=d; (void)m; return 0;
 }
@@ -122,8 +122,8 @@ static unsigned utc_reads;
 static uint32_t __get_PRIMASK(void) { return 0; }
 static void __disable_irq(void) {}
 static void __enable_irq(void) {}
-static uint64_t telemetry_unix_ms(void) { ++utc_reads; return utc; }
-static uint64_t telemetry_now_ms(void) { return local; }
+static uint64_t daq_log_unix_ms(void) { ++utc_reads; return utc; }
+static uint64_t daq_log_monotonic_ms(void) { return local; }
 ''' + lifecycle + r'''
 int main(void) {
   const uint64_t start=utc;

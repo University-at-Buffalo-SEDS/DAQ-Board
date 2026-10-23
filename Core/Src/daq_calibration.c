@@ -19,12 +19,14 @@ extern volatile uint32_t g_telemetry_discovery_seen;
 static daq_calibration_t g_calibration = {1.0f, 0.0f, 1.0f, 0.0f, {0.0f, 1.0f}, {0}, {0}};
 static bool g_restore_attempted;
 static bool g_persist_ready;
+#ifdef TELEMETRY_ENABLED
 static bool g_network_value_seen;
 static bool g_kg50_network_value_seen;
 static bool g_thermal_network_value_seen;
 static bool g_filter_network_value_seen;
 static bool g_input_network_value_seen;
 static uint32_t g_last_refresh_ms;
+#endif
 
 volatile uint32_t g_daq_calibration_updates __attribute__((used, externally_visible));
 volatile uint32_t g_daq_calibration_restores __attribute__((used, externally_visible));
@@ -72,6 +74,7 @@ void daq_calibration_restore(void)
   g_daq_calibration_restores++;
 }
 
+#ifdef TELEMETRY_ENABLED
 static SedsResult apply_calibration(const SedsPacketView *packet, void *user)
 {
   (void)user;
@@ -178,6 +181,8 @@ SedsResult daq_calibration_poll(SedsRouter *router)
     result = seds_router_request_managed_variable(router, SEDS_DT_DAQ_KG50_INPUT);
   return result;
 }
+
+#endif
 
 daq_calibration_t daq_calibration_current(void)
 {

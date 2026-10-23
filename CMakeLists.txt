@@ -26,6 +26,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
 # Core project settings
 project(${CMAKE_PROJECT_NAME})
+option(ENABLE_TELEMETRY "Enable the telemetry subsystem" ON)
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
 # Enable CMake support for ASM and C languages
@@ -82,14 +83,14 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # STM32CubeMX generated application sources
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/can_bus.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/can_tx_queue.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/board_link_uart.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry_thread.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry.c 
+    "$<$<BOOL:${ENABLE_TELEMETRY}>:${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/board_link_uart.c>"
+    "$<$<BOOL:${ENABLE_TELEMETRY}>:${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry_thread.c>"
+    "$<$<BOOL:${ENABLE_TELEMETRY}>:${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry.c>"
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/flight_state_cache.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/persistent_store.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_calibration.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_log_clock.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry_hooks.c 
+    "$<$<BOOL:${ENABLE_TELEMETRY}>:${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_log_clock.c>"
+    "$<$<BOOL:${ENABLE_TELEMETRY}>:${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry_hooks.c>"
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/sd_card.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_adc1.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_adc4.c
@@ -139,10 +140,11 @@ set(SEDSNET_ENV_STARTING_QUEUE_SIZE "1024" CACHE STRING "" FORCE)
 set(SEDSNET_ENV_QUEUE_GROW_STEP "1.25" CACHE STRING "" FORCE)
 set(SEDSNET_ENV_PAYLOAD_COMPRESS_THRESHOLD "30" CACHE STRING "" FORCE)
 set(SEDSNET_TARGET "thumbv8m.main-none-eabihf" CACHE STRING "" FORCE)
-include(cmake/sedsnet_fetch.cmake)
+if(ENABLE_TELEMETRY)
+    include(cmake/sedsnet_fetch.cmake)
+endif()
 
 # Option defaults to ON
-option(ENABLE_TELEMETRY "Enable the telemetry subsystem" ON)
 option(ENABLE_TELEMETRY_CAN_BUS "Use CAN as the telemetry transport" ON)
 option(ENABLE_TELEMETRY_BOARD_LINK_UART "Use USART1 DMA as the telemetry transport" OFF)
 set(TELEMETRY_TIMESYNC_MASTER_PRIO "-1" CACHE STRING
@@ -173,11 +175,11 @@ else()
     # Not defined → disabled
 endif()
 
-if(ENABLE_TELEMETRY_CAN_BUS)
+if(ENABLE_TELEMETRY AND ENABLE_TELEMETRY_CAN_BUS)
     add_compile_definitions(TELEMETRY_CAN_BUS)
 endif()
 
-if(ENABLE_TELEMETRY_BOARD_LINK_UART)
+if(ENABLE_TELEMETRY AND ENABLE_TELEMETRY_BOARD_LINK_UART)
     add_compile_definitions(TELEMETRY_BOARD_LINK_UART)
 endif()
 
@@ -200,7 +202,7 @@ set(LAUNCHCORE_METADATA0_BASE 0x081F8000)
 set(LAUNCHCORE_DELTA_SIZE 0x00020000)
 include(cmake/launchcore_stm32.cmake)
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    "${CMAKE_SOURCE_DIR}/Core/Src/sedsnet_hardware_crypto.c"
+    "$<$<BOOL:${ENABLE_TELEMETRY}>:${CMAKE_SOURCE_DIR}/Core/Src/sedsnet_hardware_crypto.c>"
     "${CMAKE_SOURCE_DIR}/Bootloader/sha256_hardware.c"
     "${CMAKE_SOURCE_DIR}/Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_hash.c"
     "${CMAKE_SOURCE_DIR}/Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_hash_ex.c")
@@ -208,5 +210,5 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 # Board-owned progress watchdog; deliberately independent of SEDSnet.
 option(ENABLE_BOARD_WATCHDOG "Enable independent hardware watchdog with task progress gating" ON)
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/Core/Src/board_watchdog.c)
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/Core/Src/board_health.c)
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE "$<$<BOOL:${ENABLE_TELEMETRY}>:${CMAKE_SOURCE_DIR}/Core/Src/board_health.c>")
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE BOARD_WATCHDOG_ENABLE=$<BOOL:${ENABLE_BOARD_WATCHDOG}>)

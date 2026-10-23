@@ -27,6 +27,7 @@
 #include "sedsnet_config.h"
 #include "telemetry.h"
 #include "DAQ-Threads.h"
+#include "daq_calibration.h"
 #if (DISABLE_SD_CARD == 0U)
 #include "sd_card.h"
 #endif
@@ -77,9 +78,13 @@ UINT App_ThreadX_Init(VOID *memory_ptr)
   /* USER CODE END App_ThreadX_MEM_POOL */
 
   /* USER CODE BEGIN App_ThreadX_Init */
+#ifdef TELEMETRY_ENABLED
   telemetry_set_byte_pool(byte_pool);
   /* Initialize telemetry lock used by Rust (telemetry_lock/telemetry_unlock). */
   telemetry_init_lock();
+#else
+  daq_calibration_restore();
+#endif
 #if (DISABLE_SD_CARD == 0U)
   ret = sd_card_init(byte_pool);
   if (ret == TX_SUCCESS)
@@ -92,11 +97,13 @@ UINT App_ThreadX_Init(VOID *memory_ptr)
     }
   }
 #endif
+#ifdef TELEMETRY_ENABLED
   ret = create_telemetry_thread(byte_pool);
   if (ret != TX_SUCCESS)
   {
     Error_Handler();
   }
+#endif
   ret = create_daq_thread();
   g_daq_thread_create_status = ret;
   if (ret != TX_SUCCESS)

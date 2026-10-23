@@ -32,8 +32,8 @@ int main(void) {
     def test_acquisition_never_queries_router_clock(self):
         s=(ROOT/'Core/Src/daq_thread.c').read_text()
         drain=s.split('static uint16_t daq_drain_ext_adc',1)[1].split('static void daq_publish_loadcell',1)[0]
-        self.assertIn('telemetry_unix_ms_cached()',drain)
-        self.assertNotIn('telemetry_unix_ms()',drain)
+        self.assertIn('daq_log_unix_ms_cached()',drain)
+        self.assertNotIn('daq_log_unix_ms()',drain)
         s=(ROOT/'Core/Src/telemetry.c').read_text()
         read=s.split('uint64_t telemetry_unix_ms_cached(void)',1)[1].split('uint64_t telemetry_unix_ms(void)',1)[0]
         self.assertNotIn('seds_router_',read)

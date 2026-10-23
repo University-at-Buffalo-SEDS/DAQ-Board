@@ -142,7 +142,7 @@ int main(void) {
 '''
         with tempfile.TemporaryDirectory() as tmp:
             binary = pathlib.Path(tmp) / 'calibration-test'
-            result = subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
+            result = subprocess.run(['cc', '-DTELEMETRY_ENABLED=1', '-std=c11', '-Wall', '-Wextra', '-Werror',
                                      '-x', 'c', '-', '-o', str(binary)], input=harness,
                                     text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)

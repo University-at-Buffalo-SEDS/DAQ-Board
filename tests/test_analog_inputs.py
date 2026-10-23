@@ -101,7 +101,7 @@ class AnalogInputTests(unittest.TestCase):
             (p/'main.h').write_text('#include "stm32u5xx_hal.h"\n')
             (p/'tx_api.h').write_text('typedef unsigned UINT;\n#define TX_SUCCESS 0\n#define TX_PTR_ERROR 1\n#define TX_NOT_DONE 2\n')
             (p/'test.c').write_text(HARNESS)
-            run = subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-I',str(p),'-I',str(ROOT/'Core/Inc'),str(ROOT/'Core/Src/daq_adc1.c'),str(ROOT/'Core/Src/daq_adc4.c'),str(p/'test.c'),'-o',str(p/'test')],capture_output=True,text=True)
+            run = subprocess.run(['cc','-DTELEMETRY_ENABLED=1','-std=c11','-Wall','-Wextra','-Werror','-I',str(p),'-I',str(ROOT/'Core/Inc'),str(ROOT/'Core/Src/daq_adc1.c'),str(ROOT/'Core/Src/daq_adc4.c'),str(p/'test.c'),'-o',str(p/'test')],capture_output=True,text=True)
             self.assertEqual(run.returncode,0,run.stderr)
             subprocess.run([str(p/'test')],check=True)
 
@@ -174,7 +174,7 @@ int main(void) {
 '''
         with tempfile.TemporaryDirectory() as tmp:
             binary=pathlib.Path(tmp)/'publish-test'
-            result=subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(binary)],input=harness,text=True,capture_output=True)
+            result=subprocess.run(['cc','-DTELEMETRY_ENABLED=1','-std=c11','-Wall','-Wextra','-Werror','-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(binary)],input=harness,text=True,capture_output=True)
             self.assertEqual(result.returncode,0,result.stderr)
             subprocess.run([str(binary)],check=True)
 
@@ -218,7 +218,7 @@ int main(void) {
             (p/'tx_api.h').write_text('typedef unsigned UINT;')
             (p/'stm32u5xx_hal.h').write_text(HAL)
             binary=p/'snapshot-test'
-            result=subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-I',str(p),'-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(binary)],input=harness,text=True,capture_output=True)
+            result=subprocess.run(['cc','-DTELEMETRY_ENABLED=1','-std=c11','-Wall','-Wextra','-Werror','-I',str(p),'-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(binary)],input=harness,text=True,capture_output=True)
             self.assertEqual(result.returncode,0,result.stderr)
             subprocess.run([str(binary)],check=True)
 
@@ -267,7 +267,7 @@ int main(void) {
         with tempfile.TemporaryDirectory() as tmp:
             p=pathlib.Path(tmp);(p/'tx_api.h').write_text('typedef unsigned UINT;');(p/'stm32u5xx_hal.h').write_text(HAL)
             binary=p/'queue-test'
-            result=subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-I',str(p),'-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(binary)],input=harness,text=True,capture_output=True)
+            result=subprocess.run(['cc','-DTELEMETRY_ENABLED=1','-std=c11','-Wall','-Wextra','-Werror','-I',str(p),'-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(binary)],input=harness,text=True,capture_output=True)
             self.assertEqual(result.returncode,0,result.stderr)
             subprocess.run([str(binary)],check=True)
 
@@ -322,6 +322,6 @@ int main(void){
 '''
         with tempfile.TemporaryDirectory() as tmp:
             binary=pathlib.Path(tmp)/'scheduling-test'
-            result=subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(binary)],input=harness,text=True,capture_output=True)
+            result=subprocess.run(['cc','-DTELEMETRY_ENABLED=1','-std=c11','-Wall','-Wextra','-Werror','-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(binary)],input=harness,text=True,capture_output=True)
             self.assertEqual(result.returncode,0,result.stderr)
             subprocess.run([str(binary)],check=True)

@@ -20,7 +20,7 @@ def run_c(code):
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory)
         (path / "test.c").write_text(code)
-        subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
+        subprocess.run(["cc", "-DTELEMETRY_ENABLED=1", "-std=c11", "-Wall", "-Wextra", "-Werror",
                         "-Wno-unused-variable", "-I", str(ROOT / "Core/Inc"),
                         str(path / "test.c"), "-o", str(path / "test")], check=True)
         subprocess.run([str(path / "test")], check=True)
@@ -57,7 +57,7 @@ static UINT tx_block_allocate(TX_BLOCK_POOL*p,VOID**v,unsigned wait){(void)p;ass
 static UINT tx_block_release(VOID*p){free(p);released++;return 0;}
 static UINT tx_queue_send(TX_QUEUE*q,VOID*p,unsigned wait){(void)q;assert(wait==TX_NO_WAIT);if(fail_send)return 1;assert(!queued);message=*(ULONG*)p;queued=1;return 0;}
 static UINT tx_queue_receive(TX_QUEUE*q,VOID*p,unsigned wait){(void)q;assert(wait==TX_WAIT_FOREVER);if(!queued)longjmp(finished,1);*(ULONG*)p=message;queued=0;return 0;}
-static uint64_t telemetry_now_ms(void){return 12350;}
+static uint64_t daq_log_monotonic_ms(void){return 12350;}
 static void daq_publish_loadcell(const daq_snapshot_t*s,const daq_calibration_t*c){assert(s->monotonic_ms==12300 && s->ext_adc_loadcell_kg1000==1.25f && c->slope==2);published++;}
 static void daq_publish_kg50(float value,uint8_t input,uint64_t time,const daq_calibration_t*c){assert(input==1 && value==2.5f && time==12300 && c->slope==2);published++;}
 static int log_telemetry_captured(unsigned type,const void*data,size_t count,size_t size,uint64_t time){assert(type==140 && *(const float*)data==30 && count==1 && size==4 && time==12300);published++;return 0;}
