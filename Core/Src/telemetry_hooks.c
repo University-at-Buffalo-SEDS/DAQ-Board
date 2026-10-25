@@ -10,7 +10,9 @@ extern volatile uint32_t g_telemetry_tlsf_free_bytes, g_telemetry_tlsf_free_bloc
 extern volatile uint32_t g_telemetry_tlsf_live_bytes, g_telemetry_tlsf_region_bytes;
 #endif
 
+#ifndef TELEMETRY_USE_TLSF
 static TX_BYTE_POOL *rust_byte_pool_external = NULL;
+#endif
 static TX_MUTEX g_telemetry_mutex;
 static UINT g_telemetry_mutex_ready = 0U;
 volatile uint32_t g_telemetry_lock_get_fail = 0U;
