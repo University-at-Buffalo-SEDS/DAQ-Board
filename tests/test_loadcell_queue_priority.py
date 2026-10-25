@@ -26,7 +26,7 @@ class LoadcellQueuePriorityTests(unittest.TestCase):
         types = {x['name']: x for x in json.loads((ROOT / 'config/sedsnet.json').read_text())['types']}
         source = r'''
 extern crate alloc;
-#[derive(Debug,PartialEq)] pub enum TelemetryError { Io(&'static str), PacketTooLarge(&'static str) }
+#[derive(Debug,PartialEq)] pub enum TelemetryError { Io(&'static str), PacketTooLarge(&'static str), BadArg }
 pub type TelemetryResult<T> = Result<T,TelemetryError>;
 mod memory_admission { pub fn check(_:usize,_:usize)->crate::TelemetryResult<()> { Ok(()) } }
 #[path="QUEUE"] mod queue;
