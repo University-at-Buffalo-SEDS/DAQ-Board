@@ -274,7 +274,7 @@ configuration, and the additional load on acquisition/network/SD.
 Watchdogs are enabled by default and require the matching bootloader.
 Use `--no-watchdog` only for a diagnostic build.
 
-## Experimental SEDSnet development builds
+## SEDSnet build configuration
 
 Use `python3 build.py build --release --sedsnet-ref dev` to build the current
 SEDSnet `dev` commit. The same option is accepted by `test` and `flash`.
@@ -283,10 +283,10 @@ when the network is unavailable the last usable on-disk source is retained.
 The selected revision is printed during configure. An explicit CMake source
 override remains local and is never fetched or reset.
 
-### Experimental packet arena
+### Default TLSF and compact storage
 
 ```sh
-python3 build.py build --release --packet-store compact
+python3 build.py build --release
 ```
 
 This selects the latest compatible SEDSnet `main` commit and initializes a 8192-byte,
@@ -294,8 +294,8 @@ This selects the latest compatible SEDSnet `main` commit and initializes a 8192-
 pool and leaves ThreadX scheduling unchanged. Compression stays disabled.
 Use `--packet-store heap` to disable the arena, including in a previously enabled build cache.
 Startup fails cleanly if the reservation does not fit; router retries reuse
-the arena. This is an opt-in development build, not hardware qualification.
+the arena. TLSF and compact stores are the defaults; physical hardware qualification remains separate.
 
 `--allocator tlsf` selects the board-owned TLSF allocator for SEDSnet.
-ThreadX scheduling and thread stacks retain their existing ownership. The default is `threadx`.
+ThreadX scheduling and thread stacks retain their existing ownership. The defaults are `tlsf` and `compact`. Use `--allocator threadx --packet-store heap` for an explicit fallback.
 TLSF coalesces adjacent free blocks; packet-arena compaction is a separate option.

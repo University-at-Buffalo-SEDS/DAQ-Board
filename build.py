@@ -421,8 +421,8 @@ class BuildConfig:
     project_name: str
     artifact: Optional[str]  # base name without extension (if known/forced)
 
-    allocator: str = "threadx"
-    packet_store: str = "heap"
+    allocator: str = "tlsf"
+    packet_store: str = "compact"
     sedsnet_ref: str = "main"
     watchdog: bool = True
 
@@ -852,10 +852,10 @@ def make_parser() -> argparse.ArgumentParser:
         mode = sp.add_mutually_exclusive_group()
         mode.add_argument("--debug", action="store_true", help="Debug build (default).")
         mode.add_argument("--release", action="store_true", help="Release build.")
-        sp.add_argument("--allocator", choices=["threadx", "tlsf"], default="threadx",
-                        help="SEDSnet allocator (default: threadx); scheduling remains ThreadX.")
-        sp.add_argument("--packet-store", choices=["heap", "compact"], default="heap",
-                        help="Opt-in packet arena; uses main unless --sedsnet-ref is explicit.")
+        sp.add_argument("--allocator", choices=["threadx", "tlsf"], default="tlsf",
+                        help="SEDSnet allocator (default: tlsf); scheduling remains ThreadX.")
+        sp.add_argument("--packet-store", choices=["heap", "compact"], default="compact",
+                        help="Compact packet arena (default); uses main unless --sedsnet-ref is explicit.")
         sp.add_argument("--sedsnet-ref", choices=["main", "dev"], default=None,
                         help="SEDSnet branch; current remote commit is fetched, with offline fallback.")
         sp.add_argument("--no-telemetry", action="store_true", help="Configure with -DENABLE_TELEMETRY=OFF")

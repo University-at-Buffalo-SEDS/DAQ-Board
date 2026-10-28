@@ -39,6 +39,7 @@ endif()
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
 include(cmake/packet_store.cmake)
+option(SEDSNET_COMPACT_PACKET_STORE "Use bounded SEDSnet packet stores" ON)
 include(cmake/tlsf_allocator.cmake)
 set(DAQ_BROADCAST_RATE_HZ "250" CACHE STRING "Reports per second per loadcell (ADC/SD rates are independent)")
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE DAQ_BROADCAST_RATE_HZ=${DAQ_BROADCAST_RATE_HZ}U)
