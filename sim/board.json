@@ -112,7 +112,7 @@
       {"name": "daq_first_overrun_sample", "symbol": "g_daq_first_overrun_sample"},
       {"name": "analog_reports", "symbol": "g_daq_analog_publish_ok_count", "minimum": 1},
       {"name": "analog_report_failures", "symbol": "g_daq_analog_publish_fail_count", "maximum": 0},
-      {"name": "analog_report_retry_attempts", "symbol": "g_daq_analog_publish_retry_count"},
+      {"name": "network_publication_failures", "symbol": "g_daq_network_failed", "maximum": 0},
       {"name": "analog_snapshot_drops", "symbol": "g_daq_analog_work_drop_count", "maximum": 0},
       {"name": "daq_thread_create_status", "symbol": "g_daq_thread_create_status"},
       {"name": "daq_sample_failures", "symbol": "g_daq_sample_fail_count"},

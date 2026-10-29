@@ -155,8 +155,10 @@ class QualificationContractTests(unittest.TestCase):
         self.assertIn("const daq_calibration_t calibration = daq_calibration_current();", daq)
         self.assertLess(
             daq.index('sd_card_enqueue_csv_row("kg1000_network"'),
-            daq.index("log_telemetry_captured(SEDS_DT_KG1000"),
+            daq.index("daq_network_offer(DAQ_NETWORK_KG1000, SEDS_DT_KG1000"),
         )
+        self.assertIn("log_telemetry_captured(sample.type, sample.values,", daq)
+        self.assertIn("sample.count, sizeof(float), sample.captured_ms)", daq)
         self.assertIn("g_daq_sd_network_row_ok_count", daq)
         self.assertIn("g_daq_raw_samples_drained_count", daq)
         self.assertNotIn("sd_card_request_flush();", daq)
