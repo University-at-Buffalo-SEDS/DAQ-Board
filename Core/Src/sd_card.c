@@ -1,4 +1,5 @@
 #include "sd_card.h"
+#include "daq_chamber_pressure.h"
 #include "daq_rates.h"
 
 #include "fx_api.h"
@@ -41,6 +42,7 @@ UINT _fx_partition_offset_calculate(void *partition_sector, UINT partition,
 typedef struct
 {
   uint16_t len;
+  uint32_t route_epoch;
   daq_calibration_t calibration;
   uint64_t session;
   char line[];
@@ -64,12 +66,16 @@ static ULONG g_sd_raw_queue_storage[SD_RAW_QUEUE_DEPTH];
 typedef struct {
   pressure_sd_batch_t batch;
   uint64_t session;
+  uint32_t route_epoch;
 } sd_pressure_message_t;
 #define SD_PRESSURE_MESSAGE_WORDS ((sizeof(sd_pressure_message_t) + sizeof(ULONG) - 1U) / sizeof(ULONG))
 _Static_assert(SD_PRESSURE_MESSAGE_WORDS <= 16U, "ThreadX pressure message bounds");
 static TX_QUEUE g_sd_pressure_queue;
 static ULONG g_sd_pressure_queue_storage[16U * SD_PRESSURE_MESSAGE_WORDS];
 static uint8_t g_sd_pressure_pending;
+static uint32_t g_sd_pressure_pending_epoch;
+static uint8_t g_sd_line_pending;
+static uint32_t g_sd_line_pending_epoch;
 volatile uint32_t g_sd_pressure_records_enqueued;
 volatile uint32_t g_sd_pressure_records_dropped;
 volatile uint32_t g_sd_pressure_records_written;
@@ -82,7 +88,16 @@ static TX_EVENT_FLAGS_GROUP g_sd_flags;
 static TX_BYTE_POOL g_sd_line_pool, g_sd_raw_pool;
 static UCHAR g_sd_line_pool_storage[384U * (offsetof(sd_line_slot_t, line) + SD_LINE_MAX)] SD_ALIGN_32;
 static UCHAR g_sd_raw_pool_storage[DAQ_SD_RAW_QUEUE_DEPTH *
-    (offsetof(sd_raw_slot_t, samples) + SD_RAW_BATCH_MAX * sizeof(sd_raw_adc_record_t))] SD_ALIGN_32;
+    (offsetof(sd_raw_slot_t, samples) + 12U * sizeof(sd_raw_adc_record_t))] SD_ALIGN_32;
+/* Keep the original byte reserve when the fast ADC drain batch grows. This
+ * is a variable-size byte pool, not sixteen-record fixed slots. At5550/s,
+ * 800ms of40-byte samples +401 headers/16-byte pool overhead +one16-record
+ * tail fits the existing230976-byte pool. Do not shrink its stall reserve. */
+_Static_assert(DAQ_CHAMBER_SCAN_MASK == 0U ||
+    ((DAQ_SD_RAW_BUFFER_MS * DAQ_ADC_READ_RATE_HZ + 999U) / 1000U) * sizeof(sd_raw_adc_record_t) +
+    DAQ_SD_RAW_QUEUE_DEPTH * (offsetof(sd_raw_slot_t, samples) + 16U) +
+    SD_RAW_BATCH_MAX * sizeof(sd_raw_adc_record_t) <= sizeof(g_sd_raw_pool_storage),
+    "Chamber sample rate exceeds the existing800ms SD raw byte reserve");
 _Static_assert(sizeof(g_sd_line_pool_storage) <= 180U * 1024U, "SD telemetry RAM budget");
 _Static_assert(sizeof(g_sd_raw_pool_storage) <= 300U * 1024U, "SD raw RAM budget");
 
@@ -112,73 +127,93 @@ static uint8_t g_sd_services_initialized = 0U;
 static uint64_t g_sd_session, g_sd_last_launch_session, g_sd_close_unix_ms;
 static uint64_t g_sd_raw_session, g_sd_telemetry_session;
 static uint64_t g_sd_close_local_ms;
-static uint8_t g_sd_launch_closed;
+static uint8_t g_sd_launch_closed, g_sd_deadline_anchored;
+static uint8_t g_sd_launch_flush_pending;
+/* Orders session transitions across the independent CSV and pressure queues.
+ * A late pressure batch must drain before a newer ordinary CSV row rotates
+ * their shared file. These are bounded queue generations, not sample rates. */
+static uint32_t g_sd_route_epoch;
+
+/* Caller holds the short IRQ lock; only the local extended uptime is read.
+ * No router/network-clock lock is acquired from a receive callback. */
+static uint64_t sd_route_session_locked(uint64_t local)
+{
+  if (!g_sd_launch_closed && g_sd_deadline_anchored && local >= g_sd_close_local_ms) {
+    g_sd_launch_closed = 1U;
+    ++g_sd_route_epoch;
+  }
+  return g_sd_deadline_anchored && !g_sd_launch_closed ? g_sd_session : 0U;
+}
 
 static uint64_t sd_run_snapshot(void)
 {
-  uint64_t result;
   const uint32_t mask = __get_PRIMASK();
   __disable_irq();
-  result = g_sd_session;
-  if (mask == 0U) __enable_irq();
+  const uint64_t result = sd_route_session_locked(daq_log_monotonic_ms());
+  __set_PRIMASK(mask);
   return result;
 }
 
 static uint8_t sd_launch_finished(void)
 {
-  /* Convert once to a monotonic deadline: losing network time must not leave
-   * the launch file open indefinitely, or reopen it on a backwards correction. */
-  uint32_t mask = __get_PRIMASK();
-  __disable_irq();
-  const uint64_t deadline = g_sd_close_unix_ms;
-  const uint8_t finished_before = g_sd_launch_closed;
-  const uint8_t needs_utc = g_sd_close_local_ms == 0U;
-  if (mask == 0U) __enable_irq();
-  if (deadline == 0U || finished_before) return finished_before;
-  /* Never acquire the router clock lock for every raw/report row. Once mapped,
-   * the local deadline is sufficient until a new managed clock arrives. */
+  /* Map UTC once; later loss/correction cannot extend the monotonic cutoff.
+   * Without a UTC mapping, ordinary logging continues until the session can
+   * be dated honestly. Retained expired sessions never open a launch file. */
+  uint32_t mask = __get_PRIMASK(); __disable_irq();
+  const uint8_t needs_utc = g_sd_close_unix_ms != 0U && !g_sd_deadline_anchored && !g_sd_launch_closed;
+  __set_PRIMASK(mask);
   const uint64_t utc = needs_utc ? daq_log_unix_ms() : 0U;
   const uint64_t local = daq_log_monotonic_ms();
-  mask = __get_PRIMASK();
-  __disable_irq();
-  if (g_sd_close_unix_ms != 0U && g_sd_close_local_ms == 0U && utc != 0U)
+  mask = __get_PRIMASK(); __disable_irq();
+  if (g_sd_close_unix_ms != 0U && !g_sd_deadline_anchored && !g_sd_launch_closed && utc != 0U) {
     g_sd_close_local_ms = local + (utc < g_sd_close_unix_ms ? g_sd_close_unix_ms - utc : 0U);
-  if (g_sd_close_unix_ms != 0U &&
-      ((g_sd_close_local_ms != 0U && local >= g_sd_close_local_ms) ||
-       (utc != 0U && utc >= g_sd_close_unix_ms))) g_sd_launch_closed = 1U;
+    g_sd_deadline_anchored = 1U;
+    ++g_sd_route_epoch;
+  }
+  (void)sd_route_session_locked(local);
   const uint8_t finished = g_sd_launch_closed;
-  if (mask == 0U) __enable_irq();
+  __set_PRIMASK(mask);
   return finished;
 }
 
 void sd_card_set_launch_clock(uint64_t session, uint64_t close_unix_ms)
 {
   const uint64_t now = session != 0U ? daq_log_unix_ms() : 0U;
-  const uint64_t local = session != 0U ? daq_log_monotonic_ms() : 0U;
-  const uint32_t mask = __get_PRIMASK();
-  __disable_irq();
+  const uint64_t local = daq_log_monotonic_ms();
+  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  const uint64_t before = sd_route_session_locked(local);
   if (session == 0U) {
     g_sd_session = 0U; g_sd_close_unix_ms = 0U;
-    g_sd_close_local_ms = 0U; g_sd_launch_closed = 0U;
-  }
-  else if (session > g_sd_last_launch_session)
-  {
+    g_sd_close_local_ms = 0U; g_sd_launch_closed = 0U; g_sd_deadline_anchored = 0U;
+  } else if (session > g_sd_last_launch_session) {
     g_sd_last_launch_session = session;
-    /* A retained clock from a finished launch must not restart it on reboot. */
-    if (now == 0U || now < close_unix_ms) {
-      g_sd_session = session;
-      g_sd_close_unix_ms = close_unix_ms;
-      g_sd_close_local_ms = now != 0U ? local + close_unix_ms - now : 0U;
-      g_sd_launch_closed = 0U;
+    g_sd_session = session; g_sd_close_unix_ms = close_unix_ms;
+    g_sd_deadline_anchored = now != 0U;
+    g_sd_launch_closed = now != 0U && now >= close_unix_ms;
+    g_sd_close_local_ms = now != 0U ? local + (now < close_unix_ms ? close_unix_ms - now : 0U) : 0U;
+  } else if (g_sd_session == session && !g_sd_launch_closed && close_unix_ms != g_sd_close_unix_ms) {
+    /* Receiver revision ordering has established a genuinely newer T0. Move
+     * the existing monotonic mapping by the absolute delta, never by a fresh
+     * wall/UTC reading. A closed/tombstoned session never enters this branch. */
+    const uint64_t prior = g_sd_close_unix_ms;
+    g_sd_close_unix_ms = close_unix_ms;
+    if (g_sd_deadline_anchored) {
+      if (close_unix_ms < prior) {
+        const uint64_t earlier = prior - close_unix_ms;
+        g_sd_close_local_ms = g_sd_close_local_ms > earlier ? g_sd_close_local_ms - earlier : 0U;
+      } else {
+        const uint64_t later = close_unix_ms - prior;
+        if (UINT64_MAX - g_sd_close_local_ms < later) g_sd_launch_closed = 1U;
+        else g_sd_close_local_ms += later;
+      }
+    } else if (now != 0U) {
+      g_sd_close_local_ms = local + (now < close_unix_ms ? close_unix_ms - now : 0U);
+      g_sd_deadline_anchored = 1U;
     }
   }
-  else if (g_sd_session == session && !g_sd_launch_closed &&
-           g_sd_close_unix_ms != close_unix_ms) {
-    g_sd_close_unix_ms = close_unix_ms;
-    if (now != 0U)
-      g_sd_close_local_ms = local + (now < close_unix_ms ? close_unix_ms - now : 0U);
-  }
-  if (mask == 0U) __enable_irq();
+  const uint64_t after = sd_route_session_locked(local);
+  if (before != after) ++g_sd_route_epoch;
+  __set_PRIMASK(mask);
 }
 
 volatile uint32_t g_sd_line_drop_count = 0U;
@@ -443,6 +478,13 @@ static UINT sd_open_log(FX_FILE *file, char *g_sd_filename, size_t filename_size
       status = FX_IO_ERROR;
     else
       status = fx_file_write(file, calibration_line, (ULONG)len);
+    if (status == FX_SUCCESS) {
+      const int pressure_len = snprintf(calibration_line, sizeof(calibration_line),
+          "# chamber_pressure,p4_adc_channel=%d,model=OMEGA_PX309-1KG5V,raw_units=connector_V,converted_units=psig,divider_ratio=11,zero_V=0,span_V=5,span_psig=1000\r\n",
+          DAQ_CHAMBER_ADC_CHANNEL);
+      status = pressure_len > 0 && (size_t)pressure_len < sizeof(calibration_line)
+          ? fx_file_write(file, calibration_line, (ULONG)pressure_len) : FX_IO_ERROR;
+    }
   }
   if (status == FX_SUCCESS)
   {
@@ -708,6 +750,32 @@ static UINT sd_write_bytes(const void *data, size_t len)
 /* ThreadX byte pools may return word-aligned memory. Retain the original
  * allocation before an explicitly 8-byte-aligned record (uint64_t members).
  * Allocation is bounded to the static pools and never waits for free memory. */
+/* The writer is the only consumer. FIFO head peeks include a retained failed
+ * row/batch; producers stamp and publish the epoch in one short critical
+ * section. This prevents normal/launch file ping-pong across the two queues. */
+static uint8_t sd_telemetry_epoch_ready(uint32_t epoch, uint8_t pressure)
+{
+  uint32_t other = 0U;
+  uint8_t present = 0U;
+  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  if (pressure) {
+    if (g_sd_line_pending) { other = g_sd_line_pending_epoch; present = 1U; }
+    else if (g_sd_queue.tx_queue_enqueued != 0U) {
+      const sd_line_slot_t *head = (const sd_line_slot_t *)(uintptr_t)*g_sd_queue.tx_queue_read;
+      other = head->route_epoch; present = 1U;
+    }
+  } else {
+    if (g_sd_pressure_pending) { other = g_sd_pressure_pending_epoch; present = 1U; }
+    else if (g_sd_pressure_queue.tx_queue_enqueued != 0U) {
+      memcpy(&other, (const UCHAR *)g_sd_pressure_queue.tx_queue_read +
+             offsetof(sd_pressure_message_t, route_epoch), sizeof(other));
+      present = 1U;
+    }
+  }
+  __set_PRIMASK(mask);
+  return !present || (int32_t)(epoch - other) <= 0;
+}
+
 static void *sd_pool_allocate(TX_BYTE_POOL *pool, size_t bytes)
 {
   void *allocation = NULL;
@@ -795,12 +863,15 @@ static uint8_t sd_service_telemetry_rows(void)
       ULONG message;
       if (tx_queue_receive(&g_sd_queue, &message, TX_NO_WAIT) != TX_SUCCESS) break;
       pending = (sd_line_slot_t *)(uintptr_t)message;
+      g_sd_line_pending = pending != NULL;
+      if (pending) g_sd_line_pending_epoch = pending->route_epoch;
     }
+    if (pending && !sd_telemetry_epoch_ready(pending->route_epoch, 0U)) break;
     serviced = 1U;
     if (!pending) continue;
     if (sd_write_telemetry_row(pending) != FX_SUCCESS) { g_sd_write_error_count++; break; }
     g_sd_csv_rows_written_count++;
-    sd_free_slot(pending); pending = NULL;
+    sd_free_slot(pending); pending = NULL; g_sd_line_pending = 0U;
   }
   return serviced;
 }
@@ -824,11 +895,13 @@ static uint8_t sd_service_pressure_rows(void)
     if (!g_sd_pressure_pending) {
       if (tx_queue_receive(&g_sd_pressure_queue, pending.words, TX_NO_WAIT) != TX_SUCCESS) break;
       g_sd_pressure_pending = 1U; index = 0U; slot->len = 0U;
+      g_sd_pressure_pending_epoch = pending.message.route_epoch;
       slot->session = pending.message.session;
       /* Pressure raw/converted values come from VB; DAQ coefficients are only
        * the common file metadata and never transform a pressure record. */
       (void)sd_calibration_snapshot(&slot->calibration);
     }
+    if (!sd_telemetry_epoch_ready(pending.message.route_epoch, 1U)) break;
     serviced = 1U;
     const pressure_sd_batch_t *batch = &pending.message.batch;
     if (slot->len == 0U) {
@@ -852,6 +925,31 @@ static uint8_t sd_service_pressure_rows(void)
     if (++index == PRESSURE_SD_SAMPLES) g_sd_pressure_pending = 0U;
   }
   return serviced;
+}
+
+/* Close a drained launch handle exactly once, retrying buffered data,
+ * close and final directory/media flush failures without reopening it. */
+static void sd_close_finished_launch_files(uint8_t raw_drained, uint8_t telemetry_drained)
+{
+  (void)sd_launch_finished();
+  const uint64_t current_session = sd_run_snapshot();
+  {
+    if (g_file_open && g_sd_raw_session && g_sd_raw_session != current_session && raw_drained) {
+      if (sd_flush_pending() == FX_SUCCESS && sd_close_log(&g_sd_file, g_sd_filename) == FX_SUCCESS) {
+        g_file_open = 0U; g_sd_launch_flush_pending = 1U;
+      } else ++g_sd_write_error_count;
+    }
+    if (g_telemetry_file_open && g_sd_telemetry_session && g_sd_telemetry_session != current_session && telemetry_drained) {
+      if (sd_flush_telemetry_pending() == FX_SUCCESS &&
+          sd_close_log(&g_sd_telemetry_file, g_sd_telemetry_filename) == FX_SUCCESS) {
+        g_telemetry_file_open = 0U; g_sd_launch_flush_pending = 1U;
+      } else ++g_sd_write_error_count;
+    }
+  }
+  if (g_sd_launch_flush_pending) {
+    if (fx_media_flush(&g_sd_media) == FX_SUCCESS) g_sd_launch_flush_pending = 0U;
+    else ++g_sd_write_error_count;
+  }
 }
 
 void sd_card_writer_thread_entry(ULONG initial_input)
@@ -971,7 +1069,7 @@ void sd_card_writer_thread_entry(ULONG initial_input)
           const int len = snprintf(line, sizeof(line), "%s,%s,%s,,%ld,%s,%s,%s,%s,%ld,%s,%u,%s\r\n",
                                    stamp_text,
                                    uptime_text,
-                                   sample->channel < 8U ? (const char *const[]){
+                                   daq_chamber_is_channel(sample->channel) ? "chamber_pressure_raw_volts_psi" : sample->channel < 8U ? (const char *const[]){
                                      "mcp3564r_raw", "kg50_raw", "mcp3564r_ch2_raw", "mcp3564r_ch3_raw",
                                      "mcp3564r_ch4_raw", "mcp3564r_ch5_raw", "mcp3564r_ch6_raw", "mcp3564r_ch7_raw"
                                    }[sample->channel] : sample->channel == 9U ? "mcp3564r_ch2_ch3_gain16_raw" : "invalid_adc_channel",
@@ -1022,6 +1120,7 @@ void sd_card_writer_thread_entry(ULONG initial_input)
           (sd_flush_telemetry_pending() == FX_SUCCESS) &&
           (fx_media_flush(&g_sd_media) == FX_SUCCESS))
       {
+        g_sd_launch_flush_pending = 0U;
         g_sd_flush_count++;
         g_sd_raw_records_flushed_count = g_sd_raw_records_written_count;
         g_sd_pressure_records_flushed = g_sd_pressure_records_written;
@@ -1035,22 +1134,11 @@ void sd_card_writer_thread_entry(ULONG initial_input)
       if (flush_ms > g_sd_max_flush_ms) g_sd_max_flush_ms = flush_ms;
     }
 
-    /* Producers stop enqueueing at T+120 s; drain their already queued data,
-     * close both streams once, and leave them closed until reset/new launch. */
-    if ((g_file_open != 0U || g_telemetry_file_open != 0U) &&
-        sd_launch_finished() && pending_raw == NULL && g_sd_raw_slots_used == 0U &&
-        g_sd_line_slots_used == 0U && g_sd_raw_queue.tx_queue_enqueued == 0U &&
-        g_sd_queue.tx_queue_enqueued == 0U && g_sd_pressure_pending == 0U &&
-        g_sd_pressure_queue.tx_queue_enqueued == 0U)
-    {
-      if (g_file_open != 0U && sd_flush_pending() == FX_SUCCESS &&
-          sd_close_log(&g_sd_file, g_sd_filename) == FX_SUCCESS) g_file_open = 0U;
-      if (g_telemetry_file_open != 0U &&
-          sd_flush_telemetry_pending() == FX_SUCCESS &&
-          sd_close_log(&g_sd_telemetry_file, g_sd_telemetry_filename) == FX_SUCCESS)
-        g_telemetry_file_open = 0U;
-      (void)fx_media_flush(&g_sd_media);
-    }
+    /* Only launch handles close at the deadline; ordinary SD work continues. */
+    sd_close_finished_launch_files(
+        pending_raw == NULL && g_sd_raw_slots_used == 0U && g_sd_raw_queue.tx_queue_enqueued == 0U,
+        g_sd_line_slots_used == 0U && g_sd_queue.tx_queue_enqueued == 0U &&
+            !g_sd_pressure_pending && g_sd_pressure_queue.tx_queue_enqueued == 0U);
 
     const uint32_t service_ms = HAL_GetTick() - service_start_ms;
     if (service_ms > g_sd_max_service_ms) g_sd_max_service_ms = service_ms;
@@ -1121,7 +1209,11 @@ void sd_card_set_hardware_ready(uint8_t ready)
 static sd_card_status_t sd_enqueue_line(sd_line_slot_t *slot)
 {
   const ULONG message = (ULONG)(uintptr_t)slot;
-  if (tx_queue_send(&g_sd_queue, (VOID *)&message, TX_NO_WAIT) != TX_SUCCESS)
+  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  slot->session = sd_run_snapshot(); slot->route_epoch = g_sd_route_epoch;
+  const UINT result = tx_queue_send(&g_sd_queue, (VOID *)&message, TX_NO_WAIT);
+  __set_PRIMASK(mask);
+  if (result != TX_SUCCESS)
   {
     g_sd_line_drop_count++;
     sd_free_slot(slot);
@@ -1138,7 +1230,7 @@ static uint64_t sd_next_row_sequence(void) {
 #ifdef TELEMETRY_ENABLED
 sd_card_status_t sd_card_log_packet(const SedsPacketView *pkt)
 {
-  if (!g_sd_ready || !pkt || sd_launch_finished()) return SD_CARD_STATUS_BUSY;
+  if (!g_sd_ready || !pkt) return SD_CARD_STATUS_BUSY;
   const int32_t want = seds_pkt_to_string_len(pkt);
   char value[SD_LINE_MAX], line[SD_LINE_MAX];
   if (want < 0 || (size_t)want >= sizeof(value) ||
@@ -1161,7 +1253,7 @@ sd_card_status_t sd_card_log_pressure_batch(const pressure_sd_batch_t *batch)
   if (!batch) return SD_CARD_STATUS_IO_ERROR;
   /* The writer updates the closed latch at its monotonic launch deadline.
    * Never take router-clock or SD-pool locks from the receive callback. */
-  if (!g_sd_services_initialized || g_sd_launch_closed) {
+  if (!g_sd_services_initialized) {
     g_sd_pressure_records_dropped += PRESSURE_SD_SAMPLES;
     return SD_CARD_STATUS_BUSY;
   }
@@ -1170,8 +1262,11 @@ sd_card_status_t sd_card_log_pressure_batch(const pressure_sd_batch_t *batch)
     ULONG words[SD_PRESSURE_MESSAGE_WORDS];
   } queued = {0};
   queued.message.batch = *batch;
-  queued.message.session = sd_run_snapshot();
-  if (tx_queue_send(&g_sd_pressure_queue, queued.words, TX_NO_WAIT) != TX_SUCCESS) {
+  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  queued.message.session = sd_run_snapshot(); queued.message.route_epoch = g_sd_route_epoch;
+  const UINT result = tx_queue_send(&g_sd_pressure_queue, queued.words, TX_NO_WAIT);
+  __set_PRIMASK(mask);
+  if (result != TX_SUCCESS) {
     g_sd_pressure_records_dropped += PRESSURE_SD_SAMPLES;
     return SD_CARD_STATUS_BACKPRESSURE;
   }
@@ -1188,7 +1283,7 @@ sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,
    * the card. Do not discard the first network row merely because mounting
    * runs in another task. A missing/slow card still produces backpressure
    * when the static byte pool fills; the general-purpose heap is not used. */
-  if ((g_sd_services_initialized == 0U) || (sensor_name == NULL) || sd_launch_finished())
+  if ((g_sd_services_initialized == 0U) || (sensor_name == NULL))
   {
     return SD_CARD_STATUS_BUSY;
   }
@@ -1226,7 +1321,7 @@ sd_card_status_t sd_card_enqueue_raw_adc_samples(const sd_raw_adc_record_t *samp
    * as the telemetry queue does. Missing/formatting cards remain bounded by
    * the pool; the writer alone consumes records after a successful mount. */
   if ((g_sd_services_initialized == 0U) || (samples == NULL) || (calibration == NULL) || (count == 0U) ||
-      (count > SD_RAW_BATCH_MAX) || sd_launch_finished())
+      (count > SD_RAW_BATCH_MAX))
   {
     if (samples && count && count <= SD_RAW_BATCH_MAX) g_sd_raw_records_dropped_count += count;
     return SD_CARD_STATUS_BUSY;
@@ -1240,11 +1335,14 @@ sd_card_status_t sd_card_enqueue_raw_adc_samples(const sd_raw_adc_record_t *samp
   }
   slot->uptime_reference = board_uptime_ticks();
   slot->calibration = *calibration;
-  slot->session = sd_run_snapshot();
   memcpy(slot->samples, samples, (size_t)count * sizeof(samples[0]));
   slot->count = count;
   const ULONG message = (ULONG)(uintptr_t)slot;
-  if (tx_queue_send(&g_sd_raw_queue, (VOID *)&message, TX_NO_WAIT) != TX_SUCCESS)
+  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  slot->session = sd_run_snapshot();
+  const UINT result = tx_queue_send(&g_sd_raw_queue, (VOID *)&message, TX_NO_WAIT);
+  __set_PRIMASK(mask);
+  if (result != TX_SUCCESS)
   {
     g_sd_raw_batch_drop_count++;
     g_sd_raw_records_dropped_count += count;

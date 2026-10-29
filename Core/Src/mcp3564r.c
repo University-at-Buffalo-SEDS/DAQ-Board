@@ -81,7 +81,7 @@ void mcp3564r_request_kg50_input(uint8_t input) { if (input <= 1U) g_kg50_input_
 uint8_t mcp3564r_kg50_input(void) { return g_kg50_input_active; }
 static uint32_t mcp3564r_fast_scan(uint8_t input) {
   if (input == 0U) return MCP3564R_BOARD_SCAN;
-  return g_mcp3564r.p6_scan_active ? 0x000200U : 0x000001U;
+  return g_mcp3564r.p6_scan_active ? 0x000200U : (0x000001U | DAQ_CHAMBER_SCAN_MASK);
 }
 
 volatile uint32_t g_mcp3564r_init_status = UINT32_MAX;

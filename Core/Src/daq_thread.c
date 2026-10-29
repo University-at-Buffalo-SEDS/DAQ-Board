@@ -15,6 +15,7 @@
 #include "daq_downsample.h"
 #include "daq_timestamp.h"
 #include "daq_filter.h"
+#include "daq_chamber_pressure.h"
 #include <string.h>
 #include <math.h>
 TX_THREAD daq_thread;
@@ -131,10 +132,10 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
         records[count].record_sequence = ++raw_sequence;
         records[count].network_unix_ms = daq_sample_network_ms(unix_now, mono_now, captured_uptime);
         records[count].raw_adc_code = sample.code;
-        records[count].raw_value = raw;
+        records[count].raw_value = daq_chamber_is_channel(channel) ? corrected : raw;
         records[count].adc_temperature_c = sample.temperature_c;
         records[count].adc_temperature_code = sample.temperature_code;
-        records[count].calibrated_value = channel > 1U ? corrected : channel == 1U
+        records[count].calibrated_value = daq_chamber_is_channel(channel) ? daq_chamber_pressure_psi(corrected) : channel > 1U ? corrected : channel == 1U
             ? daq_calibration_apply_kg50(calibration, corrected)
             : calibration->kg1000_slope * corrected + calibration->kg1000_intercept;
       }
@@ -223,6 +224,12 @@ volatile uint32_t g_daq_network_offered[DAQ_NETWORK_STREAMS];
 volatile uint32_t g_daq_network_coalesced[DAQ_NETWORK_STREAMS];
 volatile uint32_t g_daq_network_sent[DAQ_NETWORK_STREAMS];
 volatile uint32_t g_daq_network_failed[DAQ_NETWORK_STREAMS];
+#ifdef SEDS_FIRMWARE_SIM_TEST
+/* These classify scheduler submissions, separately from CAN's transport retries. */
+volatile uint32_t g_sim_daq_publication_attempts;
+volatile uint32_t g_sim_daq_publication_io_refusals;
+volatile uint32_t g_sim_daq_publication_other_refusals;
+#endif
 volatile uint32_t g_daq_network_invalid;
 
 static void daq_network_offer(unsigned stream, uint32_t type, const float *values,
@@ -250,10 +257,17 @@ static void daq_network_process_once(uint32_t now_ms)
   if (!ready) return;
   /* One SDK call per aggregate slot. No lock is held across network work and
    * a refused sample does not trigger a retry burst; the next offer is fresh. */
+#ifdef SEDS_FIRMWARE_SIM_TEST
+  ++g_sim_daq_publication_attempts;
+#endif
   const SedsResult result = log_telemetry_captured(sample.type, sample.values,
       sample.count, sizeof(float), sample.captured_ms);
   if (result == SEDS_OK) ++g_daq_network_sent[stream];
   else ++g_daq_network_failed[stream];
+#ifdef SEDS_FIRMWARE_SIM_TEST
+  if (result == SEDS_IO) ++g_sim_daq_publication_io_refusals;
+  else if (result != SEDS_OK) ++g_sim_daq_publication_other_refusals;
+#endif
   if (stream == DAQ_NETWORK_KG1000) {
     if (result == SEDS_OK) ++g_daq_loadcell_publish_ok_count;
     else ++g_daq_loadcell_publish_fail_count;
@@ -332,7 +346,8 @@ static void daq_publish_analog(const daq_snapshot_t *snapshot, const daq_loadcel
   }
 }
 
-static void daq_publish_loadcell(const daq_snapshot_t *snapshot, const daq_calibration_t *calibration)
+static void daq_publish_loadcell(const daq_snapshot_t *snapshot, const daq_calibration_t *calibration,
+                                  const float *chamber)
 {
   float loadcell_kg1000;
 
@@ -360,7 +375,14 @@ static void daq_publish_loadcell(const daq_snapshot_t *snapshot, const daq_calib
 #endif
 
 #ifdef TELEMETRY_ENABLED
-  daq_network_offer(DAQ_NETWORK_KG1000, SEDS_DT_KG1000, &loadcell_kg1000, 1U, snapshot->monotonic_ms);
+  if (chamber != NULL && isfinite(chamber[0]) && isfinite(chamber[1])) {
+    const float combined[] = {loadcell_kg1000, chamber[0], chamber[1]};
+    daq_network_offer(DAQ_NETWORK_KG1000, SEDS_DT_DAQ_LOADCELL_CHAMBER, combined, 3U, snapshot->monotonic_ms);
+  } else {
+    daq_network_offer(DAQ_NETWORK_KG1000, SEDS_DT_KG1000, &loadcell_kg1000, 1U, snapshot->monotonic_ms);
+  }
+#else
+  (void)chamber;
 #endif
 }
 
@@ -394,6 +416,8 @@ typedef struct {
   uint64_t monotonic_ms;
   daq_calibration_t calibration;
   float kg1000, kg50, temperature;
+  float chamber[2];
+  uint8_t chamber_valid;
   uint32_t flags;
   uint8_t kg50_input;
 } daq_report_t;
@@ -439,7 +463,7 @@ static void daq_report_thread_entry(ULONG argument)
       snapshot.ext_adc_sample_valid = 1U;
       snapshot.ext_adc_loadcell_kg1000 = work->kg1000;
       snapshot.monotonic_ms = work->monotonic_ms;
-      daq_publish_loadcell(&snapshot, &work->calibration);
+      daq_publish_loadcell(&snapshot, &work->calibration, work->chamber_valid ? work->chamber : NULL);
     }
     if (work->flags & DAQ_REPORT_KG50)
       daq_publish_kg50(work->kg50, work->kg50_input, work->monotonic_ms, &work->calibration);
@@ -477,7 +501,11 @@ void daq_thread_entry(ULONG initial_input)
   uint32_t last_temperature_report_ms = 0U;
   daq_downsample_t downsample = {0};
   daq_downsample_t downsample_kg50 = {0};
+  daq_downsample_t downsample_chamber = {0};
   uint8_t previous_kg50_input = 0U;
+  float chamber[2] = {NAN, NAN};
+  uint32_t chamber_sample_ms = 0U;
+  uint8_t chamber_seen = 0U;
 #if (DISABLE_SD_CARD == 0U)
   sd_raw_adc_record_t raw_records[DAQ_RAW_BATCH_MAX];
 #endif
@@ -545,6 +573,26 @@ void daq_thread_entry(ULONG initial_input)
       report.flags |= DAQ_REPORT_TEMPERATURE;
     }
     daq_enqueue_analog(&snapshot, &calibration, &window);
+    /* Pressure shares the existing acquisition/SD ring and KG1000 network
+     * slot. Absence is never a fabricated zero; stale readings restore the
+     * original scalar KG1000 publication without changing its cadence. */
+    for (unsigned channel = 6U; channel <= 7U; ++channel) {
+      if (daq_chamber_is_channel(channel) && window.count[channel] != 0U) {
+        const float average_v = mcp3564r_connector_voltage(channel, window.voltage_sum[channel] / window.count[channel]);
+        float filtered_v;
+        if (daq_downsample_add(&downsample_chamber, average_v, window.count[channel],
+                               report_ms, DAQ_BROADCAST_PERIOD_MS, &filtered_v)) {
+          chamber[1] = filtered_v;
+          chamber[0] = daq_chamber_pressure_psi(chamber[1]);
+          chamber_seen = isfinite(chamber[0]);
+          chamber_sample_ms = report_ms;
+        }
+      }
+    }
+    if (chamber_seen && (uint32_t)(report_ms - chamber_sample_ms) <= 100U) {
+      memcpy(report.chamber, chamber, sizeof(chamber));
+      report.chamber_valid = 1U;
+    }
     float filtered;
     if (daq_downsample_add(&downsample, snapshot.ext_adc_loadcell_kg1000,
                            window.count[0], (uint32_t)snapshot.monotonic_ms,

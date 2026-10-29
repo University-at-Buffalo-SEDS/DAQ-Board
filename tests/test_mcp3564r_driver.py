@@ -400,3 +400,37 @@ class Mcp3564rDriverTests(unittest.TestCase):
 
     def test_p6_differential_uses_fast_scan_and_switches_only_between_dma_transfers(self):
         subprocess.run([str(self.binary), "p6"], check=True)
+
+    def test_configured_p4_pressure_uses_fast_unity_gain_and_not_p6_gain16(self):
+        chamber_test = r"""
+static void test_chamber(void) {
+  assert(registers[7] == (3U | DAQ_CHAMBER_SCAN_MASK));
+  assert(registers[2] == 0x10 && registers[3] == 0xcf);
+  const unsigned channel = DAQ_CHAMBER_ADC_CHANNEL;
+  receive(channel,1588752);
+  mcp3564r_sample_t sample=take(channel,1588752);
+  const float connector=mcp3564r_connector_voltage(channel,sample.voltage_v);
+  assert(fabsf(connector-5.0f)<0.001f);
+  assert(fabsf(daq_chamber_pressure_psi(connector)-1000.0f)<0.1f);
+  receive(channel,0);assert(daq_chamber_pressure_psi(take(channel,0).voltage_v)==0);
+  mcp3564r_request_kg50_input(1);
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==(1U|DAQ_CHAMBER_SCAN_MASK));
+  receive(channel,1588752);(void)take(channel,1588752);
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==0x200 && registers[3]==0xef);
+  receive(channel,1588752);assert(!mcp3564r_pending_samples());
+  receive(9,123);(void)take(9,123);
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==(1U|DAQ_CHAMBER_SCAN_MASK) && registers[3]==0xcf);
+}
+"""
+        for pin in (6,7):
+            with self.subTest(pin=pin):
+                folder=pathlib.Path(self.tmp.name)
+                harness=folder / f'chamber-{pin}.c'
+                text=HARNESS.replace('int main(int argc, char **argv) {',chamber_test+'\nint main(int argc, char **argv) {')
+                text=text.replace('if (!strcmp(argv[1], "config"))','if (!strcmp(argv[1], "chamber")) test_chamber();\n  else if (!strcmp(argv[1], "config"))')
+                harness.write_text(text)
+                binary=folder / f'chamber-{pin}'
+                subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',
+                    '-DDAQ_CHAMBER_ADC_CHANNEL='+str(pin),'-DDAQ_ADC_READ_RATE_HZ=5556','-DDAQ_ADC_OSR=512',
+                    '-I',str(folder),'-I',str(ROOT/'Core/Inc'),str(ROOT/'Core/Src/mcp3564r.c'),str(harness),'-lm','-o',str(binary)],check=True,capture_output=True,text=True)
+                subprocess.run([str(binary),'chamber'],check=True)

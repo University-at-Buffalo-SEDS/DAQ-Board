@@ -1,6 +1,7 @@
 #ifndef DAQ_RATES_H
 #define DAQ_RATES_H
 #include <stdint.h>
+#include "daq_chamber_pressure.h"
 
 /* Board-local settings. No network variables; rebuild/reflash to change.
  * MCLK is the physical CubeMX MCO output and must match the board clock. */
@@ -15,6 +16,12 @@
 #endif
 #ifndef DAQ_BROADCAST_RATE_HZ
 #define DAQ_BROADCAST_RATE_HZ 250U
+#endif
+/* Legacy 3700 rounds to 271us per read; 5556 rounds to 180us. Three fast
+ * channels retain at least the default two-channel cadence after rounding.
+ * Select a compatible OSR explicitly; default 1024 cannot provide this rate. */
+#if DAQ_CHAMBER_SCAN_MASK != 0U && DAQ_ADC_READ_RATE_HZ < 5556U
+#error "Chamber fast scan requires DAQ_ADC_READ_RATE_HZ>=5556 and a compatible OSR; current settings would slow load cells"
 #endif
 #define DAQ_ADC_MCLK_HZ 16000000U
 /* Temperature must refresh independently of acquisition-loop overruns. */

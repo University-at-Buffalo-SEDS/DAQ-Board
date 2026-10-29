@@ -22,7 +22,10 @@ class SdLifecycleTests(unittest.TestCase):
 #include <stddef.h>
 #include <assert.h>
 typedef uintptr_t ULONG;
-typedef unsigned sd_line_slot_t;
+typedef struct { uint32_t route_epoch; } sd_line_slot_t;
+static unsigned g_sd_line_pending;
+static uint32_t g_sd_line_pending_epoch;
+static unsigned sd_telemetry_epoch_ready(uint32_t epoch,unsigned pressure){(void)epoch;(void)pressure;return 1;}
 #define TX_NO_WAIT 0
 #define TX_SUCCESS 0
 #define FX_SUCCESS 0
@@ -113,7 +116,8 @@ int main(void) {
                            source.index("volatile uint32_t g_sd_line_drop_count")]
         # File-specific session state is exercised by test_sd_log_separation.
         lifecycle = lifecycle.replace(
-            "static uint64_t g_sd_raw_session, g_sd_telemetry_session;", "")
+            "static uint64_t g_sd_raw_session, g_sd_telemetry_session;", "").replace(
+                "static uint8_t g_sd_launch_flush_pending;", "")
         self.run_c(r'''
 #include <assert.h>
 #include <stdint.h>
@@ -121,7 +125,7 @@ static uint64_t utc=1800000000000ULL, local=1000;
 static unsigned utc_reads;
 static uint32_t __get_PRIMASK(void) { return 0; }
 static void __disable_irq(void) {}
-static void __enable_irq(void) {}
+static void __set_PRIMASK(uint32_t value) {(void)value;}
 static uint64_t daq_log_unix_ms(void) { ++utc_reads; return utc; }
 static uint64_t daq_log_monotonic_ms(void) { return local; }
 ''' + lifecycle + r'''
@@ -129,31 +133,31 @@ int main(void) {
   const uint64_t start=utc;
   for (unsigned i=0;i<10000;i++) assert(!sd_launch_finished());
   assert(utc_reads==0); /* Idle acquisition must not contend for the router. */
-  sd_card_set_launch_clock(100,start+130000); /* T-10 -> T+120 */
+  sd_card_set_launch_clock(100,start+30000); /* T-10 -> T+20 */
   assert(sd_run_snapshot()==100 && !sd_launch_finished());
   assert(utc_reads==1); /* Active local deadline also avoids per-row queries. */
   local+=10000; utc+=10000;
-  sd_card_set_launch_clock(100,utc+120000); /* Pilot T0, same session. */
-  for (unsigned i=0;i<119;++i) {
+  sd_card_set_launch_clock(100,utc+20000); /* Pilot T0, same session. */
+  for (unsigned i=0;i<19;++i) {
     local+=1000; utc+=1000;
-    sd_card_set_launch_clock(100,start+130000); /* Retained replay/reconnect. */
+    sd_card_set_launch_clock(100,start+30000); /* Retained replay/reconnect. */
     assert(!sd_launch_finished() && sd_run_snapshot()==100);
   }
-  utc=0; local+=1000; /* Lose GS/time at T+120, still close. */
+  utc=0; local+=1000; /* Lose GS/time at T+20, still close. */
   assert(sd_launch_finished());
-  sd_card_set_launch_clock(100,start+130000);
+  sd_card_set_launch_clock(100,start+30000);
   utc=start; assert(sd_launch_finished()); /* No reopen if time goes backwards. */
   sd_card_set_launch_clock(0,0); assert(!sd_launch_finished());
-  sd_card_set_launch_clock(100,start+130000);
+  sd_card_set_launch_clock(100,start+30000);
   assert(sd_run_snapshot()==0); /* Old retained launch cannot revive a reset. */
-  sd_card_set_launch_clock(101,start+130000);
+  sd_card_set_launch_clock(101,start+30000);
   assert(sd_run_snapshot()==101 && !sd_launch_finished());
-  sd_card_set_launch_clock(100,start+130000);
+  sd_card_set_launch_clock(100,start+30000);
   assert(sd_run_snapshot()==101); /* Older session replay. */
   sd_card_set_launch_clock(0,0);
   utc=start+999999;
-  sd_card_set_launch_clock(102,start+130000); /* GS restarts after completed run. */
-  assert(sd_run_snapshot()==0 && !sd_launch_finished());
+  sd_card_set_launch_clock(102,start+30000); /* GS restarts after completed run. */
+  assert(sd_run_snapshot()==0 && sd_launch_finished());
 }
 ''')
 

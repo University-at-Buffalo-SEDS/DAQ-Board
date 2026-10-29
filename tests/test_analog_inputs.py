@@ -17,6 +17,8 @@ typedef struct {uint32_t CHSELR, CR, ISR;} ADC_Instance;
 typedef struct {ADC_Instance *Instance; uint32_t State;} ADC_HandleTypeDef;
 typedef struct {uint32_t Channel, Rank, SamplingTime, SingleDiff, OffsetNumber, Offset,
  OffsetRightShift, OffsetSignedSaturation, OffsetSaturation, OffsetSign;} ADC_ChannelConfTypeDef;
+#define ADC_CHANNEL_TEMPSENSOR 19
+#define ADC_CHANNEL_VREFINT 0
 #define ADC_SINGLE_ENDED 0
 #define ADC_DIFFERENTIAL_ENDED 1
 #define ADC_REGULAR_RANK_1 1
@@ -41,6 +43,7 @@ HARNESS = r'''
 #include <math.h>
 #include "daq_adc1.h"
 #include "daq_adc4.h"
+void board_temperature_poll(void) {}
 static ADC_Instance adc1,adc4;
 ADC_HandleTypeDef hadc1={.Instance=&adc1},hadc4={.Instance=&adc4};
 static unsigned selected, calls, fail_channel=99;

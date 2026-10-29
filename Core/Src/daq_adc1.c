@@ -1,6 +1,8 @@
 #include "daq_adc1.h"
 
 #include "main.h"
+#include "board_temperature.h"
+#include <stdbool.h>
 #include <math.h>
 
 extern ADC_HandleTypeDef hadc1;
@@ -20,7 +22,7 @@ volatile uint32_t g_daq_adc1_cr_on_error = 0U;
 volatile uint32_t g_daq_adc1_isr_on_error = 0U;
 volatile uint32_t g_daq_adc1_hal_state_on_error = 0U;
 
-static HAL_StatusTypeDef daq_adc1_read_raw(uint32_t channel, uint32_t *raw)
+static HAL_StatusTypeDef daq_adc1_read_raw(uint32_t channel, uint32_t *raw, uint32_t timeout_ms)
 {
   ADC_ChannelConfTypeDef cfg = {0};
 
@@ -50,7 +52,7 @@ static HAL_StatusTypeDef daq_adc1_read_raw(uint32_t channel, uint32_t *raw)
     return HAL_ERROR;
   }
 
-  if (HAL_ADC_PollForConversion(&hadc1, 10U) != HAL_OK)
+  if (HAL_ADC_PollForConversion(&hadc1, timeout_ms) != HAL_OK)
   {
     g_daq_adc1_read_status = 3U;
     (void)HAL_ADC_Stop(&hadc1);
@@ -61,6 +63,20 @@ static HAL_StatusTypeDef daq_adc1_read_raw(uint32_t channel, uint32_t *raw)
   g_daq_adc1_read_status = 0U;
   (void)HAL_ADC_Stop(&hadc1);
   return HAL_OK;
+}
+
+bool daq_adc1_temperature_read(uint32_t *raw, uint32_t *ref)
+{
+  /* Keep acquisition error diagnostics about acquisition, not health sampling. */
+  const uint32_t status = g_daq_adc1_read_status;
+  const uint32_t cr = g_daq_adc1_cr_on_error, isr = g_daq_adc1_isr_on_error;
+  const uint32_t state = g_daq_adc1_hal_state_on_error;
+  const bool ok = daq_adc1_read_raw(ADC_CHANNEL_TEMPSENSOR, raw, 1U) == HAL_OK &&
+                  daq_adc1_read_raw(ADC_CHANNEL_VREFINT, ref, 1U) == HAL_OK;
+  g_daq_adc1_read_status = status;
+  g_daq_adc1_cr_on_error = cr; g_daq_adc1_isr_on_error = isr;
+  g_daq_adc1_hal_state_on_error = state;
+  return ok;
 }
 
 UINT daq_adc1_init(void)
@@ -86,7 +102,7 @@ UINT daq_adc1_sample(daq_adc1_sample_t *sample)
   {
     uint32_t raw;
     volts[i] = NAN;
-    if (daq_adc1_read_raw(g_adc1_channels[i], &raw) == HAL_OK)
+    if (daq_adc1_read_raw(g_adc1_channels[i], &raw, 10U) == HAL_OK)
       volts[i] = (float)raw * DAQ_VREF_V / ADC1_FULL_SCALE_COUNTS;
     else
       result = TX_NOT_DONE;
@@ -103,5 +119,7 @@ UINT daq_adc1_sample(daq_adc1_sample_t *sample)
   /* LM74202: 78.28 uA/A into R60 6.2k. Below 50mA this is only indicative. */
   sample->input_current_a = volts[7] / (0.00007828f * 6200.0f);
   sample->aux_voltage_v = volts[5];
+  /* Same ADC owner, after all acquired channels; no extra SD/network rows. */
+  board_temperature_poll();
   return result;
 }

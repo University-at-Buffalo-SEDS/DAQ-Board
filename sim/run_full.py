@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -342,6 +343,52 @@ def run_memory_profile(
         run_live(command, "allocator stress and firmware memory profile")
 
 
+def scope_daq_disconnected_publication_probes(
+    layout: dict, repo_root: Path, build_subdir: str | None
+) -> None:
+    """Permit only bounded IO refusals during an explicitly missing CAN ACK.
+
+    A disconnected transport cannot accept publications indefinitely. Preserve
+    the healthy-link zero bounds in board.json; only this fault scenario may
+    consume the scheduler's finite, non-retried publication opportunities.
+    """
+    if layout.get("name") != "DAQ-Board":
+        return
+    rate = None
+    cache = repo_root / "build" / (build_subdir or "Release_Script") / "CMakeCache.txt"
+    if cache.is_file():
+        match = re.search(r"^DAQ_NETWORK_RATE_HZ:STRING=(\d+)$", cache.read_text(), re.MULTILINE)
+        if match:
+            rate = int(match.group(1))
+    if rate is None:
+        header = (repo_root / "Core/Inc/daq_network_config.h").read_text()
+        match = re.search(r"^#define DAQ_NETWORK_RATE_HZ (\d+)U$", header, re.MULTILINE)
+        if not match:
+            raise RuntimeError("Cannot resolve the DAQ aggregate publication rate")
+        rate = int(match.group(1))
+    if not 1 <= rate <= 1000:
+        raise RuntimeError("Invalid DAQ aggregate publication rate")
+    duration = max(1000, layout["execution"]["virtual_time_ms"])
+    # At most one initial scheduler credit plus the elapsed rate budget.
+    opportunities = (duration * rate + 999) // 1000 + 1
+    probes = {probe["name"]: probe for probe in layout["execution"]["memory_probes"]}
+    required = ("publication_attempts", "publication_io_refusals", "publication_other_refusals",
+                "sdk_shared_peak", "sdk_queue_budget", "sdk_snapshots", "sdk_snapshot_failures",
+                "sdk_admission_drops")
+    if any(name not in probes for name in required):
+        raise RuntimeError("Missing DAQ disconnected-publication safety probes")
+    for name in ("analog_report_failures", "network_publication_failures",
+                 "kg50_network_failures", "loadcell_network_failures",
+                 "publication_attempts", "publication_io_refusals"):
+        if name in probes:
+            probes[name]["maximum"] = opportunities
+    # Unexpected SDK errors, allocator admission and invalid inputs are never
+    # covered by the injected physical outage.
+    for name in ("publication_other_refusals", "sdk_snapshot_failures", "sdk_admission_drops"):
+        if probes[name].get("maximum") != 0:
+            raise RuntimeError(f"DAQ fault probe {name} must retain its zero bound")
+
+
 def run_unacknowledged_can_simulation(
     ui, repo_root: Path, architecture: str, build_subdir: str | None = None
 ) -> None:
@@ -382,6 +429,8 @@ def run_unacknowledged_can_simulation(
         if probe.get("name") == "fdcan_tx_ok":
             probe["minimum"] = 1
 
+    scope_daq_disconnected_publication_probes(layout, repo_root, build_subdir)
+
     with tempfile.TemporaryDirectory(prefix="seds-firmware-isolated-can-") as directory:
         write_container_layout(Path(directory), layout)
         command = [
@@ -400,6 +449,17 @@ def run_unacknowledged_can_simulation(
         ]
         ui.say("run", " ".join(command))
         run_live(command, "disconnected CAN survival simulation")
+
+
+def run_network_qualification(ui, repo_root: Path, architecture: str,
+                              build_subdir: str | None = None) -> None:
+    """Require the ordinary healthy network before the separate DAQ outage."""
+    run_network_simulation(ui, repo_root, architecture, build_subdir)
+    command = [sys.executable, str(repo_root / "sim/run_daq_recovery.py"),
+               "--repo-root", str(repo_root)]
+    if build_subdir:
+        command += ["--build-subdir", build_subdir]
+    run_live(command, "DAQ CAN outage and recovery qualification")
 
 
 def _network_peer(repo_root: Path) -> tuple[str, Path]:

@@ -129,22 +129,35 @@ that rate, exceeding the current raw queue reserve and leaving essentially no
 RAM for the firmware. Sustained bandwidth and bounded stall absorption must
 both be demonstrated; increasing the configured sample rate alone is not a fix.
 
-GroundStation publishes the retained `DAQ_LOG_CLOCK` network variable (type 139,
-16 bytes: little-endian u64 session ID followed by u64 close deadline in Unix
-milliseconds). Only GroundStation writes it; DAQ subscribes read-only. A launch
-starts `DAQ_LAUNCH_*.CSV` and `DAQ_LAUNCH_TELEMETRY_*.CSV`; sequence confirmation
-and Pilot-open timing can correct the deadline without starting another session.
-At T+120 seconds producers stop enqueueing log records, the writer drains the
-queues, closes both files, and flushes the media. Network telemetry continues.
-Resetting the launch clock, starting a new launch, or changing calibration after
-completion allows logging again. Both GroundStation and DAQ need this update.
+GroundStation publishes the retained `DAQ_LOG_CLOCK` network variable as16
+bytes: little-endian u64 session ID followed by u64 close deadline in Unix
+milliseconds. Only GroundStation writes it; DAQ subscribes read-only. The
+absolute deadline is T0+20seconds, including the countdown before T0. A strictly newer
+authoritative Pilot-open T0 revision can correct the same session in either
+direction before closure. Retained replays and UTC changes alone cannot restart
+the interval or reopen a completed session.
+
+At the deadline newly admitted raw, CSV and pressure records route to ordinary
+`DAQ_*.CSV` and `DAQ_TELEMETRY_*.CSV` files. Acquisition, ordinary SD recording
+and network telemetry continue at their configured rates. Already admitted
+launch records drain to `DAQ_LAUNCH_*.CSV`/`DAQ_LAUNCH_TELEMETRY_*.CSV` before those
+handles close. A batch is routed atomically when admitted; a batch spanning the
+boundary is kept intact in one file, and no cutoff record is discarded. CSV and
+pressure queues share generation ordering so a delayed launch batch cannot
+reopen a completed launch file after an ordinary row. Write, close and final
+media-flush failures retain their retry paths; normal files are not closed on
+every idle turn. A new launch requires a strictly newer session ID. Clock reset
+returns routing to ordinary logging and does not allow old retained sessions
+to revive. Calibration changes keep their existing file-rotation behavior.
 
 GroundStation retains the session and absolute deadline on disk. Reconnecting
-or restarting it must not restart a two-minute countdown. DAQ ignores duplicate
-and older launch IDs and already-expired launches received after boot. After
-obtaining UTC it also keeps a monotonic deadline, so losing time sync does not
-prevent closure. If no valid UTC has ever arrived, it cannot safely infer when
-an absolute network deadline expires; it keeps recording until time is known.
+or restarting must not restart the20-second post-T0 interval. Once DAQ obtains
+UTC it maps the deadline to extended monotonic uptime, including32-bit tick
+wrap, so later loss of time sync does not prevent closure. If no valid UTC has
+arrived, ordinary logging continues without inventing a launch-time mapping.
+Both GroundStation and DAQ require this update for the new cutoff and continued
+ordinary-recording behavior. The chamber-pressure raw and report paths use the
+same admission/file routing and inherit the cutoff without changing their data.
 
 FileX creation/modification timestamps use network UTC when available. Closing a
 file explicitly sets its modification time to the close time. FAT timestamps
@@ -179,3 +192,15 @@ yet pass the zero-overrun/zero-drop thresholds at the current two-channel
 of sustained, lossless recording at that rate. The cached v0.4.12 simulator
 image also predates tagged dual-channel ADC support; this check used the
 repository's updated `SedsSpiSensors.cs` model as a read-only container mount.
+
+`DAQ_LOG_CLOCK` keeps its16-byte payload; the packet timestamp now carries a
+persisted control revision. GS saves `daq_log_clock_stamp` atomically with the
+value, uses a checked strictly increasing stamp for changed values even after
+wall-clock rollback, and reuses the exact stamp for cached replies/restart. DAQ
+rejects older or equal-conflicting revisions while retaining session tombstones
+across router reinitialization. A new session may advance after a legacy boot
+clock regression, but unscoped reset packets are then ambiguous and ignored
+for that session; the20-second cutoff and ordinary recording still work. Both
+GS and DAQ must be updated for supported revision/reset ordering. A cold-boot
+receiver cannot reconstruct unknown old legacy UTC history from a16-byte reset
+that carries no session ID; this is not an authenticated protocol guarantee.

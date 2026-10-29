@@ -38,6 +38,12 @@ endif()
 
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
+if(SEDS_FIRMWARE_SIM_TEST)
+    # Valid acquisition callers can make the invalid-offer branch unreachable.
+    # Keep its zero-valued diagnostic for the simulator's unchanged failure gate.
+    target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
+        "LINKER:--undefined=g_daq_network_invalid")
+endif()
 include(cmake/packet_store.cmake)
 option(SEDSNET_COMPACT_PACKET_STORE "Use bounded SEDSnet packet stores" ON)
 include(cmake/tlsf_allocator.cmake)
@@ -220,3 +226,6 @@ option(ENABLE_BOARD_WATCHDOG "Enable independent hardware watchdog with task pro
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/Core/Src/board_watchdog.c)
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE "$<$<BOOL:${ENABLE_TELEMETRY}>:${CMAKE_SOURCE_DIR}/Core/Src/board_health.c>")
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE BOARD_WATCHDOG_ENABLE=$<BOOL:${ENABLE_BOARD_WATCHDOG}>)
+
+# Low-rate internal die temperature; no separate telemetry stream.
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/Core/Src/board_temperature.c)

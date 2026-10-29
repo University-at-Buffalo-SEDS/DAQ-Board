@@ -18,6 +18,31 @@ TX_THREAD telemetry_thread;
 
 volatile uint32_t g_telemetry_stack_remaining = TELEMETRY_THREAD_STACK_SIZE;
 
+#ifdef SEDS_FIRMWARE_SIM_TEST
+/* Allocation-free, sampled with the existing 4 Hz stack diagnostic rather
+ * than in the publication hot path. Production does not run these probes. */
+volatile uint32_t g_sim_daq_sdk_shared_peak;
+volatile uint32_t g_sim_daq_sdk_queue_budget;
+volatile uint32_t g_sim_daq_sdk_snapshots;
+volatile uint32_t g_sim_daq_sdk_snapshot_failures;
+volatile uint32_t g_sim_daq_sdk_admission_drops;
+static void sample_sdk_queue_budget(void)
+{
+    if (g_router.r == NULL) return;
+    uint32_t counters[16];
+    if (seds_router_copy_memory_counters(g_router.r, counters, 16U) != 16)
+    {
+        ++g_sim_daq_sdk_snapshot_failures;
+        return;
+    }
+    g_sim_daq_sdk_queue_budget = counters[1];
+    if (counters[2] > g_sim_daq_sdk_shared_peak)
+        g_sim_daq_sdk_shared_peak = counters[2];
+    g_sim_daq_sdk_admission_drops = (uint32_t)seds_memory_admission_rejected();
+    ++g_sim_daq_sdk_snapshots;
+}
+#endif
+
 /* ST-Link requests a snapshot by setting request to 1. Export in the owning
  * thread, never by calling Rust/router functions from a halted debugger.
  * Idle in normal operation; buffers remain stable until the next request. */
@@ -126,6 +151,9 @@ void telemetry_thread_entry(ULONG initial_input)
         if ((now - last_stack_sample) >= stack_sample_ticks)
         {
             sample_telemetry_stack();
+#ifdef SEDS_FIRMWARE_SIM_TEST
+            sample_sdk_queue_budget();
+#endif
             last_stack_sample = now;
         }
 

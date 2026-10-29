@@ -30,26 +30,31 @@ class PressureSdHandoffTests(unittest.TestCase):
 #include <stddef.h>
 #include <string.h>
 typedef uint32_t ULONG; typedef unsigned UINT; typedef unsigned char UCHAR;
-typedef struct { unsigned unused; } TX_QUEUE;
+typedef struct { unsigned tx_queue_enqueued; ULONG *tx_queue_read; } TX_QUEUE;
+static TX_QUEUE g_sd_queue;
+static uint32_t g_sd_route_epoch;
+static uint32_t __get_PRIMASK(void){return 0;}
+static void __disable_irq(void){}
+static void __set_PRIMASK(uint32_t value){(void)value;}
 #define TX_SUCCESS 0U
 #define TX_NO_WAIT 0U
 #define FX_SUCCESS 0U
 #define SD_LINE_MAX 384U
 typedef enum { SD_CARD_STATUS_OK, SD_CARD_STATUS_IO_ERROR, SD_CARD_STATUS_BUSY, SD_CARD_STATUS_BACKPRESSURE } sd_card_status_t;
-typedef struct { uint16_t len; unsigned calibration; uint64_t session; char line[]; } sd_line_slot_t;
+typedef struct { uint16_t len; unsigned calibration; uint64_t session; uint32_t route_epoch; char line[]; } sd_line_slot_t;
 static unsigned g_sd_services_initialized=1, g_sd_launch_closed;
 static unsigned g_sd_write_error_count,g_sd_csv_rows_written_count;
-static uint64_t sd_run_snapshot(void){return 42;}
-static unsigned formatting,writing,fail_write,accepted; static char written[8][384];
+static uint64_t sd_run_snapshot(void){return g_sd_launch_closed ? 0 : 42;}
+static unsigned formatting,writing,fail_write,accepted; static char written[12][384];
 static void sd_format_float(char *out,float v){++formatting;snprintf(out,24,"%.2f",(double)v);}
 static int sd_format_csv_sensor_record(char *out,size_t n,uint64_t utc,uint64_t uptime,const char *sensor,const char *raw,const char *converted,uint32_t sequence){
  ++formatting;return snprintf(out,n,"%llu,%llu,%s,%s,%s,%u",(unsigned long long)utc,(unsigned long long)uptime,sensor,raw,converted,sequence);
 }
 static unsigned sd_calibration_snapshot(unsigned *value){*value=7;return 1;}
 static unsigned sd_write_telemetry_row(const sd_line_slot_t *slot){
- ++writing;assert(slot->session==42 && slot->calibration==7);
+ ++writing;assert(slot->session==(g_sd_launch_closed ? 0U : 42U) && slot->calibration==7);
  if(fail_write){fail_write=0;return 1;}
- assert(accepted<8);memcpy(written[accepted++],slot->line,slot->len+1);return 0;
+ assert(accepted<12);memcpy(written[accepted++],slot->line,slot->len+1);return 0;
 }
 '''
         queues = r'''
@@ -62,12 +67,11 @@ int main(void){
  pressure_sd_batch_t batch={.uptime_ms=100,.unix_ms=1000,.first_sequence=UINT32_MAX-1,.raw={1,2,3,4},.psi={1,2,3,4}};
  assert(sd_card_log_pressure_batch(NULL)==SD_CARD_STATUS_IO_ERROR);
  g_sd_services_initialized=0;assert(sd_card_log_pressure_batch(&batch)==SD_CARD_STATUS_BUSY);g_sd_services_initialized=1;
- g_sd_launch_closed=1;assert(sd_card_log_pressure_batch(&batch)==SD_CARD_STATUS_BUSY);g_sd_launch_closed=0;
  assert(sd_card_log_pressure_batch(&batch)==SD_CARD_STATUS_OK);
  batch.uptime_ms=116;batch.unix_ms=1016;batch.first_sequence=2;
  assert(sd_card_log_pressure_batch(&batch)==SD_CARD_STATUS_OK);
  assert(sd_card_log_pressure_batch(&batch)==SD_CARD_STATUS_BACKPRESSURE);
- assert(g_sd_pressure_records_enqueued==8 && g_sd_pressure_records_dropped==12);
+ assert(g_sd_pressure_records_enqueued==8 && g_sd_pressure_records_dropped==8);
  memset(&batch,0xa5,sizeof(batch)); // The receive buffer is no longer owned.
  assert(formatting==0 && writing==0); // No CSV, pool or media work on RX.
  fail_write=1;assert(sd_service_pressure_rows()==1);
@@ -80,10 +84,14 @@ int main(void){
  assert(!strcmp(written[4],"1016,116,valve_pressure_psi,1,1.00,2"));
  assert(sd_service_pressure_rows()==0 && writing==9);
  assert(g_sd_pressure_records_written==8 && g_sd_csv_rows_written_count==8 && g_sd_write_error_count==1);
+ g_sd_launch_closed=1;
+ memset(&batch,0,sizeof(batch));
+ assert(sd_card_log_pressure_batch(&batch)==SD_CARD_STATUS_OK);
+ assert(sd_service_pressure_rows()==1 && accepted==12); /* Ordinary pressure continues. */
  return 0;
 }
 '''
-        code=prefix+declarations+queues+function(source,'sd_service_pressure_rows')+'\n'+function(source,'sd_card_log_pressure_batch')+main
+        code=prefix+declarations+queues+function(source,'sd_telemetry_epoch_ready')+'\n'+function(source,'sd_service_pressure_rows')+'\n'+function(source,'sd_card_log_pressure_batch')+main
         with tempfile.TemporaryDirectory() as directory:
             executable=Path(directory)/'handoff'
             subprocess.run(['cc','-std=c11','-O1','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(executable)],input=code,text=True,check=True)

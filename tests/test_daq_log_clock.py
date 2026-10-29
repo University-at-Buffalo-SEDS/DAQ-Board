@@ -19,7 +19,7 @@ class DaqLogClockTests(unittest.TestCase):
 #include "sd_calendar.h"
 typedef int SedsResult;
 typedef int SedsRouter;
-typedef struct { unsigned ty; const uint8_t *payload; size_t payload_len; } SedsPacketView;
+typedef struct { unsigned ty; const uint8_t *payload; size_t payload_len; uint64_t timestamp; } SedsPacketView;
 enum { SEDS_OK, SEDS_HANDLER_ERROR };
 #define SEDS_DT_DAQ_LOG_CLOCK 139U
 volatile uint32_t g_telemetry_discovery_seen;
@@ -44,7 +44,7 @@ int main(void) {
   tick=1000; daq_log_clock_poll(&router); assert(requests==0);
   g_telemetry_discovery_seen=1; daq_log_clock_poll(&router); assert(requests==1);
   uint8_t payload[16]={0};
-  SedsPacketView p={139,payload,15};
+  SedsPacketView p={.ty=139,.payload=payload,.payload_len=15,.timestamp=1800000000000ULL};
   assert(clock_update(&p,NULL)==SEDS_HANDLER_ERROR && changes==0);
   p.payload_len=16;
   payload[0]=7; /* Session without a valid deadline is rejected. */
@@ -58,6 +58,7 @@ int main(void) {
   assert(daq_log_clock_init(&router)==SEDS_OK);
   tick+=500; daq_log_clock_poll(&router); assert(requests==2);
   assert(clock_update(&p,NULL)==SEDS_OK && got_session==7 && got_deadline==end);
+  ++p.timestamp;
   for (unsigned i=0;i<16;++i) payload[i]=0;
   assert(clock_update(&p,NULL)==SEDS_OK && got_session==0 && got_deadline==0);
 }

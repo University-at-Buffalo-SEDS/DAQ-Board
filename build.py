@@ -991,6 +991,7 @@ def main() -> None:
                 run_full_simulation,
                 run_memory_profile,
                 run_network_simulation,
+                run_network_qualification,
                 run_unacknowledged_can_simulation,
             )
             _run_test_stage(ui, results, "Docker readiness", require_docker)
@@ -1026,7 +1027,7 @@ def main() -> None:
             )
             _run_test_stage(
                 ui, results, "Network discovery and time sync",
-                lambda: run_network_simulation(
+                lambda: run_network_qualification(
                     ui, cfg.repo_root, "stm32u5", cfg.build_subdir
                 ),
             )

@@ -71,6 +71,20 @@ class QualificationContractTests(unittest.TestCase):
         ):
             self.assertIn(symbol, telemetry)
 
+    def test_hooks_build_retains_every_configured_memory_probe(self):
+        root = Path(build.__file__).resolve().parent
+        cache = root / "build/Release_Script/CMakeCache.txt"
+        elf = root / "build/Release_Script/DAQ-Board.elf"
+        if not cache.is_file() or not elf.is_file():
+            self.skipTest("linked hooks build is unavailable")
+        if "SEDS_FIRMWARE_SIM_TEST:BOOL=ON" not in cache.read_text():
+            self.skipTest("production build intentionally omits simulator probes")
+        from sim.run_full import load_layout_for_build
+        # Resolve the real linked symbols, including counters whose only
+        # increment paths optimization may prove unreachable for valid callers.
+        layout = load_layout_for_build(root, "Release_Script")
+        self.assertTrue(layout["execution"]["memory_probes"])
+
     def test_hal_tick_injection_matches_linked_elf_when_available(self):
         root = Path(build.__file__).resolve().parent
         from sim.run_full import load_layout_for_build
@@ -155,7 +169,7 @@ class QualificationContractTests(unittest.TestCase):
         self.assertIn("const daq_calibration_t calibration = daq_calibration_current();", daq)
         self.assertLess(
             daq.index('sd_card_enqueue_csv_row("kg1000_network"'),
-            daq.index("daq_network_offer(DAQ_NETWORK_KG1000, SEDS_DT_KG1000"),
+            daq.index("daq_network_offer(DAQ_NETWORK_KG1000"),
         )
         self.assertIn("log_telemetry_captured(sample.type, sample.values,", daq)
         self.assertIn("sample.count, sizeof(float), sample.captured_ms)", daq)

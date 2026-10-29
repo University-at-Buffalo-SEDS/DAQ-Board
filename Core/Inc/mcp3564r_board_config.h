@@ -2,6 +2,7 @@
 #define MCP3564R_BOARD_CONFIG_H
 
 #include <stdint.h>
+#include "daq_chamber_pressure.h"
 
 /* Schematic sheets 1, 9, 10: P7 -> AMP1 -> CH0; P8 -> AMP2 -> CH1.
  * Both inputs are amplified, ground-referenced outputs. CONFIG0 selects the
@@ -12,10 +13,10 @@
 /* CONFIG2.GAIN=101: analog PGA x16, only during P6 CH2-CH3 scan. */
 #define MCP3564R_P6_CONFIG2 0xEFU
 #define MCP3564R_P6_GAIN 16.0f
-#define MCP3564R_BOARD_SCAN 0x000003U /* CH1, CH0 at the load-cell clock/filter. */
+#define MCP3564R_BOARD_SCAN (0x000003U | DAQ_CHAMBER_SCAN_MASK) /* CH1, CH0 at the load-cell clock/filter. */
 /* One auxiliary pass per period, then resume the two load cells. */
 #ifndef MCP3564R_AUX_SCAN
-#define MCP3564R_AUX_SCAN 0x0000FCU /* CH2..7, single-ended. Set 0 to disable. */
+#define MCP3564R_AUX_SCAN (0x0000FCU & ~DAQ_CHAMBER_SCAN_MASK) /* CH2..7, single-ended. Set 0 to disable. */
 #endif
 #if (MCP3564R_AUX_SCAN & ~0x0000FCU) != 0U
 #error "Auxiliary mask must contain only CH2..7"

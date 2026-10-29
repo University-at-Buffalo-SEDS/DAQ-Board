@@ -49,6 +49,7 @@ class NetworkRateTests(unittest.TestCase):
 #define SEDS_IO (-14)
 #define SD_CARD_STATUS_OK 0
 #define MCP3564R_AUX_INTERVAL_MS 100
+#define SEDS_DT_DAQ_LOADCELL_CHAMBER 141
 #define SEDS_DT_KG1000 0
 #define SEDS_DT_KG50 1
 #define SEDS_DT_DAQ_KG50_SELECTED 2
@@ -121,7 +122,7 @@ int main(void){
   if(actual_ms%4==0){
    expected_ms=10000+actual_ms;
    expected_value=100000+(float)expected_ms;snapshot.ext_adc_loadcell_kg1000=expected_value;snapshot.monotonic_ms=expected_ms;
-   daq_publish_loadcell(&snapshot,&calibration);
+   daq_publish_loadcell(&snapshot,&calibration,NULL);
    expected_value=200000+(float)expected_ms;
    daq_publish_kg50(expected_value,actual_ms>=5000,expected_ms,&calibration);
   }
@@ -156,7 +157,7 @@ int main(void){
  for(unsigned i=0;i<20;i++){
   expected_ms=59000+i*4;expected_value=100000+(float)expected_ms;
   snapshot.monotonic_ms=expected_ms;snapshot.ext_adc_loadcell_kg1000=expected_value;
-  daq_publish_loadcell(&snapshot,&calibration);
+  daq_publish_loadcell(&snapshot,&calibration,NULL);
  }
  unsigned before=0;for(unsigned i=0;i<7;i++)before+=sent[i];
  fail_next=1;daq_network_process_once(actual_ms);
@@ -166,10 +167,39 @@ int main(void){
 }
 '''
 
+    def test_combined_chamber_publisher_uses_same_slots_and_invalid_falls_back(self):
+        code=self.harness()
+        code=code.replace('type==0?DAQ_NETWORK_KG1000', '(type==0||type==141)?DAQ_NETWORK_KG1000')
+        code=code.replace('const float*p=value;', 'const float*p=value; if(type==141){assert(n==3&&p[1]==500.0f&&p[2]==2.5f);}')
+        code=code.replace('daq_calibration_t calibration={3,-7};','float pressure[2]={500.0f,2.5f};daq_calibration_t calibration={3,-7};')
+        code=code.replace('if(actual_ms%4==0){','if(actual_ms%4==0){pressure[0]=actual_ms<5000?500.0f:NAN;')
+        code=code.replace('daq_publish_loadcell(&snapshot,&calibration,NULL);','daq_publish_loadcell(&snapshot,&calibration,pressure);')
+        self.compile(code)
+
     def test_global_cap_priority_weights_sd_capture_and_input_switch(self):
         for rate in (None, 83, 37):
             with self.subTest(rate=rate):
                 self.compile(self.harness(), () if rate is None else (f'DAQ_NETWORK_RATE_HZ={rate}',))
+
+    def test_fault_classifier_distinguishes_io_without_retrying_a_slot(self):
+        code = self.harness().replace(
+            'static unsigned sd_rows,',
+            'static uint32_t g_sim_daq_publication_attempts, '
+            'g_sim_daq_publication_io_refusals, g_sim_daq_publication_other_refusals;\n'
+            'static unsigned sd_rows,')
+        code = code.replace(
+            'if(fail_next){--fail_next;return SEDS_IO;}',
+            'if(fail_next){unsigned result=fail_next;fail_next=0;return result==2?-3:SEDS_IO;}')
+        end = 'assert(after==before+1 && failures==1 && !fail_next && sd_rows==5020);'
+        self.assertIn(end, code)
+        code = code.replace(end, end + r'''
+ assert(g_sim_daq_publication_attempts==after);
+ assert(g_sim_daq_publication_io_refusals==1 && g_sim_daq_publication_other_refusals==0);
+ actual_ms+=10;fail_next=2;daq_network_process_once(actual_ms);
+ assert(g_sim_daq_publication_attempts==after+1);
+ assert(g_sim_daq_publication_io_refusals==1 && g_sim_daq_publication_other_refusals==1);
+''')
+        self.compile(code, ('SEDS_FIRMWARE_SIM_TEST=1',))
 
     def test_header_weights_and_disabled_auxiliary_streams(self):
         definitions = ['DAQ_NETWORK_WEIGHT_KG50=3', 'DAQ_NETWORK_WEIGHT_KG1000=1']

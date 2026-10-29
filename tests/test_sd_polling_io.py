@@ -32,7 +32,6 @@ static int full, enqueued;
 static sd_line_slot_t *sd_alloc_slot(uint16_t len) { assert(len < 384); return full ? NULL : &slot; }
 static unsigned sd_calibration_snapshot(daq_calibration_t *c) { c->slope=1; return 0; }
 static uint64_t sd_run_snapshot(void) { return 0; }
-static unsigned sd_launch_finished(void) { return 0; }
 static uint64_t sd_next_row_sequence(void) { static unsigned sequence; return ++sequence; }
 uint64_t board_uptime_ticks(void) { return 30; }
 static uint64_t network_ms = 1234;
