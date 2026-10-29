@@ -11,6 +11,7 @@
 #include "mcp3564r.h"
 #include "daq_calibration.h"
 #include "daq_rates.h"
+#include "daq_network_schedule.h"
 #include "daq_downsample.h"
 #include "daq_timestamp.h"
 #include "daq_filter.h"
@@ -212,33 +213,85 @@ static void daq_store_snapshot_csv(const daq_snapshot_t *snapshot,
 #endif
 }
 
-volatile uint32_t g_daq_analog_publish_ok_count;
-volatile uint32_t g_daq_analog_publish_fail_count;
-volatile uint32_t g_daq_analog_publish_retry_count;
-
-static void daq_publish_analog_packet(uint32_t type, const float *values, size_t count,
-                                     uint32_t batch_started_ms)
-{
+extern volatile uint32_t g_daq_analog_publish_ok_count;
+extern volatile uint32_t g_daq_analog_publish_fail_count;
 #ifdef TELEMETRY_ENABLED
-  /* A startup loadcell burst can temporarily fill the logical TX budget.
-   * Yield this independent analog worker so networking can release that work.
-   * All packets in one snapshot share one 100ms deadline: acquisition, raw SD
-   * capture and the bounded three-snapshot queue must not wait indefinitely. */
+static daq_network_schedule_t g_daq_network;
+static TX_THREAD g_network_thread;
+static ULONG g_network_stack[8192U / sizeof(ULONG)];
+volatile uint32_t g_daq_network_offered[DAQ_NETWORK_STREAMS];
+volatile uint32_t g_daq_network_coalesced[DAQ_NETWORK_STREAMS];
+volatile uint32_t g_daq_network_sent[DAQ_NETWORK_STREAMS];
+volatile uint32_t g_daq_network_failed[DAQ_NETWORK_STREAMS];
+volatile uint32_t g_daq_network_invalid;
+
+static void daq_network_offer(unsigned stream, uint32_t type, const float *values,
+                               size_t count, uint64_t captured_ms)
+{
+  const uint32_t saved = __get_PRIMASK();
+  __disable_irq();
+  const int replaced = daq_network_schedule_offer(&g_daq_network, stream, type, values, count, captured_ms);
+  if (replaced < 0) ++g_daq_network_invalid;
+  else {
+    ++g_daq_network_offered[stream];
+    if (replaced) ++g_daq_network_coalesced[stream];
+  }
+  __set_PRIMASK(saved);
+}
+
+static void daq_network_process_once(uint32_t now_ms)
+{
+  daq_network_sample_t sample;
+  unsigned stream;
+  const uint32_t saved = __get_PRIMASK();
+  __disable_irq();
+  const int ready = daq_network_schedule_take(&g_daq_network, now_ms, &stream, &sample);
+  __set_PRIMASK(saved);
+  if (!ready) return;
+  /* One SDK call per aggregate slot. No lock is held across network work and
+   * a refused sample does not trigger a retry burst; the next offer is fresh. */
+  const SedsResult result = log_telemetry_captured(sample.type, sample.values,
+      sample.count, sizeof(float), sample.captured_ms);
+  if (result == SEDS_OK) ++g_daq_network_sent[stream];
+  else ++g_daq_network_failed[stream];
+  if (stream == DAQ_NETWORK_KG1000) {
+    if (result == SEDS_OK) ++g_daq_loadcell_publish_ok_count;
+    else ++g_daq_loadcell_publish_fail_count;
+  } else if (stream == DAQ_NETWORK_KG50) {
+    if (result == SEDS_OK) ++g_daq_kg50_publish_ok_count;
+    else ++g_daq_kg50_publish_fail_count;
+  } else if (stream == DAQ_NETWORK_TEMPERATURE) {
+    if (result == SEDS_OK) ++g_daq_temperature_publish_ok_count;
+    else ++g_daq_temperature_publish_fail_count;
+  } else {
+    if (result == SEDS_OK) ++g_daq_analog_publish_ok_count;
+    else ++g_daq_analog_publish_fail_count;
+  }
+}
+
+static void daq_network_thread_entry(ULONG argument)
+{
+  (void)argument;
   for (;;) {
-    const SedsResult result = log_telemetry_asynchronous(type, values, count, sizeof(float));
-    if (result == SEDS_OK) {
-      g_daq_analog_publish_ok_count++;
-      return;
-    }
-    if (result != SEDS_IO || (uint32_t)(HAL_GetTick() - batch_started_ms) >= 100U) {
-      g_daq_analog_publish_fail_count++;
-      return;
-    }
-    g_daq_analog_publish_retry_count++;
+    daq_network_process_once(HAL_GetTick());
     tx_thread_sleep((TX_TIMER_TICKS_PER_SECOND + 999U) / 1000U);
   }
+}
+#endif
+
+volatile uint32_t g_daq_analog_publish_ok_count;
+volatile uint32_t g_daq_analog_publish_fail_count;
+
+static void daq_publish_analog_packet(uint32_t type, const float *values, size_t count,
+                                     uint64_t captured_ms)
+{
+#ifdef TELEMETRY_ENABLED
+  const unsigned stream = type == SEDS_DT_DAQ_SDADC_VOLTAGES ? DAQ_NETWORK_SDADC :
+      type == SEDS_DT_DAQ_SAR_VOLTAGES ? DAQ_NETWORK_SAR :
+      type == SEDS_DT_DAQ_CURRENT_SENSE ? DAQ_NETWORK_CURRENT : DAQ_NETWORK_POWER;
+  daq_network_offer(stream, type, values, count, captured_ms);
 #else
-  (void)type; (void)values; (void)count; (void)batch_started_ms;
+  (void)type; (void)values; (void)count; (void)captured_ms;
 #endif
 }
 
@@ -249,7 +302,6 @@ static void daq_publish_analog(const daq_snapshot_t *snapshot, const daq_loadcel
   static uint8_t valid;
   static uint32_t last_report;
   const uint32_t now = (uint32_t)snapshot->monotonic_ms;
-  const uint32_t batch_started_ms = HAL_GetTick();
   for (unsigned i = 0; i < 6U; ++i)
   {
     if (window->count[i + 2U] != 0U)
@@ -266,7 +318,7 @@ static void daq_publish_analog(const daq_snapshot_t *snapshot, const daq_loadcel
     for (unsigned i = 0; i < 6U; ++i)
       values[i] = (valid & (1U << i)) && (uint32_t)(now - updated[i]) <= 3U * MCP3564R_AUX_INTERVAL_MS
           ? auxiliary[i] : NAN;
-    daq_publish_analog_packet(SEDS_DT_DAQ_SDADC_VOLTAGES, values, 6U, batch_started_ms);
+    daq_publish_analog_packet(SEDS_DT_DAQ_SDADC_VOLTAGES, values, 6U, snapshot->monotonic_ms);
   }
   if (snapshot->analog_sample_fresh)
   {
@@ -274,9 +326,9 @@ static void daq_publish_analog(const daq_snapshot_t *snapshot, const daq_loadcel
                             snapshot->current_sense_a[0], snapshot->current_sense_a[1]};
     const float power[] = {snapshot->power_monitor_v[0], snapshot->power_monitor_v[1],
                           snapshot->input_voltage_v, snapshot->input_current_a};
-    daq_publish_analog_packet(SEDS_DT_DAQ_SAR_VOLTAGES, snapshot->analog_inputs_v, 8U, batch_started_ms);
-    daq_publish_analog_packet(SEDS_DT_DAQ_CURRENT_SENSE, current, 4U, batch_started_ms);
-    daq_publish_analog_packet(SEDS_DT_DAQ_POWER_MONITOR, power, 4U, batch_started_ms);
+    daq_publish_analog_packet(SEDS_DT_DAQ_SAR_VOLTAGES, snapshot->analog_inputs_v, 8U, snapshot->monotonic_ms);
+    daq_publish_analog_packet(SEDS_DT_DAQ_CURRENT_SENSE, current, 4U, snapshot->monotonic_ms);
+    daq_publish_analog_packet(SEDS_DT_DAQ_POWER_MONITOR, power, 4U, snapshot->monotonic_ms);
   }
 }
 
@@ -308,17 +360,7 @@ static void daq_publish_loadcell(const daq_snapshot_t *snapshot, const daq_calib
 #endif
 
 #ifdef TELEMETRY_ENABLED
-  if (log_telemetry_captured(SEDS_DT_KG1000,
-                                 &loadcell_kg1000,
-                                 1U,
-                                 sizeof(loadcell_kg1000), snapshot->monotonic_ms) == SEDS_OK)
-  {
-    g_daq_loadcell_publish_ok_count++;
-  }
-  else
-  {
-    g_daq_loadcell_publish_fail_count++;
-  }
+  daq_network_offer(DAQ_NETWORK_KG1000, SEDS_DT_KG1000, &loadcell_kg1000, 1U, snapshot->monotonic_ms);
 #endif
 }
 
@@ -336,13 +378,8 @@ static void daq_publish_kg50(float raw, uint8_t input, uint64_t monotonic_ms,
 #endif
 #ifdef TELEMETRY_ENABLED
   const float tagged[] = {(float)input, raw};
-  const SedsResult result = input == 0U
-      ? log_telemetry_captured(SEDS_DT_KG50, &raw, 1U, sizeof(raw), monotonic_ms)
-      : log_telemetry_captured(SEDS_DT_DAQ_KG50_SELECTED, tagged, 2U, sizeof(float), monotonic_ms);
-  if (result == SEDS_OK)
-    g_daq_kg50_publish_ok_count++;
-  else
-    g_daq_kg50_publish_fail_count++;
+  daq_network_offer(DAQ_NETWORK_KG50, input == 0U ? SEDS_DT_KG50 : SEDS_DT_DAQ_KG50_SELECTED,
+                    input == 0U ? &raw : tagged, input == 0U ? 1U : 2U, monotonic_ms);
 #endif
 }
 
@@ -407,12 +444,9 @@ static void daq_report_thread_entry(ULONG argument)
     if (work->flags & DAQ_REPORT_KG50)
       daq_publish_kg50(work->kg50, work->kg50_input, work->monotonic_ms, &work->calibration);
 #ifdef TELEMETRY_ENABLED
-    if (work->flags & DAQ_REPORT_TEMPERATURE) {
-      if (log_telemetry_captured(SEDS_DT_DAQ_ADC_TEMPERATURE, &work->temperature,
-                                 1U, sizeof(float), work->monotonic_ms) == SEDS_OK)
-        g_daq_temperature_publish_ok_count++;
-      else g_daq_temperature_publish_fail_count++;
-    }
+    if (work->flags & DAQ_REPORT_TEMPERATURE)
+      daq_network_offer(DAQ_NETWORK_TEMPERATURE, SEDS_DT_DAQ_ADC_TEMPERATURE,
+                        &work->temperature, 1U, work->monotonic_ms);
 #endif
     g_daq_report_completed_count++;
     (void)tx_block_release(work);
@@ -670,6 +704,14 @@ UINT create_daq_thread(void)
                             (TX_TIMER_TICKS_PER_SECOND * DAQ_IO_THREAD_SLICE_MS + 999U) / 1000U,
                             TX_AUTO_START);
   if (status != TX_SUCCESS) return status;
+#ifdef TELEMETRY_ENABLED
+  status = tx_thread_create(&g_network_thread, "Live sensor network", daq_network_thread_entry, 0U,
+                            g_network_stack, sizeof(g_network_stack), DAQ_IO_THREAD_PRIORITY,
+                            DAQ_IO_THREAD_PRIORITY,
+                            (TX_TIMER_TICKS_PER_SECOND * DAQ_IO_THREAD_SLICE_MS + 999U) / 1000U,
+                            TX_AUTO_START);
+  if (status != TX_SUCCESS) return status;
+#endif
   return tx_thread_create(&daq_thread,
                           "DAQ Thread",
                           daq_thread_entry,

@@ -136,7 +136,40 @@ Edit `Core/Inc/daq_rates.h` and rebuild/reflash:
 - `DAQ_ADC_OSR`: hardware ADC oversampling filter (default 1024).
 - `DAQ_ADC_READ_RATE_HZ`: requested timer-paced ADC reads (default 3700).
 - `DAQ_ACQUISITION_PERIOD_MS`: raw queue drain cadence (default 2 ms).
-- `DAQ_BROADCAST_RATE_HZ`: filtered network/SD replay cadence (default 250 Hz per loadcell).
+- `DAQ_BROADCAST_RATE_HZ`: filtered report/SD replay cadence (default 250 Hz per loadcell).
+
+Edit `Core/Inc/daq_network_config.h` for the aggregate live rate and split:
+
+- `DAQ_NETWORK_RATE_HZ`: **100 sensor packets/s total**, independent of ADC and SD rates.
+- `DAQ_NETWORK_WEIGHT_KG50` and `DAQ_NETWORK_WEIGHT_KG1000`: **10 each**, giving both loadcells equal top priority and 40 packets/s each at the default total.
+- `DAQ_NETWORK_WEIGHT_TEMPERATURE`, `_SDADC`, `_SAR`, `_CURRENT`, `_POWER`: **1 each**, giving each auxiliary stream 4 packets/s.
+
+Shares are normalized by the total weight. A zero weight disables only that
+stream's live network output; at least one weight must be positive. Each stream
+keeps one bounded latest sample. Coalescing replaces unsent NETWORK work after
+the original SD mirror enqueue; it never removes acquisition or SD records.
+The selected 50 kg input remains one stream, including when its input changes.
+A single worker interleaves these samples and caps actual SDK submissions using
+monotonic time. Stalls do not produce catch-up floods. Heartbeats, commands,
+acknowledgements and discovery bypass this sensor-only scheduler.
+
+ADC acquisition, raw SD batches, calibrated records and the 250 Hz loadcell SD
+mirrors retain their cadence and capture timestamps. `g_daq_network_offered`,
+`g_daq_network_coalesced`, `g_daq_network_sent` and `g_daq_network_failed` expose
+per-stream counters in the order declared in `daq_network_schedule.h`.
+Coalescing is intentional; an SDK refusal is a separate failure counter.
+
+```sh
+# Uses the total and split from daq_network_config.h:
+python3 build.py build --release
+python3 build.py flash --release --method stm32prog-cli
+# Optional total-rate override; the header weights still apply:
+python3 build.py build --release --network-rate-hz 100
+```
+
+A normal build clears a previous CMake rate override and uses the header again.
+The optional CLI override accepts 1..1000; actual delivered rate also depends on
+available source samples and transport capacity. Empty weighted slots stay empty.
 
 The raw SD byte pool budgets 800 ms at the configured acquisition rate.
 Batch capacity scales with the acquisition interval (12 records per batch and
@@ -144,7 +177,7 @@ Batch capacity scales with the acquisition interval (12 records per batch and
 smaller batches within that same byte budget. No stale
 reports are burst out after a missed deadline. Fresh ADC data, CPU scheduling,
 CAN capacity and the Gateway/Pico-Fi link constrain actual received cadence;
-250 Hz per loadcell is a producer target, not measured end-to-end throughput.
+100 aggregate live sensor packets/s is a cap, not measured end-to-end throughput.
 
 The report window preserves its phase across scheduler jitter. A low-voltage
 SD flush notification no longer permanently switches acquisition to a 100 ms

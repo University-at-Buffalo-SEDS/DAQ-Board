@@ -425,6 +425,7 @@ class BuildConfig:
     packet_store: str = "compact"
     sedsnet_ref: str = "main"
     watchdog: bool = True
+    network_rate_hz: Optional[int] = None
 
     @property
     def build_dir(self) -> Path:
@@ -460,6 +461,7 @@ def configure_and_build(ui: UI, cfg: BuildConfig, target: str | None = None) -> 
         f"-DCMAKE_TOOLCHAIN_FILE={str(cfg.toolchain_file)}",
         "-DCMAKE_COMMAND=cmake",
         watchdog_flag,
+        f"-DDAQ_NETWORK_RATE_HZ={cfg.network_rate_hz if cfg.network_rate_hz is not None else ''}",
         f"-DTELEMETRY_USE_TLSF={'ON' if cfg.allocator == 'tlsf' else 'OFF'}",
         f"-DSEDSNET_GIT_REF={cfg.sedsnet_ref}",
         f"-DSEDSNET_COMPACT_PACKET_STORE={'ON' if cfg.packet_store == 'compact' else 'OFF'}",
@@ -859,6 +861,8 @@ def make_parser() -> argparse.ArgumentParser:
         sp.add_argument("--sedsnet-ref", choices=["main", "dev"], default=None,
                         help="SEDSnet branch; current remote commit is fetched, with offline fallback.")
         sp.add_argument("--no-telemetry", action="store_true", help="Configure with -DENABLE_TELEMETRY=OFF")
+        sp.add_argument("--network-rate-hz", type=int, default=None,
+                        help="Override the aggregate live sensor cap from daq_network_config.h (default 100); ADC/SD cadence unchanged.")
         watchdog = sp.add_mutually_exclusive_group()
         watchdog.add_argument("--watchdog", dest="watchdog", action="store_true", default=True,
                               help="Enable the task-progress hardware watchdog (default; matching bootloader required).")
@@ -931,11 +935,15 @@ def build_cfg_from_args(ui: UI, args: argparse.Namespace) -> BuildConfig:
         raise FriendlyError(f"Toolchain file not found: {toolchain}\n"
                             f"Pass --toolchain <path> to set it explicitly.")
 
+    if args.network_rate_hz is not None and not 1 <= args.network_rate_hz <= 1000:
+        raise FriendlyError("--network-rate-hz must be from 1 to 1000")
+
     return BuildConfig(
         repo_root=repo_root,
         build_type=build_type,
         telemetry=not args.no_telemetry,
         watchdog=args.watchdog,
+        network_rate_hz=args.network_rate_hz,
         allocator=args.allocator,
         packet_store=args.packet_store,
         sedsnet_ref=args.sedsnet_ref or "main",

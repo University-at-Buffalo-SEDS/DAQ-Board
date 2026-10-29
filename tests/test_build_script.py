@@ -9,6 +9,22 @@ import build
 
 
 class OtaBuildScriptTests(unittest.TestCase):
+
+    def test_network_rate_default_override_and_invalid_values(self):
+        for rate in (None, 100, 250, 37):
+            command = ["build", "--release"]
+            if rate is not None:
+                command += ["--network-rate-hz", str(rate)]
+            cfg = build.build_cfg_from_args(mock.Mock(), build.make_parser().parse_args(command))
+            self.assertEqual(cfg.network_rate_hz, rate)
+            with mock.patch.object(build, "run") as execute, mock.patch.object(build, "pick_elf", return_value=Path("/tmp/test.elf")):
+                build.configure_and_build(mock.Mock(), cfg)
+            self.assertIn(f"-DDAQ_NETWORK_RATE_HZ={rate if rate is not None else ''}", execute.call_args_list[0].args[1])
+        for rate in (0, -1, 1001):
+            args = build.make_parser().parse_args(["build", "--network-rate-hz", str(rate)])
+            with self.assertRaisesRegex(build.FriendlyError, "from 1 to 1000"):
+                build.build_cfg_from_args(mock.Mock(), args)
+
     def test_clean_command_removes_all_or_selected_build_artifacts(self):
         self.assertEqual(build.make_parser().parse_args(["clean"]).cmd, "clean")
         ui = mock.Mock()

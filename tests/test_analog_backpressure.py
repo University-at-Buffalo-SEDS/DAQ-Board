@@ -1,4 +1,4 @@
-"""Exercise the actual analog publisher under bounded startup queue pressure."""
+"""Analog offers cannot block behind a busy network or allocate retry queues."""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -8,77 +8,44 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AnalogBackpressureTests(unittest.TestCase):
-    def test_retry_preserves_reports_and_shared_deadline_without_allocating(self):
-        source = (ROOT / "Core/Src/daq_thread.c").read_text()
-        start = source.index("volatile uint32_t g_daq_analog_publish_ok_count;")
-        end = source.index("static void daq_publish_analog(", start)
+    def test_latest_network_offers_preserve_all_independent_analog_streams(self):
+        source = (ROOT / 'Core/Src/daq_thread.c').read_text()
+        start = source.index('static void daq_publish_analog_packet(')
+        end = source.index('static void daq_publish_analog(', start)
         harness = r'''
 #include <assert.h>
 #include <stdint.h>
 #include <stddef.h>
-#include <string.h>
-typedef unsigned SedsDataType;
-typedef int SedsResult;
-enum { SEDS_OK=0, SEDS_IO=-14, SEDS_BAD_ARG=-10 };
-static uint32_t now;
-static unsigned calls, sleeps, refusals, accepted[4];
-static int permanent;
-static float saved[4][8];
-static uint32_t HAL_GetTick(void) { return now; }
-static void tx_thread_sleep(unsigned ticks) {
-    assert(ticks == (TX_TIMER_TICKS_PER_SECOND+999U)/1000U);
-    now += ticks*1000U/TX_TIMER_TICKS_PER_SECOND;
-    sleeps++;
-}
-static SedsResult log_telemetry_asynchronous(unsigned type, const float *p,
-                                             size_t count, size_t size) {
-    assert(type<4 && count<=8 && size==sizeof(float));
-    calls++;
-    if (permanent) return permanent;
-    if (refusals) { refusals--; return SEDS_IO; }
-    accepted[type]++;
-    memcpy(saved[type], p, count*size);
-    return SEDS_OK;
+#include "daq_network_schedule.h"
+#define SEDS_DT_DAQ_SDADC_VOLTAGES 0
+#define SEDS_DT_DAQ_SAR_VOLTAGES 1
+#define SEDS_DT_DAQ_CURRENT_SENSE 2
+#define SEDS_DT_DAQ_POWER_MONITOR 3
+static daq_network_schedule_t state;
+static unsigned calls,coalesced[7];
+static void daq_network_offer(unsigned stream,uint32_t type,const float *values,size_t count,uint64_t time){
+ int replaced=daq_network_schedule_offer(&state,stream,type,values,count,time);
+ assert(replaced>=0);coalesced[stream]+=replaced;calls++;
 }
 ''' + source[start:end] + r'''
-int main(void) {
-    const float values[8]={1,2,3,4,5,6,7,8};
-    refusals=4;
-    const uint32_t batch=now;
-    for (unsigned type=0; type<4; type++)
-        daq_publish_analog_packet(type, values, 8, batch);
-    assert(calls==8 && sleeps==4 && now==4);
-    assert(g_daq_analog_publish_retry_count==4);
-    assert(g_daq_analog_publish_ok_count==4 && !g_daq_analog_publish_fail_count);
-    for (unsigned type=0; type<4; type++) {
-        assert(accepted[type]==1);
-        assert(!memcmp(saved[type],values,sizeof(values)));
-    }
-    // Persistent pressure expires once for the whole snapshot, including
-    // rollover. Later packets still get one attempt, without another wait.
-    now=UINT32_MAX-50U;
-    const uint32_t wrapped=now;
-    const unsigned before=sleeps;
-    permanent=SEDS_IO;
-    daq_publish_analog_packet(0, values, 8, wrapped);
-    assert((uint32_t)(now-wrapped)==100U && sleeps-before==100);
-    daq_publish_analog_packet(1, values, 8, wrapped);
-    assert((uint32_t)(now-wrapped)==100U && sleeps-before==100);
-    assert(g_daq_analog_publish_fail_count==2);
-    permanent=SEDS_BAD_ARG;
-    const unsigned before_error=sleeps;
-    daq_publish_analog_packet(2, values, 8, now);
-    assert(sleeps==before_error && g_daq_analog_publish_fail_count==3);
-    assert(g_daq_analog_publish_ok_count==4);
+int main(void){
+ float values[8]={0};
+ const uint64_t captured=UINT64_C(0x100000123);
+ for(unsigned n=0;n<3;n++)for(unsigned type=0;type<4;type++){
+   values[0]=(float)(10*n+type);daq_publish_analog_packet(type,values,8,captured+n);
+ }
+ assert(calls==12);
+ for(unsigned type=0;type<4;type++){
+   const unsigned stream=DAQ_NETWORK_SDADC+type;
+   assert(coalesced[stream]==2 && state.latest[stream].pending);
+   assert(state.latest[stream].values[0]==(float)(20+type));
+   assert(state.latest[stream].captured_ms==captured+2 && state.latest[stream].type==type);
+ }
 }
 '''
-        for frequency in (1000, 50000):
-            with self.subTest(frequency=frequency), tempfile.TemporaryDirectory() as tmp:
-                binary = Path(tmp) / "analog-backpressure"
-                subprocess.run(
-                    ["cc", "-DTELEMETRY_ENABLED=1", "-std=c11", "-Wall", "-Wextra", "-Werror",
-                     "-fsanitize=address,undefined",
-                     f"-DTX_TIMER_TICKS_PER_SECOND={frequency}U", "-x", "c", "-",
-                     "-o", str(binary)], input=harness, text=True, check=True,
-                )
-                subprocess.run([str(binary)], check=True)
+        with tempfile.TemporaryDirectory() as directory:
+            exe=Path(directory)/'test'
+            subprocess.run(['cc','-DTELEMETRY_ENABLED=1','-std=c11','-Wall','-Wextra','-Werror',
+                            '-fsanitize=address,undefined','-I',str(ROOT/'Core/Inc'),
+                            '-x','c','-','-o',str(exe)], input=harness,text=True,check=True)
+            subprocess.run([str(exe)],check=True)

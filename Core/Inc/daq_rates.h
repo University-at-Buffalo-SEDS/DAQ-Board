@@ -1,5 +1,6 @@
 #ifndef DAQ_RATES_H
 #define DAQ_RATES_H
+#include <stdint.h>
 
 /* Board-local settings. No network variables; rebuild/reflash to change.
  * MCLK is the physical CubeMX MCO output and must match the board clock. */

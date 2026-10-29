@@ -117,7 +117,7 @@ class AnalogInputTests(unittest.TestCase):
 
     def test_publication_preserves_units_and_expires_missing_auxiliary_inputs(self):
         source = (ROOT/'Core/Src/daq_thread.c').read_text()
-        publish = source[source.index('volatile uint32_t g_daq_analog_publish_ok_count;'):
+        publish = source[source.index('\nvolatile uint32_t g_daq_analog_publish_ok_count;') + 1:
                          source.index('static void daq_publish_loadcell(')]
         harness = r'''
 #include <assert.h>
@@ -126,14 +126,13 @@ class AnalogInputTests(unittest.TestCase):
 #include <stddef.h>
 #include <string.h>
 #include "daq_rates.h"
+#include "daq_network_schedule.h"
 #include "mcp3564r_board_config.h"
 typedef unsigned SedsDataType;
 typedef int SedsResult;
 #define SEDS_OK 0
 #define SEDS_IO (-14)
 #define TX_TIMER_TICKS_PER_SECOND 1000U
-static uint32_t HAL_GetTick(void) { return 0; }
-static void tx_thread_sleep(unsigned ticks) { (void)ticks; }
 #define SEDS_DT_DAQ_SAR_VOLTAGES 143
 #define SEDS_DT_DAQ_SDADC_VOLTAGES 144
 #define SEDS_DT_DAQ_CURRENT_SENSE 145
@@ -150,6 +149,9 @@ static unsigned counts[4], calls;
 static int log_telemetry_asynchronous(SedsDataType type,const float *data,size_t count,size_t size) {
  assert(type>=143 && type<=146 && size==sizeof(float));
  counts[type-143]=count;memcpy(packets[type-143],data,count*size);calls++;return 0;
+}
+static void daq_network_offer(unsigned stream,uint32_t type,const float *data,size_t count,uint64_t time){
+ (void)stream;(void)time;(void)log_telemetry_asynchronous(type,data,count,sizeof(float));
 }
 ''' + publish + r'''
 int main(void) {
@@ -169,7 +171,7 @@ int main(void) {
  assert(calls==5 && isfinite(packets[1][4]));
  snapshot.monotonic_ms=401;daq_publish_analog(&snapshot,&window);
  assert(calls==6 && isnan(packets[1][4]));
- assert(g_daq_analog_publish_fail_count==0 && g_daq_analog_publish_ok_count==6);
+ assert(g_daq_analog_publish_fail_count==0 && g_daq_analog_publish_ok_count==0); /* offers are not completed sends */
 }
 '''
         with tempfile.TemporaryDirectory() as tmp:
@@ -286,11 +288,12 @@ typedef int TX_THREAD;
 #define TX_AUTO_START 1U
 #define TX_NO_TIME_SLICE 0U
 #define TX_TIMER_TICKS_PER_SECOND 1000U
-static TX_THREAD g_analog_thread,daq_thread,sd_writer_thread,g_report_thread;
+static TX_THREAD g_analog_thread,daq_thread,sd_writer_thread,g_report_thread,g_network_thread;
 static int g_report_pool,g_report_queue;
-static ULONG g_report_pool_storage[64],g_report_queue_storage[16],g_report_stack[2048];
+static ULONG g_report_pool_storage[64],g_report_queue_storage[16],g_report_stack[2048],g_network_stack[2048];
 typedef struct {unsigned x;} daq_report_t;
 static void daq_report_thread_entry(ULONG x){(void)x;}
+static void daq_network_thread_entry(ULONG x){(void)x;}
 static int g_analog_pool,g_analog_queue;
 static ULONG g_analog_pool_storage[64],g_analog_queue_storage[3],g_analog_stack[1024],g_daq_thread_stack[1024],g_sd_writer_thread_stack[1024];
 typedef struct {unsigned x;} daq_analog_work_t;
@@ -298,12 +301,12 @@ typedef struct {unsigned x;} daq_analog_work_t;
 static void daq_analog_thread_entry(ULONG x){(void)x;}
 static void daq_thread_entry(ULONG x){(void)x;}
 static void sd_writer_thread_entry(ULONG x){(void)x;}
-static UINT priorities[4],thresholds[4];static ULONG slices[4];
+static UINT priorities[5],thresholds[5];static ULONG slices[5];
 static UINT tx_block_pool_create(int *p,char *n,unsigned block,void *buf,unsigned size){(void)p;(void)n;(void)block;(void)buf;(void)size;return 0;}
 static UINT tx_queue_create(int *p,char *n,unsigned words,void *buf,unsigned size){(void)p;(void)n;(void)words;(void)buf;(void)size;return 0;}
 static UINT tx_thread_create(TX_THREAD *p,char *n,void (*entry)(ULONG),ULONG arg,void *stack,ULONG size,UINT priority,UINT threshold,ULONG slice,UINT start){
  (void)n;(void)entry;(void)arg;(void)stack;(void)size;(void)start;
- unsigned i=p==&g_analog_thread?0:p==&daq_thread?1:p==&g_report_thread?3:2;
+ unsigned i=p==&g_analog_thread?0:p==&daq_thread?1:p==&g_report_thread?3:p==&g_network_thread?4:2;
  priorities[i]=priority;thresholds[i]=threshold;slices[i]=slice;return 0;
 }
 UINT create_daq_thread(void)
@@ -313,8 +316,8 @@ int main(void){
  /* Acquisition must preempt backlogged I/O; SD cannot starve analog/report
   * peers. ThreadX uses smaller numbers for higher priorities. */
  assert(priorities[1]<priorities[0]);
- assert(priorities[0]==priorities[2] && priorities[0]==priorities[3]);
- for(unsigned i=0;i<4;i++){
+ assert(priorities[0]==priorities[2] && priorities[0]==priorities[3] && priorities[0]==priorities[4]);
+ for(unsigned i=0;i<5;i++){
   assert(thresholds[i]==priorities[i]);
   assert(slices[i]>0 && slices[i]<=TX_TIMER_TICKS_PER_SECOND/1000U);
  }

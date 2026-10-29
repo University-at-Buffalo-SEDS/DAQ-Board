@@ -38,6 +38,7 @@ class ReportTests(unittest.TestCase):
 #include <stdlib.h>
 #include <setjmp.h>
 #include "daq_rates.h"
+#include "daq_network_schedule.h"
 typedef unsigned UINT;
 typedef uintptr_t ULONG;
 typedef void VOID;
@@ -60,7 +61,7 @@ static UINT tx_queue_receive(TX_QUEUE*q,VOID*p,unsigned wait){(void)q;assert(wai
 static uint64_t daq_log_monotonic_ms(void){return 12350;}
 static void daq_publish_loadcell(const daq_snapshot_t*s,const daq_calibration_t*c){assert(s->monotonic_ms==12300 && s->ext_adc_loadcell_kg1000==1.25f && c->slope==2);published++;}
 static void daq_publish_kg50(float value,uint8_t input,uint64_t time,const daq_calibration_t*c){assert(input==1 && value==2.5f && time==12300 && c->slope==2);published++;}
-static int log_telemetry_captured(unsigned type,const void*data,size_t count,size_t size,uint64_t time){assert(type==140 && *(const float*)data==30 && count==1 && size==4 && time==12300);published++;return 0;}
+static void daq_network_offer(unsigned stream,unsigned type,const float*data,size_t count,uint64_t time){assert(stream==DAQ_NETWORK_TEMPERATURE && type==140 && *data==30 && count==1 && time==12300);published++;}
 ''' + source[start:end] + r'''
 int main(void){
  assert(DAQ_BROADCAST_RATE_HZ==250 && DAQ_BROADCAST_PERIOD_MS==4);

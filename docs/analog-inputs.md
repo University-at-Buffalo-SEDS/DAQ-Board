@@ -87,8 +87,16 @@ lossless 12 kHz recording qualification.
 
 ## Network and GroundStation
 
-Loadcells default to **250 reports/s each** (500 combined), with a 4 ms
-downsampling window. ADC acquisition and raw SD capture keep their own rates.
+Loadcell report windows and SD mirrors default to **250 records/s each**, with
+a 4 ms downsampling window. `Core/Inc/daq_network_config.h` sets an independent
+**100-packet/s aggregate live sensor cap** and editable stream weights. Both
+loadcells have equal top priority: 40 packets/s each at default weights; the
+five auxiliary streams each get 4 packets/s. One latest NETWORK sample per
+stream is coalesced between sends. ADC acquisition, raw/calibrated SD records
+and loadcell SD mirrors are unchanged. `--network-rate-hz` optionally overrides
+the total; normal builds use the header. Heartbeats/ACKs/control/discovery are
+outside this sensor scheduler.
+
 `cmake -S . -B build/Release_Script -DDAQ_BROADCAST_RATE_HZ=500` enables an
 explicit 500 Hz-per-channel test; use `250` to restore the normal setting.
 
