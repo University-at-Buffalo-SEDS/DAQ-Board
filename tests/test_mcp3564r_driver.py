@@ -542,6 +542,41 @@ class Mcp3564rDriverTests(unittest.TestCase):
     def test_p6_differential_uses_fast_scan_and_switches_only_between_dma_transfers(self):
         subprocess.run([str(self.binary), "p6"], check=True)
 
+    def test_p6_switch_waits_for_chamber_and_loadcell_in_either_conversion_order(self):
+        regression = r"""
+static void test_complete_scan(void) {
+  mcp3564r_request_kg50_input(1);
+  assert(mcp3564r_start_dma()==HAL_OK);
+  const unsigned pressure=DAQ_CHAMBER_ADC_CHANNEL;
+  const unsigned scan=1U|DAQ_CHAMBER_SCAN_MASK;
+  assert(registers[7]==scan);
+  for(unsigned pass=0;pass<8;++pass) {
+    unsigned first=pass%2 ? pressure : 0U, second=pass%2 ? 0U : pressure;
+    receive(first,1000);(void)take(first,1000);ready=0;
+    assert(mcp3564r_start_dma()==HAL_OK);
+    /* Previously the first CH0 conversion immediately switched to P6,
+     * resetting the fast scan before CH6 ever produced a conversion. */
+    assert(registers[7]==scan && registers[3]==0xcf);
+    receive(first,1001);(void)take(first,1001);ready=0;
+    assert(mcp3564r_start_dma()==HAL_OK && registers[7]==scan);
+    receive(second,2000);(void)take(second,2000);ready=0;
+    assert(mcp3564r_start_dma()==HAL_OK && registers[7]==0x200 && registers[3]==0xef);
+    receive(9,3000);(void)take(9,3000);ready=0;
+    assert(mcp3564r_start_dma()==HAL_OK && registers[7]==scan && registers[3]==0xcf);
+  }
+}
+"""
+        folder=pathlib.Path(self.tmp.name)
+        for pin in (6,7):
+            harness=folder/f'complete-scan-{pin}.c'
+            text=HARNESS.replace('int main(int argc, char **argv) {',regression+'\nint main(int argc, char **argv) {')
+            text=text.replace('if (!strcmp(argv[1], "config"))','if (!strcmp(argv[1], "complete")) test_complete_scan();\n  else if (!strcmp(argv[1], "config"))')
+            harness.write_text(text)
+            binary=folder/f'complete-scan-{pin}'
+            subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',f'-DDAQ_CHAMBER_ADC_CHANNEL={pin}',
+                '-I',str(folder),'-I',str(ROOT/'Core/Inc'),str(ROOT/'Core/Src/mcp3564r.c'),str(harness),'-lm','-o',str(binary)],check=True,capture_output=True,text=True)
+            subprocess.run([str(binary),'complete'],check=True)
+
     def test_configured_p4_pressure_uses_fast_unity_gain_and_not_p6_gain16(self):
         chamber_test = r"""
 static void test_chamber(void) {
@@ -556,7 +591,9 @@ static void test_chamber(void) {
   receive(channel,0);assert(daq_chamber_pressure_psi(take(channel,0).voltage_v)==0);
   mcp3564r_request_kg50_input(1);
   assert(mcp3564r_start_dma()==HAL_OK && registers[7]==(1U|DAQ_CHAMBER_SCAN_MASK));
-  receive(channel,1588752);(void)take(channel,1588752);
+  receive(channel,1588752);(void)take(channel,1588752);ready=0;
+  assert(mcp3564r_start_dma()==HAL_OK && registers[7]==(1U|DAQ_CHAMBER_SCAN_MASK));
+  receive(0,790001);(void)take(0,790001);
   assert(mcp3564r_start_dma()==HAL_OK && registers[7]==0x200 && registers[3]==0xef);
   receive(channel,1588752);assert(!mcp3564r_pending_samples());
   receive(9,123);(void)take(9,123);

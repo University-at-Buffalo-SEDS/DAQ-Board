@@ -70,7 +70,7 @@ typedef struct
   uint32_t temperature_attempt_ms;
   volatile uint8_t aux_scan_active;
   volatile uint8_t p6_scan_active;
-  volatile uint8_t fast_sample_seen;
+  volatile uint16_t fast_scan_seen;
   volatile uint8_t aux_seen;
   uint32_t aux_attempt_ms;
   mcp3564r_sample_entry_t queue[MCP3564R_SAMPLE_QUEUE_DEPTH];
@@ -300,7 +300,7 @@ static void mcp3564r_store_raw32(uint32_t raw32)
     g_mcp3564r.aux_seen |= (uint8_t)(1U << channel);
   }
   else if ((mcp3564r_fast_scan(g_kg50_input_active) & (1U << channel)) == 0U) return;
-  if (g_mcp3564r.aux_scan_active == 0U) g_mcp3564r.fast_sample_seen = 1U;
+  if (g_mcp3564r.aux_scan_active == 0U) g_mcp3564r.fast_scan_seen |= (uint16_t)(1U << channel);
   entry.raw32 = raw32;
   entry.monotonic_ms = HAL_GetTick();
   entry.temperature_c = g_mcp3564r.temperature_valid &&
@@ -428,7 +428,7 @@ static HAL_StatusTypeDef mcp3564r_switch_scan(uint8_t mode)
   g_mcp3564r.temperature_scan_active = temperature;
   g_mcp3564r.aux_scan_active = mode == 2U;
   g_mcp3564r.p6_scan_active = mode == 3U && requested_input == 1U;
-  g_mcp3564r.fast_sample_seen = 0U;
+  g_mcp3564r.fast_scan_seen = 0U;
   g_mcp3564r.aux_seen = 0U;
   g_mcp3564r.temperature_scan_complete = 0U;
   g_mcp3564r.start_sent = 0U;
@@ -568,10 +568,15 @@ HAL_StatusTypeDef mcp3564r_start_dma(void)
   }
 
   /* CONFIG2 gain is shared. Alternate settled single-channel fast scans:
-   * CH0 at x1, P6 differential channel 9 at x16. Never rewrite SPI registers
+   * CH0 + chamber pressure at x1, P6 differential channel 9 at x16.
+   * Finish every channel in the current scan before resetting its filter;
+   * switching after only CH0 can starve the following pressure conversion.
+   * Never rewrite SPI registers
    * from the DMA ISR or change gain underneath an in-flight conversion. */
   if (g_kg50_input_active == 1U && g_mcp3564r.temperature_scan_active == 0U &&
-      g_mcp3564r.aux_scan_active == 0U && g_mcp3564r.fast_sample_seen != 0U)
+      g_mcp3564r.aux_scan_active == 0U &&
+      (g_mcp3564r.fast_scan_seen & mcp3564r_fast_scan(g_kg50_input_active)) ==
+          mcp3564r_fast_scan(g_kg50_input_active))
     return mcp3564r_switch_scan(g_mcp3564r.p6_scan_active ? 0U : 3U);
 
   if (g_mcp3564r.dma_busy != 0U) return HAL_BUSY;
