@@ -21,7 +21,7 @@ class PressureSdHandoffTests(unittest.TestCase):
         source = (ROOT/'Core/Src/sd_card.c').read_text()
         declarations = source[source.index('typedef struct {\n  pressure_sd_batch_t batch;'):source.index('static TX_MUTEX g_sd_pool_mutex;')]
         # Other static queue declarations are not needed by these two functions.
-        declarations = declarations.replace('static ULONG g_sd_pressure_queue_storage[16U * SD_PRESSURE_MESSAGE_WORDS];', '')
+        declarations = declarations.replace('static ULONG g_sd_pressure_queue_storage[SD_PRESSURE_QUEUE_BATCHES * SD_PRESSURE_MESSAGE_WORDS];', '')
         prefix = r'''
 #include "pressure_sd_wire.h"
 #include <assert.h>
@@ -95,6 +95,59 @@ int main(void){
         with tempfile.TemporaryDirectory() as directory:
             executable=Path(directory)/'handoff'
             subprocess.run(['cc','-std=c11','-O1','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(executable)],input=code,text=True,check=True)
+            subprocess.run([str(executable)],check=True)
+
+    def test_pressure_queue_buffers_more_than_two_seconds_without_pool_allocation(self):
+        source=(ROOT/'Core/Src/sd_card.c').read_text()
+        declarations=source[source.index('typedef struct {\n  pressure_sd_batch_t batch;'):source.index('static uint8_t g_sd_pressure_pending;')]
+        code=r'''
+#include "pressure_sd_wire.h"
+#include <assert.h>
+#include <stdint.h>
+#include <string.h>
+typedef uintptr_t ULONG;typedef unsigned UINT;typedef int sd_card_status_t;
+typedef struct {ULONG *storage;unsigned count,head,tail,capacity;} TX_QUEUE;
+enum{TX_SUCCESS=0,TX_NO_WAIT=0,SD_CARD_STATUS_OK=0,SD_CARD_STATUS_BUSY=1,SD_CARD_STATUS_BACKPRESSURE=2,SD_CARD_STATUS_IO_ERROR=3};
+static unsigned mask;
+static uint32_t __get_PRIMASK(void){return mask;}
+static void __disable_irq(void){mask=1;}
+static void __set_PRIMASK(uint32_t value){mask=value;}
+static uint64_t sd_run_snapshot(void){assert(mask);return 42;}
+static unsigned g_sd_services_initialized=1,g_sd_route_epoch=77;
+static unsigned g_sd_pressure_records_dropped,g_sd_pressure_records_enqueued;
+'''+declarations+r'''
+static UINT tx_queue_send(TX_QUEUE *queue,void *message,ULONG wait){
+ assert(mask&&queue==&g_sd_pressure_queue&&wait==TX_NO_WAIT);
+ if(queue->count==queue->capacity)return 1;
+ memcpy(queue->storage+queue->tail*SD_PRESSURE_MESSAGE_WORDS,message,SD_PRESSURE_MESSAGE_WORDS*sizeof(ULONG));
+ queue->tail=(queue->tail+1)%queue->capacity;queue->count++;return 0;
+}
+'''+function(source,'sd_card_log_pressure_batch')+r'''
+int main(void){
+ g_sd_pressure_queue.storage=g_sd_pressure_queue_storage;
+ g_sd_pressure_queue.capacity=sizeof(g_sd_pressure_queue_storage)/(SD_PRESSURE_MESSAGE_WORDS*sizeof(ULONG));
+ assert(g_sd_pressure_queue.capacity>=128);
+ for(unsigned i=0;i<128;i++){
+  pressure_sd_batch_t batch={.uptime_ms=100+i*16,.unix_ms=1700000000000ULL+i*16,.first_sequence=i*4};
+  for(unsigned j=0;j<4;j++){batch.raw[j]=i*4+j;batch.psi[j]=(float)(i*4+j)/3;}
+  assert(sd_card_log_pressure_batch(&batch)==SD_CARD_STATUS_OK);
+ }
+ assert(g_sd_pressure_records_enqueued==512&&!g_sd_pressure_records_dropped);
+ for(unsigned i=0;i<128;i++){
+  sd_pressure_message_t message;
+  memcpy(&message,g_sd_pressure_queue.storage+i*SD_PRESSURE_MESSAGE_WORDS,sizeof(message));
+  assert(message.batch.uptime_ms==100+i*16&&message.batch.unix_ms==1700000000000ULL+i*16);
+  assert(message.session==42&&message.route_epoch==77&&message.batch.first_sequence==i*4);
+  for(unsigned j=0;j<4;j++)assert(message.batch.raw[j]==i*4+j&&message.batch.psi[j]==(float)(i*4+j)/3);
+ }
+ pressure_sd_batch_t overflow={0};assert(sd_card_log_pressure_batch(&overflow)==SD_CARD_STATUS_BACKPRESSURE);
+ assert(g_sd_pressure_records_dropped==4);
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            executable=Path(directory)/'pressure-reserve'
+            subprocess.run(['cc','-std=c11','-O1','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',
+                '-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(executable)],input=code,text=True,check=True)
             subprocess.run([str(executable)],check=True)
 
 if __name__=='__main__': unittest.main()

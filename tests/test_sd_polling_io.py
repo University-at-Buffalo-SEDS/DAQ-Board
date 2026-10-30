@@ -13,6 +13,7 @@ class SdPollingTests(unittest.TestCase):
         adapter = "sd_card_status_t sd_card_enqueue_csv_row" + source.split(
             "sd_card_status_t sd_card_enqueue_csv_row", 1)[1].split(
             "sd_card_status_t sd_card_enqueue_raw_adc_samples", 1)[0]
+        required=source[source.index("static uint8_t sd_required_sensor_name("):source.index("static uint64_t sd_row_sequence;")]
         code = r'''
 #include <assert.h>
 #include <stdint.h>
@@ -26,7 +27,9 @@ typedef int sd_card_status_t;
 typedef struct { float slope; } daq_calibration_t;
 typedef struct { daq_calibration_t calibration; char line[384]; uint16_t len; uint64_t session; } sd_line_slot_t;
 enum { SD_CARD_STATUS_OK, SD_CARD_STATUS_BUSY, SD_CARD_STATUS_BACKPRESSURE, SD_CARD_STATUS_IO_ERROR };
-static unsigned g_sd_services_initialized, g_sd_line_drop_count;
+static unsigned g_sd_services_initialized, g_sd_line_drop_count, g_sd_optional_telemetry_dropped, g_sd_essential_telemetry_dropped;
+static unsigned optional_allowed=1;
+static unsigned sd_optional_telemetry_admitted(void){return optional_allowed;}
 static sd_line_slot_t slot;
 static int full, enqueued;
 static sd_line_slot_t *sd_alloc_slot(uint16_t len) { assert(len < 384); return full ? NULL : &slot; }
@@ -38,7 +41,7 @@ static uint64_t network_ms = 1234;
 static uint64_t daq_log_unix_ms(void) { return network_ms; }
 static uint64_t daq_log_monotonic_ms(void) { return 30; }
 static int sd_enqueue_line(sd_line_slot_t *s) { assert(s->len); enqueued++; return SD_CARD_STATUS_OK; }
-''' + adapter + r'''
+''' + required + adapter + r'''
 int main(void) {
   assert(sd_card_enqueue_csv_row("kg1000_network", 20, 0.25f, NULL)==SD_CARD_STATUS_BUSY);
   g_sd_services_initialized=1;
@@ -53,9 +56,14 @@ int main(void) {
   enqueued=1;
   full=1;
   assert(sd_card_enqueue_csv_row("kg1000_network", 40, 0.25f, NULL)==SD_CARD_STATUS_BACKPRESSURE);
-  assert(g_sd_line_drop_count==1 && enqueued==1);
+  assert(g_sd_line_drop_count==1 && enqueued==1 && g_sd_essential_telemetry_dropped==1);
   full=0;
   assert(sd_card_enqueue_csv_row("kg1000_network", 60, 0.25f, NULL)==SD_CARD_STATUS_OK);
+  optional_allowed=0;
+  assert(sd_card_enqueue_csv_row("temperature",60,26.0f,NULL)==SD_CARD_STATUS_BACKPRESSURE);
+  assert(g_sd_optional_telemetry_dropped==1);
+  assert(sd_card_enqueue_csv_row("kg50_network",60,0.25f,NULL)==SD_CARD_STATUS_OK);
+  assert(sd_card_enqueue_csv_row("kg50_p6_network_volts",60,0.25f,NULL)==SD_CARD_STATUS_OK);
 }
 '''
         with tempfile.TemporaryDirectory() as tmp:

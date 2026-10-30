@@ -75,7 +75,7 @@ A 25 ms auxiliary timeout restores the normal scan if a conversion is missing.
 or be zero to disable the auxiliary pass. Unread/stale fields report NaN after
 300 ms. The unchanged load-cell raw encoding preserves saved calibrations.
 
-Each drained MCP sample is queued to SD with its channel and original timestamp:
+Each drained MCP sample is offered to SD with its channel and original timestamp:
 CH0 `mcp3564r_raw`, CH1 `kg50_raw`, CH2–7 `mcp3564r_chN_raw`. Internal analog
 voltage/current rows are captured at 10 Hz. A bounded, time-sliced worker
 publishes analog telemetry and formats these rows with the original capture
@@ -85,6 +85,33 @@ shares the acquisition/SD priority with a 1 ms slice, so a continuously busy SD
 writer cannot starve analog reporting. Queue/write diagnostics
 still determine whether storage kept up; this feature does not establish a
 lossless 12 kHz recording qualification.
+
+### SD backlog policy
+
+The writer retains the same thirteen CSV fields and nine-digit binary32 values.
+Its raw formatter avoids general `snprintf`, caches unchanged temperature text,
+and reuses identical raw/calibrated text. No sample times or measurements are
+cached in place of newer samples.
+
+Small acquisition batches append into a queued sixteen-record tail only when
+calibration, launch session and route epoch match. The writer atomically takes
+ownership before reading a batch; acquisition cannot modify that batch afterward.
+Every record retains its raw code, captured clock, sequence and calibration.
+
+When raw free space falls below 25%, optional ADC channels are shed before the
+loadcells (CH0, CH1/P6 CH9) or configured chamber-pressure channel. Optional
+telemetry is also shed before formatting if raw storage is pressured or less
+than 75% of its row pool remains free. Loadcell mirrors, including the selected
+P6 input, bypass this optional gate. The separate valve-pressure queue holds
+512 samples, just over two seconds at 250 samples/s. This reserve is funded
+from the optional telemetry pool; total static memory does not increase.
+
+`g_sd_raw_essential_records_dropped` and
+`g_sd_essential_telemetry_dropped` must remain zero during qualification.
+`g_sd_raw_optional_records_dropped` and `g_sd_optional_telemetry_dropped`
+identify optional shedding, while `g_sd_raw_records_coalesced` shows batching.
+Card errors and outages can still exhaust finite buffers; written/flushed/drop
+counters distinguish acquisition admission from durable media completion.
 
 ## Network and GroundStation
 

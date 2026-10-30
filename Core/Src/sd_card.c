@@ -7,6 +7,7 @@
 #include "daq_log_time.h"
 #include "sd_float_format.h"
 #include "sd_record_format.h"
+#include "sd_raw_record_format.h"
 #include "sd_file_limit.h"
 #include "daq_timestamp.h"
 #include "sd_calendar.h"
@@ -50,7 +51,8 @@ typedef struct
 
 typedef struct
 {
-  uint16_t count;
+  uint16_t count, capacity;
+  uint32_t route_epoch;
   uint64_t uptime_reference;
   daq_calibration_t calibration;
   uint64_t session;
@@ -61,6 +63,9 @@ static TX_QUEUE g_sd_queue;
 static ULONG g_sd_queue_storage[SD_QUEUE_DEPTH];
 static TX_QUEUE g_sd_raw_queue;
 static ULONG g_sd_raw_queue_storage[SD_RAW_QUEUE_DEPTH];
+/* Only a queued producer tail may be extended. The writer clears ownership
+ * atomically when it removes that exact slot from the queue. */
+static sd_raw_slot_t *g_sd_raw_append_tail;
 /* The receive callback copies one fixed message; CSV and file operations stay
  * in the SD writer. Include the acquisition's session across a launch change. */
 typedef struct {
@@ -71,7 +76,9 @@ typedef struct {
 #define SD_PRESSURE_MESSAGE_WORDS ((sizeof(sd_pressure_message_t) + sizeof(ULONG) - 1U) / sizeof(ULONG))
 _Static_assert(SD_PRESSURE_MESSAGE_WORDS <= 16U, "ThreadX pressure message bounds");
 static TX_QUEUE g_sd_pressure_queue;
-static ULONG g_sd_pressure_queue_storage[16U * SD_PRESSURE_MESSAGE_WORDS];
+/* 512 pressure samples cover over2s of SD-card programming/flush latency. */
+#define SD_PRESSURE_QUEUE_BATCHES 128U
+static ULONG g_sd_pressure_queue_storage[SD_PRESSURE_QUEUE_BATCHES * SD_PRESSURE_MESSAGE_WORDS];
 static uint8_t g_sd_pressure_pending;
 static uint32_t g_sd_pressure_pending_epoch;
 static uint8_t g_sd_line_pending;
@@ -83,10 +90,10 @@ volatile uint32_t g_sd_pressure_records_flushed;
 
 static TX_MUTEX g_sd_pool_mutex;
 static TX_EVENT_FLAGS_GROUP g_sd_flags;
-/* Preserve the old RAM budgets, but allocate only the samples/CSV bytes
- * actually present. Small batches no longer reserve twelve sample records. */
+/* Trade optional telemetry reserve for >2s of valve-pressure batches.
+ * The raw reserve stays unchanged; queued raw tails coalesce small captures. */
 static TX_BYTE_POOL g_sd_line_pool, g_sd_raw_pool;
-static UCHAR g_sd_line_pool_storage[384U * (offsetof(sd_line_slot_t, line) + SD_LINE_MAX)] SD_ALIGN_32;
+static UCHAR g_sd_line_pool_storage[352U * (offsetof(sd_line_slot_t, line) + SD_LINE_MAX)] SD_ALIGN_32;
 static UCHAR g_sd_raw_pool_storage[DAQ_SD_RAW_QUEUE_DEPTH *
     (offsetof(sd_raw_slot_t, samples) + 12U * sizeof(sd_raw_adc_record_t))] SD_ALIGN_32;
 /* Keep the original byte reserve when the fast ADC drain batch grows. This
@@ -236,6 +243,11 @@ volatile uint32_t g_sd_warning_publish_count = 0U;
 volatile uint32_t g_sd_raw_records_written_count = 0U;
 volatile uint32_t g_sd_raw_records_enqueued_count;
 volatile uint32_t g_sd_raw_records_dropped_count;
+volatile uint32_t g_sd_raw_essential_records_dropped;
+volatile uint32_t g_sd_raw_optional_records_dropped;
+volatile uint32_t g_sd_optional_telemetry_dropped;
+volatile uint32_t g_sd_essential_telemetry_dropped;
+volatile uint32_t g_sd_raw_records_coalesced;
 volatile uint32_t g_sd_raw_records_io_lost_count;
 volatile uint32_t g_sd_raw_records_flushed_count;
 volatile uint32_t g_sd_csv_rows_written_count = 0U;
@@ -776,6 +788,18 @@ static uint8_t sd_telemetry_epoch_ready(uint32_t epoch, uint8_t pressure)
   return !present || (int32_t)(epoch - other) <= 0;
 }
 
+/* No IRQ masking around allocation or file I/O. Only queue pointer ownership
+ * changes under PRIMASK, so acquisition cannot append a writer-owned slot. */
+static UINT sd_take_raw_message(ULONG *message)
+{
+  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  const UINT result = tx_queue_receive(&g_sd_raw_queue, message, TX_NO_WAIT);
+  if (result == TX_SUCCESS && g_sd_raw_append_tail == (sd_raw_slot_t *)(uintptr_t)*message)
+    g_sd_raw_append_tail = NULL;
+  __set_PRIMASK(mask);
+  return result;
+}
+
 static void *sd_pool_allocate(TX_BYTE_POOL *pool, size_t bytes)
 {
   void *allocation = NULL;
@@ -818,8 +842,10 @@ static sd_raw_slot_t *sd_alloc_raw_slot(uint16_t count)
   if (tx_mutex_get(&g_sd_pool_mutex, TX_WAIT_FOREVER) != TX_SUCCESS) return NULL;
   slot = sd_pool_allocate(&g_sd_raw_pool, offsetof(sd_raw_slot_t, samples) +
                           (size_t)count * sizeof(sd_raw_adc_record_t));
-  if (slot != NULL && ++g_sd_raw_slots_used > g_sd_raw_slots_peak)
-    g_sd_raw_slots_peak = g_sd_raw_slots_used;
+  if (slot != NULL) {
+    slot->capacity = count;
+    if (++g_sd_raw_slots_used > g_sd_raw_slots_peak) g_sd_raw_slots_peak = g_sd_raw_slots_used;
+  }
   (void)tx_mutex_put(&g_sd_pool_mutex);
   return slot;
 }
@@ -957,6 +983,7 @@ void sd_card_writer_thread_entry(ULONG initial_input)
   ULONG message = 0U;
   sd_raw_slot_t *pending_raw = NULL;
   uint16_t pending_raw_index = 0U;
+  sd_raw_format_cache_t raw_format_cache = {0};
   ULONG last_flush = tx_time_get();
   /* Attempt the first mount immediately. Subsequent missing-card retries stay
    * at one second, but a healthy card should never delay acquisition logging
@@ -1028,7 +1055,7 @@ void sd_card_writer_thread_entry(ULONG initial_input)
 
     /* Bound raw work so a continuously replenished ADC queue cannot starve
      * live/replay rows, calibration rotation, or flush requests. */
-    if (pending_raw == NULL && tx_queue_receive(&g_sd_raw_queue, &message, TX_NO_WAIT) == TX_SUCCESS) {
+    if (pending_raw == NULL && sd_take_raw_message(&message) == TX_SUCCESS) {
       pending_raw = (sd_raw_slot_t *)(uintptr_t)message;
       pending_raw_index = 0U;
     }
@@ -1057,27 +1084,15 @@ void sd_card_writer_thread_entry(ULONG initial_input)
         for (uint16_t i = pending_raw_index; i < slot->count; ++i)
         {
           const sd_raw_adc_record_t *sample = &slot->samples[i];
-          char raw_text[24], calibrated_text[24], temperature_text[24];
-          sd_format_float(temperature_text, sample->adc_temperature_c);
-          sd_format_float(raw_text, sample->raw_value);
-          sd_format_float(calibrated_text, sample->calibrated_value);
-          char stamp_text[21], uptime_text[21], sequence_text[21];
           const uint64_t captured_uptime = board_uptime_project(slot->uptime_reference, sample->monotonic_ms);
-          sd_format_u64(uptime_text, captured_uptime);
-          sd_format_u64(sequence_text, sample->record_sequence);
-          sd_format_u64(stamp_text, daq_timestamp_ms(sample->network_unix_ms, captured_uptime));
-          const int len = snprintf(line, sizeof(line), "%s,%s,%s,,%ld,%s,%s,%s,%s,%ld,%s,%u,%s\r\n",
-                                   stamp_text,
-                                   uptime_text,
-                                   daq_chamber_is_channel(sample->channel) ? "chamber_pressure_raw_volts_psi" : sample->channel < 8U ? (const char *const[]){
-                                     "mcp3564r_raw", "kg50_raw", "mcp3564r_ch2_raw", "mcp3564r_ch3_raw",
-                                     "mcp3564r_ch4_raw", "mcp3564r_ch5_raw", "mcp3564r_ch6_raw", "mcp3564r_ch7_raw"
-                                   }[sample->channel] : sample->channel == 9U ? "mcp3564r_ch2_ch3_gain16_raw" : "invalid_adc_channel",
-                                   (long)sample->raw_adc_code,
-                                   raw_text, calibrated_text,
-                                   sample->network_unix_ms != 0U ? "network" : "local",
-                                   temperature_text, (long)sample->adc_temperature_code,
-                                   uptime_text, BOARD_UPTIME_FREQUENCY_HZ, sequence_text);
+          const char *sensor = daq_chamber_is_channel(sample->channel) ? "chamber_pressure_raw_volts_psi" : sample->channel < 8U ? (const char *const[]){
+              "mcp3564r_raw", "kg50_raw", "mcp3564r_ch2_raw", "mcp3564r_ch3_raw",
+              "mcp3564r_ch4_raw", "mcp3564r_ch5_raw", "mcp3564r_ch6_raw", "mcp3564r_ch7_raw"
+          }[sample->channel] : sample->channel == 9U ? "mcp3564r_ch2_ch3_gain16_raw" : "invalid_adc_channel";
+          const int len = sd_format_csv_raw_record(line, sizeof(line),
+              sample->network_unix_ms, captured_uptime, sensor, sample->raw_adc_code,
+              sample->raw_value, sample->calibrated_value, sample->adc_temperature_c,
+              sample->adc_temperature_code, sample->record_sequence, &raw_format_cache);
           if (len <= 0 || (size_t)len >= sizeof(line)) {
             ++g_sd_write_error_count; ++g_sd_raw_records_io_lost_count;
             pending_raw_index = i + 1U;
@@ -1222,6 +1237,44 @@ static sd_card_status_t sd_enqueue_line(sd_line_slot_t *slot)
   return SD_CARD_STATUS_OK;
 }
 
+static uint8_t sd_raw_is_essential(const sd_raw_adc_record_t *sample)
+{
+  return sample->channel == 0U || sample->channel == 1U || sample->channel == 9U ||
+      daq_chamber_is_channel(sample->channel);
+}
+
+static void sd_raw_count_dropped(const sd_raw_adc_record_t *samples, uint16_t count,
+                                  uint8_t only_optional)
+{
+  for (uint16_t i = 0U; i < count; ++i) {
+    if (sd_raw_is_essential(&samples[i])) {
+      if (only_optional) continue;
+      ++g_sd_raw_essential_records_dropped;
+    } else ++g_sd_raw_optional_records_dropped;
+    ++g_sd_raw_records_dropped_count;
+  }
+}
+
+/* These atomic word reads are an early-shedding hint, never allocation
+ * authorization. Required loadcells and pressure do not use this gate. */
+static uint8_t sd_raw_optional_admitted(void)
+{
+  return g_sd_raw_pool.tx_byte_pool_available >= g_sd_raw_pool.tx_byte_pool_size / 4U;
+}
+
+static uint8_t sd_optional_telemetry_admitted(void)
+{
+  return sd_raw_optional_admitted() &&
+      g_sd_line_pool.tx_byte_pool_available >= (g_sd_line_pool.tx_byte_pool_size / 4U) * 3U;
+}
+
+static uint8_t sd_required_sensor_name(const char *name)
+{
+  return strcmp(name, "kg1000_network") == 0 || strcmp(name, "kg50_network") == 0 ||
+      strcmp(name, "kg50_p6_network_volts") == 0 ||
+      strcmp(name, "chamber_pressure_raw_volts_psi") == 0 || strcmp(name, "valve_pressure_psi") == 0;
+}
+
 static uint64_t sd_row_sequence;
 static uint64_t sd_next_row_sequence(void) {
   const uint32_t saved = __get_PRIMASK(); __disable_irq();
@@ -1231,6 +1284,10 @@ static uint64_t sd_next_row_sequence(void) {
 sd_card_status_t sd_card_log_packet(const SedsPacketView *pkt)
 {
   if (!g_sd_ready || !pkt) return SD_CARD_STATUS_BUSY;
+  if (!sd_optional_telemetry_admitted()) {
+    ++g_sd_optional_telemetry_dropped; ++g_sd_line_drop_count;
+    return SD_CARD_STATUS_BACKPRESSURE;
+  }
   const int32_t want = seds_pkt_to_string_len(pkt);
   char value[SD_LINE_MAX], line[SD_LINE_MAX];
   if (want < 0 || (size_t)want >= sizeof(value) ||
@@ -1287,6 +1344,10 @@ sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,
   {
     return SD_CARD_STATUS_BUSY;
   }
+  if (!sd_required_sensor_name(sensor_name) && !sd_optional_telemetry_admitted()) {
+    ++g_sd_optional_telemetry_dropped; ++g_sd_line_drop_count;
+    return SD_CARD_STATUS_BACKPRESSURE;
+  }
   char line[SD_LINE_MAX];
   daq_calibration_t captured_calibration;
   if (calibration != NULL) captured_calibration = *calibration;
@@ -1305,52 +1366,89 @@ sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,
     return SD_CARD_STATUS_IO_ERROR;
   }
   sd_line_slot_t *slot = sd_alloc_slot((uint16_t)len);
-  if (slot == NULL) { g_sd_line_drop_count++; return SD_CARD_STATUS_BACKPRESSURE; }
+  if (slot == NULL) {
+    ++g_sd_line_drop_count;
+    if (sd_required_sensor_name(sensor_name)) ++g_sd_essential_telemetry_dropped;
+    return SD_CARD_STATUS_BACKPRESSURE;
+  }
   slot->calibration = captured_calibration;
   slot->session = session;
   memcpy(slot->line, line, (size_t)len + 1U);
   slot->len = (uint16_t)len;
-  return sd_enqueue_line(slot);
+  const sd_card_status_t result = sd_enqueue_line(slot);
+  if (result != SD_CARD_STATUS_OK && sd_required_sensor_name(sensor_name))
+    ++g_sd_essential_telemetry_dropped;
+  return result;
 }
 
 sd_card_status_t sd_card_enqueue_raw_adc_samples(const sd_raw_adc_record_t *samples,
                                                  uint16_t count,
                                                  const daq_calibration_t *calibration)
 {
-  /* Buffer the first samples while an already provisioned card mounts, just
-   * as the telemetry queue does. Missing/formatting cards remain bounded by
-   * the pool; the writer alone consumes records after a successful mount. */
-  if ((g_sd_services_initialized == 0U) || (samples == NULL) || (calibration == NULL) || (count == 0U) ||
-      (count > SD_RAW_BATCH_MAX))
-  {
-    if (samples && count && count <= SD_RAW_BATCH_MAX) g_sd_raw_records_dropped_count += count;
+  if ((g_sd_services_initialized == 0U) || !samples || !calibration || count == 0U || count > SD_RAW_BATCH_MAX) {
+    if (samples && count && count <= SD_RAW_BATCH_MAX) sd_raw_count_dropped(samples, count, 0U);
     return SD_CARD_STATUS_BUSY;
   }
-  sd_raw_slot_t *slot = sd_alloc_raw_slot(count);
-  if (slot == NULL)
-  {
-    g_sd_raw_batch_drop_count++;
-    g_sd_raw_records_dropped_count += count;
+  const uint8_t optional = sd_raw_optional_admitted();
+  uint16_t retained = 0U;
+  for (uint16_t i = 0U; i < count; ++i)
+    if (optional || sd_raw_is_essential(&samples[i])) ++retained;
+  if (!optional) sd_raw_count_dropped(samples, count, 1U);
+  if (retained == 0U) return SD_CARD_STATUS_BACKPRESSURE;
+
+  uint16_t index = 0U, appended = 0U;
+  const uint64_t uptime = board_uptime_ticks();
+  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  const uint64_t session = sd_run_snapshot();
+  const uint32_t epoch = g_sd_route_epoch;
+  sd_raw_slot_t *tail = g_sd_raw_append_tail;
+  if (tail && tail->session == session && tail->route_epoch == epoch &&
+      memcmp(&tail->calibration, calibration, sizeof(*calibration)) == 0) {
+    while (index < count && tail->count < tail->capacity) {
+      if (optional || sd_raw_is_essential(&samples[index])) {
+        tail->samples[tail->count++] = samples[index]; ++appended;
+      }
+      ++index;
+    }
+    /* Existing records project backwards from the newest appended uptime,
+     * including a32-bit HAL tick wrap. Every sample keeps its original time. */
+    if (appended) tail->uptime_reference = uptime;
+    g_sd_raw_records_coalesced += appended;
+    g_sd_raw_records_enqueued_count += appended;
+  }
+  __set_PRIMASK(mask);
+  if (appended == retained) return retained == count ? SD_CARD_STATUS_OK : SD_CARD_STATUS_BACKPRESSURE;
+
+  /* Reserve a full batch only when a new queued tail is needed. Under a
+   * flush backlog, later acquisition calls fill it without repeating the
+   * calibration/session/pool header or allocating another tiny slot. */
+  sd_raw_slot_t *slot = sd_alloc_raw_slot(SD_RAW_BATCH_MAX);
+  if (!slot) {
+    ++g_sd_raw_batch_drop_count;
+    for (uint16_t i = index; i < count; ++i)
+      if (optional || sd_raw_is_essential(&samples[i])) sd_raw_count_dropped(&samples[i], 1U, 0U);
     return SD_CARD_STATUS_BACKPRESSURE;
   }
-  slot->uptime_reference = board_uptime_ticks();
+  slot->uptime_reference = uptime;
   slot->calibration = *calibration;
-  memcpy(slot->samples, samples, (size_t)count * sizeof(samples[0]));
-  slot->count = count;
+  slot->session = session; slot->route_epoch = epoch; slot->count = 0U;
+  for (; index < count; ++index)
+    if (optional || sd_raw_is_essential(&samples[index])) slot->samples[slot->count++] = samples[index];
   const ULONG message = (ULONG)(uintptr_t)slot;
-  const uint32_t mask = __get_PRIMASK(); __disable_irq();
-  slot->session = sd_run_snapshot();
+  const uint32_t queued_mask = __get_PRIMASK(); __disable_irq();
   const UINT result = tx_queue_send(&g_sd_raw_queue, (VOID *)&message, TX_NO_WAIT);
-  __set_PRIMASK(mask);
-  if (result != TX_SUCCESS)
-  {
-    g_sd_raw_batch_drop_count++;
-    g_sd_raw_records_dropped_count += count;
+  if (result == TX_SUCCESS) {
+    g_sd_raw_append_tail = slot;
+    g_sd_raw_records_enqueued_count += slot->count;
+  }
+  __set_PRIMASK(queued_mask);
+  if (result != TX_SUCCESS) {
+    ++g_sd_raw_batch_drop_count;
+    sd_raw_count_dropped(slot->samples, slot->count, 0U);
     sd_free_raw_slot(slot);
     return SD_CARD_STATUS_BACKPRESSURE;
   }
-  g_sd_raw_records_enqueued_count += count;
-  return SD_CARD_STATUS_OK;
+  return retained == count ? SD_CARD_STATUS_OK : SD_CARD_STATUS_BACKPRESSURE;
 }
 
 UINT sd_card_request_flush(void)
