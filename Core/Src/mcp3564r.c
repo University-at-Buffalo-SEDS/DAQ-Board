@@ -16,22 +16,23 @@
 #define MCP3564R_OFFSETCAL_ADDR (0x09U)
 #define MCP3564R_GAINCAL_ADDR (0x0AU)
 
-#define MCP3564R_DMA_FRAME_SIZE (4U)
-#define MCP3564R_DCACHE_LINE_SIZE (32U)
+#define MCP3564R_DMA_FRAME_SIZE (5U)
+#define MCP3564R_DMA_ALIGNMENT (32U)
 #define MCP3564R_USE_DMA_READ (1U)
 #define MCP3564R_WRITE_EXTENDED_CONFIG (1U)
 #define MCP3564R_SAMPLE_QUEUE_DEPTH (128U)
+/* Fault deadline, not sample cadence: SPI2=SYSCLK160MHz/16 ->5bytes/4us. */
+#define MCP3564R_DMA_TIMEOUT_MS (20U)
 
-#define MCP3564R_FIRST_CONVERSION_US DAQ_ADC_FIRST_CONVERSION_US
-#define MCP3564R_DEFAULT_START_OFFSET_US DAQ_ADC_READ_INTERVAL_US
-/* OSR256 SINC3 settling, two AZ_MUX conversions, plus startup at MCLK/4. */
-#define MCP3564R_TEMP_FIRST_US (((2ULL * 3U * 256U + 256U) * 16U * 1000000U) / DAQ_ADC_MCLK_HZ + 32U)
 #define MCP3564R_TEMP_TIMEOUT_MS 50U
 
 #define EN_12V HAL_GPIO_WritePin(EN_12V_GPIO_Port, EN_12V_Pin, GPIO_PIN_SET)
 
-#if defined(__GNUC__)
-#define MCP3564R_DMA_ALIGN __attribute__((aligned(MCP3564R_DCACHE_LINE_SIZE)))
+#if defined(__GNUC__) && (defined(__arm__) || defined(__thumb__))
+#define MCP3564R_DMA_ALIGN __attribute__((section(".bss.adc_dma"), aligned(MCP3564R_DMA_ALIGNMENT)))
+#elif defined(__GNUC__)
+/* Native HAL fixtures use host memory; actual ARM placement is linker-tested. */
+#define MCP3564R_DMA_ALIGN __attribute__((aligned(MCP3564R_DMA_ALIGNMENT)))
 #else
 #define MCP3564R_DMA_ALIGN
 #endif
@@ -51,12 +52,13 @@ typedef struct
   volatile uint8_t sample_valid;
   volatile uint8_t conversion_active;
   volatile uint8_t start_sent;
+  volatile uint8_t drdy_armed;
+  volatile uint8_t recovery_needed;
+  volatile uint32_t dma_started_ms;
   volatile uint8_t queue_head;
   volatile uint8_t queue_tail;
   volatile uint8_t queue_count;
   volatile uint32_t overrun_count;
-  volatile uint8_t first_conversion_pending;
-  uint32_t start_offset_us;
   uint32_t latest_raw32;
   float temperature_c;
   int32_t temperature_code;
@@ -64,7 +66,7 @@ typedef struct
   uint8_t temperature_valid;
   volatile uint8_t temperature_scan_active;
   volatile uint8_t temperature_scan_complete;
-  uint8_t scan_config_valid;
+  volatile uint8_t scan_config_valid;
   uint32_t temperature_attempt_ms;
   volatile uint8_t aux_scan_active;
   volatile uint8_t p6_scan_active;
@@ -85,13 +87,13 @@ static uint32_t mcp3564r_fast_scan(uint8_t input) {
 }
 
 volatile uint32_t g_mcp3564r_init_status = UINT32_MAX;
+volatile uint32_t g_mcp3564r_dma_timeout_count;
 volatile uint32_t g_mcp3564r_12v_enable_readback = UINT32_MAX;
 #if (MCP3564R_USE_DMA_READ != 0U)
-static uint8_t g_mcp3564r_tx_frame[MCP3564R_DCACHE_LINE_SIZE] MCP3564R_DMA_ALIGN;
-static uint8_t g_mcp3564r_rx_frame[MCP3564R_DCACHE_LINE_SIZE] MCP3564R_DMA_ALIGN;
-extern DCACHE_HandleTypeDef hdcache1;
+static uint8_t g_mcp3564r_tx_frame[MCP3564R_DMA_ALIGNMENT] MCP3564R_DMA_ALIGN;
+static uint8_t g_mcp3564r_rx_frame[MCP3564R_DMA_ALIGNMENT] MCP3564R_DMA_ALIGN;
 #endif
-extern TIM_HandleTypeDef htim2;
+
 
 const mcp3564r_config_t MCP3564R_DEFAULT_CONFIG = {
   .config0_reg = MCP3564R_BOARD_CONFIG0,
@@ -99,7 +101,7 @@ const mcp3564r_config_t MCP3564R_DEFAULT_CONFIG = {
   .config1_reg = (DAQ_ADC_OSR_BITS << 2U),
   .config2_reg = MCP3564R_BOARD_CONFIG2,
   .config3_reg = 0b11110000, /* 32-bit output with channel ID and signed 25-bit code. */
-  .irq_reg = 0b00000011,
+  .irq_reg = 0x06U, /* IRQ driven high inactive, fast commands on, EN_STP off. */
   .mux_reg = 0b00001000, /* Ignored while SCAN is enabled (datasheet 5.15.1). */
   .scan_reg = MCP3564R_BOARD_SCAN,
   .timer_reg = 0x000000,
@@ -320,170 +322,93 @@ static void mcp3564r_store_raw32(uint32_t raw32)
   g_mcp3564r.sample_valid = 1U;
 }
 
-#if (MCP3564R_USE_DMA_READ == 0U)
-static HAL_StatusTypeDef mcp3564r_read_data_blocking(void)
+/* STM32U585 DCACHE1 bypasses internal SRAM (ST DCACHE training, page2).
+ * The linker pins both DMA buffers inside startup-zeroed internal SRAM.
+ * Never issue polling DCACHE maintenance from the DRDY/DMA interrupts. */
+/* Thread configuration owns SPI while disarmed; ISR ownership is a single
+ * atomic DMA claim. No blocking SPI transaction or configuration write is
+ * issued from an ISR; the DMA owns its opcode and data clocks together. */
+static void mcp3564r_disarm(void)
 {
-  uint8_t dummy_data = 0U;
-  uint8_t read_cmd = MCP3564R_CMD_READ;
-  uint8_t tx_buf32[4] = {0};
-  uint8_t rx_buf32[4] = {0};
-  HAL_StatusTypeDef status;
-
-  status = mcp3564r_send_start_once();
-  if (status != HAL_OK)
-  {
-    return status;
-  }
-
-  HAL_Delay((g_mcp3564r.start_offset_us + 999U) / 1000U);
-
-  mcp3564r_select();
-
-  status = HAL_SPI_TransmitReceive(g_mcp3564r.spi, &read_cmd, &dummy_data, 1U, 1000U);
-  if (status == HAL_OK)
-  {
-    status = HAL_SPI_TransmitReceive(g_mcp3564r.spi, tx_buf32, rx_buf32, 4U, 1000U);
-  }
-
-  mcp3564r_deselect();
-
-  if (status == HAL_OK && (dummy_data & 0x04U) == 0U)
-  {
-    const uint32_t raw32 = ((uint32_t)rx_buf32[0] << 24)
-                         | ((uint32_t)rx_buf32[1] << 16)
-                         | ((uint32_t)rx_buf32[2] << 8)
-                         | ((uint32_t)rx_buf32[3]);
-    mcp3564r_store_raw32(raw32);
-  }
-
-  return status;
-}
-#endif
-
-#if (MCP3564R_USE_DMA_READ != 0U)
-static void mcp3564r_dcache_clean(const void *data, size_t len)
-{
-  if ((data == NULL) || (len == 0U))
-  {
-    return;
-  }
-
-  (void)HAL_DCACHE_CleanByAddr(&hdcache1, (const uint32_t *)data, (uint32_t)len);
+  g_mcp3564r.drdy_armed = 0U;
+  g_mcp3564r.conversion_active = 0U;
+  __HAL_GPIO_EXTI_CLEAR_FALLING_IT(ADC_IRQ_Pin);
 }
 
-static void mcp3564r_dcache_invalidate(const void *data, size_t len)
+static void mcp3564r_require_recovery(void)
 {
-  if ((data == NULL) || (len == 0U))
-  {
-    return;
-  }
-
-  (void)HAL_DCACHE_InvalidateByAddr(&hdcache1, (const uint32_t *)data, (uint32_t)len);
+  mcp3564r_disarm();
+  g_mcp3564r.recovery_needed = 1U;
+  /* Keep dma_busy owned until acquisition-thread HAL_SPI_Abort quiesces DMA. */
 }
-#endif
-
-static HAL_StatusTypeDef mcp3564r_arm_start_offset_timer(void);
 
 static HAL_StatusTypeDef mcp3564r_start_read_dma(void)
 {
-#if (MCP3564R_USE_DMA_READ != 0U)
-  uint8_t dummy_data = 0U;
-  uint8_t read_cmd = MCP3564R_CMD_READ;
-
-  if ((g_mcp3564r.spi == NULL) || (g_mcp3564r.dma_busy != 0U))
+  const uint32_t mask = __get_PRIMASK();
+  __disable_irq();
+  if (g_mcp3564r.spi == NULL || !g_mcp3564r.drdy_armed ||
+      !g_mcp3564r.scan_config_valid || !g_mcp3564r.conversion_active ||
+      g_mcp3564r.recovery_needed || g_mcp3564r.dma_busy)
   {
+    if (mask == 0U) __enable_irq();
     return HAL_BUSY;
   }
-
-  if ((g_mcp3564r.spi->hdmatx == NULL) || (g_mcp3564r.spi->hdmarx == NULL))
+  if (g_mcp3564r.spi->hdmatx == NULL || g_mcp3564r.spi->hdmarx == NULL)
   {
+    mcp3564r_require_recovery();
+    if (mask == 0U) __enable_irq();
     return HAL_ERROR;
   }
-
-  memset(g_mcp3564r_tx_frame, 0, MCP3564R_DMA_FRAME_SIZE);
-  memset(g_mcp3564r_rx_frame, 0, MCP3564R_DMA_FRAME_SIZE);
-
-  mcp3564r_select();
-  const HAL_StatusTypeDef command_status =
-    HAL_SPI_TransmitReceive(g_mcp3564r.spi, &read_cmd, &dummy_data, 1U, 1000U);
-  if (command_status != HAL_OK)
-  {
-    mcp3564r_deselect();
-    return command_status;
-  }
-
-  /* STATUS DR_STATUS is active-low. Polling faster than the scan conversion
-   * rate must not enqueue the previous conversion again. */
-  if ((dummy_data & 0x04U) != 0U)
-  {
-    mcp3564r_deselect();
-    g_mcp3564r.first_conversion_pending = 0U;
-    return mcp3564r_arm_start_offset_timer();
-  }
-
+  g_mcp3564r.dma_started_ms = HAL_GetTick();
   g_mcp3564r.dma_busy = 1U;
-  g_mcp3564r.conversion_active = 0U;
-  mcp3564r_dcache_clean(g_mcp3564r_tx_frame, sizeof(g_mcp3564r_tx_frame));
-  mcp3564r_dcache_invalidate(g_mcp3564r_rx_frame, sizeof(g_mcp3564r_rx_frame));
+  if (mask == 0U) __enable_irq();
 
+  memset(g_mcp3564r_tx_frame, 0, sizeof(g_mcp3564r_tx_frame));
+  memset(g_mcp3564r_rx_frame, 0, sizeof(g_mcp3564r_rx_frame));
+  g_mcp3564r_tx_frame[0] = MCP3564R_CMD_READ;
+  __DMB(); /* Publish uncached SRAM command/data before DMA ownership. */
+  mcp3564r_select();
   const HAL_StatusTypeDef status = HAL_SPI_TransmitReceive_DMA(g_mcp3564r.spi,
-                                                               g_mcp3564r_tx_frame,
-                                                               g_mcp3564r_rx_frame,
-                                                               4U);
-  if (status != HAL_OK)
-  {
-    mcp3564r_deselect();
-    g_mcp3564r.dma_busy = 0U;
-  }
-
+      g_mcp3564r_tx_frame, g_mcp3564r_rx_frame, MCP3564R_DMA_FRAME_SIZE);
+  if (status != HAL_OK) mcp3564r_require_recovery();
   return status;
-#else
-  return HAL_ERROR;
-#endif
 }
 
-static HAL_StatusTypeDef mcp3564r_arm_start_offset_timer(void)
+/* Standby/configuration may leave an old ADCDATA/IRQ indication. Consume it
+ * only in the acquisition thread before START, never mistake it for the first
+ * settled conversion of the new scan. */
+static HAL_StatusTypeDef mcp3564r_clear_stale_ready(void)
 {
-  const uint32_t delay_us = (g_mcp3564r.first_conversion_pending != 0U)
-                                ? (g_mcp3564r.temperature_scan_active != 0U
-                                   ? MCP3564R_TEMP_FIRST_US : MCP3564R_FIRST_CONVERSION_US)
-                                : g_mcp3564r.start_offset_us;
-
-  if (delay_us == 0U)
-  {
-    return mcp3564r_start_read_dma();
-  }
-
-  (void)HAL_TIM_Base_Stop_IT(&htim2);
-  __HAL_TIM_SET_COUNTER(&htim2, 0U);
-  __HAL_TIM_SET_AUTORELOAD(&htim2, delay_us - 1U);
-  (void)HAL_TIM_GenerateEvent(&htim2, TIM_EVENTSOURCE_UPDATE);
-  __HAL_TIM_SET_COUNTER(&htim2, 0U);
-  __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_UPDATE);
-
-  return HAL_TIM_Base_Start_IT(&htim2);
+  uint8_t tx[MCP3564R_DMA_FRAME_SIZE] = {MCP3564R_CMD_READ};
+  uint8_t rx[MCP3564R_DMA_FRAME_SIZE];
+  mcp3564r_select();
+  const HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(g_mcp3564r.spi,
+      tx, rx, MCP3564R_DMA_FRAME_SIZE, 1000U);
+  mcp3564r_deselect();
+  return status;
 }
 
 static HAL_StatusTypeDef mcp3564r_start_cycle(void)
 {
-  HAL_StatusTypeDef status = mcp3564r_send_start_once();
-  if (status != HAL_OK)
-  {
-    return status;
-  }
-
+  if (!g_mcp3564r.scan_config_valid || g_mcp3564r.recovery_needed) return HAL_ERROR;
+  HAL_StatusTypeDef status = mcp3564r_clear_stale_ready();
+  if (status == HAL_OK) status = mcp3564r_send_start_once();
+  if (status != HAL_OK) { mcp3564r_disarm(); return status; }
+  const uint32_t mask = __get_PRIMASK();
+  __disable_irq();
+  __HAL_GPIO_EXTI_CLEAR_FALLING_IT(ADC_IRQ_Pin);
   g_mcp3564r.conversion_active = 1U;
-  status = mcp3564r_arm_start_offset_timer();
-  if (status != HAL_OK)
-  {
-    g_mcp3564r.conversion_active = 0U;
-  }
-
-  return status;
+  g_mcp3564r.drdy_armed = 1U;
+  if (mask == 0U) __enable_irq();
+  /* Recover a genuine edge occurring between START and arm. This is one
+   * bounded attempt, not an ISR retry/poll loop. STATUS validates freshness. */
+  if (HAL_GPIO_ReadPin(ADC_IRQ_GPIO_Port, ADC_IRQ_Pin) == GPIO_PIN_RESET)
+    return mcp3564r_start_read_dma();
+  return HAL_OK;
 }
 
-/* Called only by the acquisition thread, never from a DMA/timer ISR. Stop
- * polling before changing the sequencer and reject switching mid-transfer. */
+/* Acquisition thread only: disarm DRDY before changing the sequencer and
+ * reject switching mid-transfer. Never hold PRIMASK across SPI writes. */
 static HAL_StatusTypeDef mcp3564r_switch_scan(uint8_t mode)
 {
   const uint32_t mask = __get_PRIMASK();
@@ -493,9 +418,8 @@ static HAL_StatusTypeDef mcp3564r_switch_scan(uint8_t mode)
     if (mask == 0U) __enable_irq();
     return HAL_BUSY;
   }
-  (void)HAL_TIM_Base_Stop_IT(&htim2);
-  __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_UPDATE);
-  g_mcp3564r.conversion_active = 0U;
+  mcp3564r_disarm();
+  g_mcp3564r.scan_config_valid = 0U;
   if (mask == 0U) __enable_irq();
 
   g_mcp3564r.scan_config_valid = 0U;
@@ -508,7 +432,6 @@ static HAL_StatusTypeDef mcp3564r_switch_scan(uint8_t mode)
   g_mcp3564r.aux_seen = 0U;
   g_mcp3564r.temperature_scan_complete = 0U;
   g_mcp3564r.start_sent = 0U;
-  g_mcp3564r.first_conversion_pending = 1U;
   /* Standby prevents a conversion spanning the configuration change. */
   HAL_StatusTypeDef status = mcp3564r_write_reg8(1U, MCP3564R_BOARD_CONFIG0);
   if (status == HAL_OK)
@@ -536,8 +459,6 @@ UINT mcp3564r_init(SPI_HandleTypeDef *spi)
   memset(&g_mcp3564r, 0, sizeof(g_mcp3564r));
   g_kg50_input_active = 0U;
   g_mcp3564r.spi = spi;
-  g_mcp3564r.start_offset_us = MCP3564R_DEFAULT_START_OFFSET_US;
-  g_mcp3564r.first_conversion_pending = 1U;
 
   EN_12V;
   HAL_Delay(10U);
@@ -564,8 +485,10 @@ UINT mcp3564r_init(SPI_HandleTypeDef *spi)
     return TX_NOT_DONE;
   }
 
+  g_mcp3564r.scan_config_valid = 1U;
   if (mcp3564r_start_cycle() != HAL_OK)
   {
+    g_mcp3564r.scan_config_valid = 0U;
     g_mcp3564r_init_status = 3U;
     return TX_NOT_DONE;
   }
@@ -577,26 +500,41 @@ UINT mcp3564r_init(SPI_HandleTypeDef *spi)
   return TX_SUCCESS;
 }
 
-void mcp3564r_set_start_offset_us(uint32_t offset_us)
-{
-  g_mcp3564r.start_offset_us = offset_us;
-}
-
 HAL_StatusTypeDef mcp3564r_start_dma(void)
 {
-#if (MCP3564R_USE_DMA_READ == 0U)
+
   if (g_mcp3564r.spi == NULL)
   {
     return HAL_ERROR;
   }
 
-  return mcp3564r_read_data_blocking();
-#else
-  if (g_mcp3564r.spi == NULL)
+  /* Lost completion IRQ must not permanently own the ADC. Claim the fault
+   * atomically against a late ISR and preserve ownership until thread abort. */
+  const uint32_t mask = __get_PRIMASK();
+  __disable_irq();
+  if (g_mcp3564r.dma_busy && !g_mcp3564r.recovery_needed &&
+      (uint32_t)(HAL_GetTick() - g_mcp3564r.dma_started_ms) >= MCP3564R_DMA_TIMEOUT_MS)
   {
-    return HAL_ERROR;
+    g_mcp3564r_dma_timeout_count++;
+    mcp3564r_require_recovery();
   }
-
+  if (mask == 0U) __enable_irq();
+  if (g_mcp3564r.recovery_needed != 0U)
+  {
+    /* HAL may still own a partially launched DMA after an asynchronous error.
+     * Do not release buffers/CS or reconfigure until abort confirms quiescence. */
+    if (HAL_SPI_Abort(g_mcp3564r.spi) != HAL_OK) return HAL_ERROR;
+    mcp3564r_deselect();
+    g_mcp3564r.dma_busy = 0U;
+    g_mcp3564r.scan_config_valid = 0U;
+    /* A POR/CRC fault may have reset FORMAT, IRQ and FASTCMD too. Restore
+     * every base register before selecting the desired scan again. */
+    if (mcp3564r_reset_device() != HAL_OK ||
+        mcp3564r_write_config(&MCP3564R_DEFAULT_CONFIG) != HAL_OK)
+      return HAL_ERROR;
+    g_mcp3564r.start_sent = 0U;
+    g_mcp3564r.recovery_needed = 0U;
+  }
   const uint32_t now = HAL_GetTick();
   if (g_kg50_input_requested != g_kg50_input_active)
     return mcp3564r_switch_scan(0U);
@@ -636,55 +574,53 @@ HAL_StatusTypeDef mcp3564r_start_dma(void)
       g_mcp3564r.aux_scan_active == 0U && g_mcp3564r.fast_sample_seen != 0U)
     return mcp3564r_switch_scan(g_mcp3564r.p6_scan_active ? 0U : 3U);
 
-  if ((g_mcp3564r.dma_busy != 0U) || (g_mcp3564r.conversion_active != 0U))
+  if (g_mcp3564r.dma_busy != 0U) return HAL_BUSY;
+  if (g_mcp3564r.drdy_armed && g_mcp3564r.conversion_active)
   {
-    return HAL_BUSY;
+    if (HAL_GPIO_ReadPin(ADC_IRQ_GPIO_Port, ADC_IRQ_Pin) == GPIO_PIN_RESET)
+      return mcp3564r_start_read_dma();
+    return HAL_OK;
   }
-
   return mcp3564r_start_cycle();
-#endif
 }
 
 void mcp3564r_dma_complete(void)
 {
-#if (MCP3564R_USE_DMA_READ != 0U)
-  mcp3564r_dcache_invalidate(g_mcp3564r_rx_frame, sizeof(g_mcp3564r_rx_frame));
-
-  const uint32_t raw32 = ((uint32_t)g_mcp3564r_rx_frame[0] << 24)
-                       | ((uint32_t)g_mcp3564r_rx_frame[1] << 16)
-                       | ((uint32_t)g_mcp3564r_rx_frame[2] << 8)
-                       | ((uint32_t)g_mcp3564r_rx_frame[3]);
-
-  mcp3564r_store_raw32(raw32);
-  g_mcp3564r.first_conversion_pending = 0U;
-  g_mcp3564r.dma_busy = 0U;
-  mcp3564r_deselect();
-  if ((g_mcp3564r.temperature_scan_active != 0U && g_mcp3564r.temperature_scan_complete != 0U) ||
-      (g_mcp3564r.aux_scan_active != 0U && g_mcp3564r.aux_seen == MCP3564R_AUX_SCAN))
+  if (g_mcp3564r.dma_busy == 0U || g_mcp3564r.recovery_needed != 0U) return;
+  __DMB(); /* Observe completed DMA writes before consuming STATUS/data. */
+  const uint8_t status = g_mcp3564r_rx_frame[0];
+  /* STATUS address01/ack, active-low POR/CRC faults, active-low DR_STATUS.
+   * 0x00/0xff or a different device must never become a valid conversion. */
+  if ((status & 0xF8U) != 0x18U || (status & 0x03U) != 0x03U)
   {
-    /* Restore the fast load-cell scan on the next acquisition-thread service. */
-    g_mcp3564r.conversion_active = 0U;
+    mcp3564r_require_recovery();
     return;
   }
-  (void)mcp3564r_start_cycle();
-#endif
+  if ((status & 0x04U) == 0U)
+  {
+    const uint32_t raw32 = ((uint32_t)g_mcp3564r_rx_frame[1] << 24)
+                         | ((uint32_t)g_mcp3564r_rx_frame[2] << 16)
+                         | ((uint32_t)g_mcp3564r_rx_frame[3] << 8)
+                         | ((uint32_t)g_mcp3564r_rx_frame[4]);
+    mcp3564r_store_raw32(raw32);
+  }
+  mcp3564r_deselect();
+  if ((g_mcp3564r.temperature_scan_active && g_mcp3564r.temperature_scan_complete) ||
+      (g_mcp3564r.aux_scan_active && g_mcp3564r.aux_seen == MCP3564R_AUX_SCAN))
+    mcp3564r_disarm();
+  /* Publish idle only after every callback state/buffer/CS access is done. */
+  g_mcp3564r.dma_busy = 0U;
 }
 
 void mcp3564r_dma_error(void)
 {
-  g_mcp3564r.dma_busy = 0U;
-  mcp3564r_deselect();
-  (void)mcp3564r_start_cycle();
+  if (g_mcp3564r.dma_busy != 0U) mcp3564r_require_recovery();
 }
 
-void mcp3564r_timer_elapsed_callback(TIM_HandleTypeDef *htim)
+void mcp3564r_data_ready_callback(uint16_t pin)
 {
-  if (htim->Instance == TIM2)
-  {
-    (void)HAL_TIM_Base_Stop_IT(&htim2);
-    if (mcp3564r_start_read_dma() != HAL_OK)
-      g_mcp3564r.conversion_active = 0U;
-  }
+  if (pin == ADC_IRQ_Pin && HAL_GPIO_ReadPin(ADC_IRQ_GPIO_Port, ADC_IRQ_Pin) == GPIO_PIN_RESET)
+    (void)mcp3564r_start_read_dma();
 }
 
 UINT mcp3564r_get_sample(mcp3564r_sample_t *sample)

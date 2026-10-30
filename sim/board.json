@@ -28,7 +28,11 @@
   "board": {
     "strict_mmio": false,
     "clocks": [],
-    "connections": [{"from": "gpio.28", "to": "layoutDevice2@0"}],
+    "connections": [
+      {"from": "gpio.28", "to": "layoutDevice2@0"},
+      {"from": "layoutDevice2.IRQ", "to": "gpio@26"},
+      {"from": "layoutDevice2.IRQ", "to": "exti@26"}
+    ],
     "pins": [],
     "dma_routes": [
       {"request": "spi2.DMARecieve", "controller": "gpdma", "channel": 0},

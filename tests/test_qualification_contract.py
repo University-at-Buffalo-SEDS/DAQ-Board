@@ -145,12 +145,13 @@ class QualificationContractTests(unittest.TestCase):
         adc = (root / "Core" / "Src" / "mcp3564r.c").read_text(encoding="utf-8")
         header = (root / "Core" / "Inc" / "mcp3564r.h").read_text(encoding="utf-8")
 
-        # MCO is 16 MHz. OSR=1024 gives 3.90625 ksps after the SINC3 filter,
-        # while gain-16 noise remains sub-microvolt RMS per the datasheet.
+        # The configured filter/OSR and gain remain independent of the
+        # worker cadence; conversion-ready edges drive actual DMA reads.
         self.assertIn(".config1_reg = (DAQ_ADC_OSR_BITS << 2U)", adc)
-        self.assertIn("MCP3564R_FIRST_CONVERSION_US DAQ_ADC_FIRST_CONVERSION_US", adc)
-        self.assertIn("MCP3564R_DEFAULT_START_OFFSET_US DAQ_ADC_READ_INTERVAL_US", adc)
-        self.assertIn("first_conversion_pending", adc)
+        self.assertIn("MCP3564R_DMA_FRAME_SIZE (5U)", adc)
+        self.assertIn(".irq_reg = 0x06U", adc)
+        self.assertIn("mcp3564r_data_ready_callback(uint16_t pin)", adc)
+        self.assertNotIn("HAL_TIM_Base_Start_IT", adc)
         self.assertIn("MCP3564R_SAMPLE_QUEUE_DEPTH (128U)", adc)
         self.assertIn("overrun_count++", adc)
         self.assertIn("uint8_t mcp3564r_pending_samples(void)", header)

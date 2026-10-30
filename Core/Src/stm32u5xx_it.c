@@ -263,6 +263,11 @@ void FDCAN1_IT1_IRQHandler(void)
 /**
   * @brief This function handles TIM2 global interrupt.
   */
+void EXTI10_IRQHandler(void)
+{
+  HAL_GPIO_EXTI_IRQHandler(ADC_IRQ_Pin);
+}
+
 void TIM2_IRQHandler(void)
 {
   /* USER CODE BEGIN TIM2_IRQn 0 */

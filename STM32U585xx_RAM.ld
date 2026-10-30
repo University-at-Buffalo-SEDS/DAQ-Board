@@ -197,6 +197,11 @@ SECTIONS
   .bss (NOLOAD) : ALIGN(4)
   {
     /* This is used by the startup in order to initialize the .bss section */
+    /* ADC DMA is internal, uncached SRAM and part of startup zero fill. */
+    . = ALIGN(32);
+    __adc_dma_start__ = .;
+    KEEP(*(.bss.adc_dma))
+    __adc_dma_end__ = .;
     *(.bss)
     *(.bss*)
     *(COMMON)
@@ -207,6 +212,13 @@ SECTIONS
     __bss_end__ = _ebss;
       PROVIDE( __bss_end = .);
   } >RAM
+  ASSERT(__adc_dma_start__ >= 0x20000000 && __adc_dma_end__ <= 0x200C0000,
+         "ADC DMA buffers require internal uncached SRAM")
+  ASSERT(__adc_dma_start__ >= _sbss && __adc_dma_end__ <= _ebss,
+         "ADC DMA buffers must be startup-zeroed")
+  ASSERT((__adc_dma_start__ & 31) == 0 && (__adc_dma_end__ - __adc_dma_start__) == 64,
+         "ADC DMA buffers require two aligned 32-byte owners")
+
   PROVIDE( __non_tls_bss_start = ADDR(.bss) );
 
   PROVIDE( __bss_start = __tbss_start );

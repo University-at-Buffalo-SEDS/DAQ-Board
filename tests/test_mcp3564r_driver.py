@@ -30,11 +30,16 @@ typedef struct { int unused; } DCACHE_HandleTypeDef;
 static inline uint32_t __get_PRIMASK(void) { return 0; }
 static inline void __disable_irq(void) {}
 static inline void __enable_irq(void) {}
+void test_memory_barrier(void);
+#define __DMB() test_memory_barrier()
+void test_clear_exti(uint16_t);
+#define __HAL_GPIO_EXTI_CLEAR_FALLING_IT(p) test_clear_exti(p)
 void HAL_GPIO_WritePin(void *, uint16_t, unsigned);
 unsigned HAL_GPIO_ReadPin(void *, uint16_t);
 void HAL_Delay(uint32_t);
 uint32_t HAL_GetTick(void);
 HAL_StatusTypeDef HAL_SPI_TransmitReceive(SPI_HandleTypeDef *, uint8_t *, uint8_t *, uint16_t, uint32_t);
+HAL_StatusTypeDef HAL_SPI_Abort(SPI_HandleTypeDef *);
 HAL_StatusTypeDef HAL_SPI_TransmitReceive_DMA(SPI_HandleTypeDef *, uint8_t *, uint8_t *, uint16_t);
 HAL_StatusTypeDef HAL_DCACHE_CleanByAddr(DCACHE_HandleTypeDef *, const uint32_t *, uint32_t);
 HAL_StatusTypeDef HAL_DCACHE_InvalidateByAddr(DCACHE_HandleTypeDef *, const uint32_t *, uint32_t);
@@ -62,7 +67,10 @@ static unsigned selected, command, reg, byte_index, powered, timer_running;
 static unsigned ready, dma_pending, dma_calls, start_commands, fail_next_dma;
 static uint32_t tick, wire_word;
 static unsigned fail_command;
+static unsigned in_isr, abort_fail, abort_calls, status_override, clear_exti_calls, inject_config_edge;
 static unsigned force_power_low, power_writes;
+static unsigned memory_barriers, launch_barrier, cache_calls, pending_rx_valid, command_published;
+static uint8_t pending_rx[5], *pending_rx_target;
 extern volatile uint32_t g_mcp3564r_init_status;
 
 void HAL_GPIO_WritePin(void *port, uint16_t pin, unsigned value) {
@@ -77,6 +85,7 @@ void HAL_GPIO_WritePin(void *port, uint16_t pin, unsigned value) {
   }
 }
 unsigned HAL_GPIO_ReadPin(void *port, uint16_t pin) {
+  if (port==ADC_IRQ_GPIO_Port) { assert(pin==ADC_IRQ_Pin); return ready ? GPIO_PIN_RESET : GPIO_PIN_SET; }
   assert(port==EN_12V_GPIO_Port && pin==EN_12V_Pin && tick>=10);
   return force_power_low ? GPIO_PIN_RESET : powered;
 }
@@ -86,14 +95,19 @@ uint32_t HAL_GetTick(void) { return tick; }
 HAL_StatusTypeDef HAL_SPI_TransmitReceive(SPI_HandleTypeDef *s, uint8_t *tx,
     uint8_t *rx, uint16_t len, uint32_t timeout) {
   (void)timeout;
-  assert(s == &spi && powered && selected);
+  assert(!in_isr && s == &spi && powered && selected);
+  if (!command && inject_config_edge && (tx[0]&3U)==2U) {
+    inject_config_edge=0;ready=1;const unsigned before=dma_calls;
+    in_isr=1;mcp3564r_data_ready_callback(ADC_IRQ_Pin);in_isr=0;
+    assert(dma_calls==before); /* Software disarmed before first config byte. */
+  }
   if (!command && fail_command && tx[0] == fail_command) { fail_command=0; return HAL_ERROR; }
   for (unsigned i = 0; i < len; ++i) {
     rx[i] = 0;
     if (!command) {
       command = tx[i];
       assert((command >> 6) == 1); /* Device address 01. */
-      rx[i] = ready ? 0x13 : 0x17; /* STATUS bit 2, not IRQ register bit 6. */
+      rx[i] = ready ? 0x1b : 0x1f; /* STATUS bit 2, not IRQ register bit 6. */
       ready = 0;
       if (command == 0x78) memset(registers, 0, sizeof(registers));
       else if (command == 0x68) {
@@ -104,6 +118,8 @@ HAL_StatusTypeDef HAL_SPI_TransmitReceive(SPI_HandleTypeDef *s, uint8_t *tx,
         reg = (command >> 2) & 15;
         assert(command == 0x41 || (command & 3) == 2);
       }
+    } else if (command == 0x41) {
+      assert(byte_index<4); rx[i]=(uint8_t)(wire_word>>(24-8*byte_index)); byte_index++;
     } else {
       assert((command & 3) == 2 && reg >= 1 && reg <= 10);
       const unsigned width = reg <= 6 ? 1 : 3;
@@ -116,21 +132,45 @@ HAL_StatusTypeDef HAL_SPI_TransmitReceive(SPI_HandleTypeDef *s, uint8_t *tx,
 }
 HAL_StatusTypeDef HAL_SPI_TransmitReceive_DMA(SPI_HandleTypeDef *s,
     uint8_t *tx, uint8_t *rx, uint16_t len) {
-  assert(s == &spi && selected && command == 0x41 && !dma_pending);
-  assert(len == 4 && ((registers[4] >> 4) & 3) == 3);
+  assert(s == &spi && selected && command == 0 && !dma_pending);
+  assert(len == 5 && tx[0] == 0x41);
+  assert(status_override || ((registers[4] >> 4) & 3) == 3);
+  assert(command_published && memory_barriers>launch_barrier);
+  assert((((uintptr_t)tx | (uintptr_t)rx) & 31U)==0);
+  command_published=0;launch_barrier=memory_barriers;
   dma_calls++;
   if (fail_next_dma) { fail_next_dma = 0; return HAL_ERROR; }
-  for (unsigned i = 0; i < len; ++i) {
+  pending_rx_target=rx;pending_rx_valid=1;
+  memset(rx,0,5); /* Stale until the completion memory-order handoff. */
+  pending_rx[0] = status_override ? (uint8_t)(status_override-1) : ready ? 0x1b : 0x1f;
+  ready=0; command=0x41;
+  for (unsigned i = 1; i < len; ++i) {
     assert(tx[i] == 0);
-    rx[i] = (uint8_t)(wire_word >> (24 - 8 * i));
+    pending_rx[i] = (uint8_t)(wire_word >> (32 - 8 * i));
   }
   dma_pending = 1;
   return HAL_OK;
 }
+void test_memory_barrier(void) {
+  memory_barriers++;
+  if(pending_rx_valid && !dma_pending) {
+    memcpy(pending_rx_target,pending_rx,5);pending_rx_valid=0;
+  } else {
+    command_published=1;
+  }
+}
+void test_clear_exti(uint16_t pin) { assert(pin==ADC_IRQ_Pin); clear_exti_calls++; }
+HAL_StatusTypeDef HAL_SPI_Abort(SPI_HandleTypeDef *s) {
+  assert(!in_isr && s==&spi);abort_calls++;
+  if(abort_fail){abort_fail=0;return HAL_ERROR;}
+  dma_pending=0;pending_rx_valid=0;return HAL_OK;
+}
 HAL_StatusTypeDef HAL_DCACHE_CleanByAddr(DCACHE_HandleTypeDef *c,
-    const uint32_t *p, uint32_t n) { (void)c; (void)p; (void)n; return HAL_OK; }
+    const uint32_t *p, uint32_t n) { assert(!in_isr && "INTENDED_NO_POLLING_DCACHE_IN_ADC_ISR");
+  cache_calls++;(void)c;(void)p;(void)n;return HAL_OK; }
 HAL_StatusTypeDef HAL_DCACHE_InvalidateByAddr(DCACHE_HandleTypeDef *c,
-    const uint32_t *p, uint32_t n) { (void)c; (void)p; (void)n; return HAL_OK; }
+    const uint32_t *p, uint32_t n) { assert(!in_isr && "INTENDED_NO_POLLING_DCACHE_IN_ADC_ISR");
+  cache_calls++;(void)c;(void)p;(void)n;return HAL_OK; }
 HAL_StatusTypeDef HAL_TIM_Base_Stop_IT(TIM_HandleTypeDef *t) {
   assert(t == &htim2); timer_running = 0; return HAL_OK;
 }
@@ -142,13 +182,13 @@ HAL_StatusTypeDef HAL_TIM_GenerateEvent(TIM_HandleTypeDef *t, unsigned event) {
 }
 
 static void poll_adc(void) {
-  assert(timer_running);
+  assert(!timer_running);
   tick++;
-  mcp3564r_timer_elapsed_callback(&htim2);
+  in_isr=1;mcp3564r_data_ready_callback(ADC_IRQ_Pin);in_isr=0;
   if (dma_pending) {
     assert(selected);
     dma_pending = 0;
-    HAL_SPI_TxRxCpltCallback(&spi);
+    in_isr=1;HAL_SPI_TxRxCpltCallback(&spi);in_isr=0;
   }
 }
 static void receive(unsigned channel, int32_t code) {
@@ -173,8 +213,9 @@ static void test_configuration(void) {
   assert(registers[3] == 0xCF); /* Gain 1, boost 2, AZ_MUX/AZ_REF enabled. */
   assert(registers[4] == 0xF0); /* Continuous scan cycles, 32-bit tagged data. */
   assert(registers[7] == 3);    /* Fast load-cell scan; temperature is separate. */
+  assert(registers[5] == 6); /* Driven-high IRQ, fast commands, no startup pulse. */
   assert(registers[8] == 0);    /* No extra inter-scan timer delay. */
-  assert(start_commands == 1 && timer_running);
+  assert(start_commands == 1 && !timer_running);
 }
 static void test_equal_input_response(void) {
   const int32_t codes[] = {0, 1, -1, 790001, 2097152, -2097152, 8388607,
@@ -235,7 +276,7 @@ static void test_not_ready_and_recovery(void) {
   assert(!mcp3564r_pending_samples());
   fail_next_dma = 1;
   receive(1, 2297152);
-  assert(!selected && !timer_running && !mcp3564r_pending_samples());
+  assert(selected && !timer_running && !mcp3564r_pending_samples()); /* Failed launch remains owned until thread abort. */
   assert(mcp3564r_start_dma() == HAL_OK);
   if (registers[7] == 0xfc) {
     for (int ch=7; ch>=2; --ch) { receive(ch, 100000); (void)take(ch, 100000); }
@@ -259,7 +300,7 @@ static void test_temperature_clock_switch(void) {
     tick += 100;
     assert(mcp3564r_start_dma() == HAL_OK);
     assert(registers[2] == 0x8c && registers[7] == 0x1000);
-    assert(registers[3] == 0xcf && timer_running);
+    assert(registers[3] == 0xcf && !timer_running);
     receive(12, 305656);
     assert(!timer_running && !mcp3564r_pending_samples());
     assert(mcp3564r_start_dma() == HAL_OK);
@@ -282,7 +323,7 @@ static void test_temperature_clock_switch(void) {
   receive(0,790001); (void)take(0,790001);
   /* No interleaving SPI writes while a DMA frame is outstanding. */
   tick+=100; wire_word=790001; ready=1;
-  mcp3564r_timer_elapsed_callback(&htim2);
+  mcp3564r_data_ready_callback(ADC_IRQ_Pin);
   assert(dma_pending);
   assert(mcp3564r_start_dma()==HAL_BUSY && registers[7]==3);
   dma_pending=0; HAL_SPI_TxRxCpltCallback(&spi);
@@ -325,7 +366,7 @@ static void test_p6_fast_selection(void) {
   receive(0,790001); assert(take(0,790001).raw_value!=0.0f);
   assert(mcp3564r_start_dma()==HAL_OK && registers[7]==0x200 && registers[3]==0xef);
   /* First poll after each gain change allows full digital-filter settling. */
-  assert(htim2.reload>=500);
+  assert(!timer_running); /* Hardware DRDY follows the first settled conversion. */
   receive(0,123); assert(!mcp3564r_pending_samples());
   receive(9,-2097152);
   assert(mcp3564r_start_dma()==HAL_OK && registers[7]==1 && registers[3]==0xcf);
@@ -346,16 +387,88 @@ static void test_p6_fast_selection(void) {
   receive(0,790001); (void)take(0,790001);
   assert(mcp3564r_start_dma()==HAL_OK && registers[7]==0x200 && registers[3]==0xef);
   /* A request during DMA must wait until the transfer completes. */
-  ready=1; wire_word=0x90000000U|1000U; mcp3564r_timer_elapsed_callback(&htim2);
+  ready=1; wire_word=0x90000000U|1000U; mcp3564r_data_ready_callback(ADC_IRQ_Pin);
   assert(dma_pending); mcp3564r_request_kg50_input(0);
   assert(mcp3564r_start_dma()==HAL_BUSY && mcp3564r_kg50_input()==1 && registers[3]==0xef);
   dma_pending=0; HAL_SPI_TxRxCpltCallback(&spi); (void)take(9,1000);
   assert(mcp3564r_start_dma()==HAL_OK && registers[7]==3 && registers[3]==0xcf && mcp3564r_kg50_input()==0);
   receive(9,123); assert(!mcp3564r_pending_samples());
   receive(1,123); (void)take(1,123);
-  mcp3564r_request_kg50_input(255); assert(mcp3564r_start_dma()==HAL_BUSY);
+  mcp3564r_request_kg50_input(255); assert(mcp3564r_start_dma()==HAL_OK);
   assert(registers[7]==3);
 }
+
+static void complete_irq_dma(void) {
+  assert(dma_pending);dma_pending=0;in_isr=1;HAL_SPI_TxRxCpltCallback(&spi);in_isr=0;
+}
+static void test_drdy_ownership_and_faults(void) {
+  assert(!timer_running && registers[5]==6);
+  const unsigned before=dma_calls;
+  mcp3564r_data_ready_callback(1);mcp3564r_data_ready_callback(ADC_IRQ_Pin);
+  assert(dma_calls==before); /* Wrong pin and high line are spurious. */
+  ready=1;wire_word=790001;
+  in_isr=1;mcp3564r_data_ready_callback(ADC_IRQ_Pin);in_isr=0;
+  assert(dma_pending && dma_calls==before+1 && selected);
+  ready=1;mcp3564r_data_ready_callback(ADC_IRQ_Pin);
+  assert(dma_calls==before+1); /* Busy IRQ cannot reuse aligned DMA buffers. */
+  mcp3564r_request_kg50_input(1);
+  assert(mcp3564r_start_dma()==HAL_BUSY && registers[7]==3);
+  complete_irq_dma();(void)take(0,790001);
+  ready=0;inject_config_edge=1;
+  assert(mcp3564r_start_dma()==HAL_OK && !inject_config_edge);
+  assert(!dma_pending && !ready && registers[7]==1); /* Stale low drained before START. */
+  mcp3564r_request_kg50_input(0);assert(mcp3564r_start_dma()==HAL_OK);
+  /* An edge lost while masked is recovered by one acquisition-thread kick. */
+  ready=1;wire_word=790002;
+  assert(mcp3564r_start_dma()==HAL_OK && dma_pending);
+  complete_irq_dma();(void)take(0,790002);
+  assert(mcp3564r_start_dma()==HAL_OK && !dma_pending);
+  /* Healthy not-ready STATUS is not a conversion or an error/restart. */
+  status_override=0x1f+1;ready=1;wire_word=790003;
+  mcp3564r_data_ready_callback(ADC_IRQ_Pin);complete_irq_dma();
+  assert(!mcp3564r_pending_samples());status_override=0;
+  const unsigned faults[]={0x00,0xff,0x19,0x1a,0x3b,0x13};
+  for(unsigned i=0;i<sizeof(faults)/sizeof(faults[0]);i++) {
+    status_override=faults[i]+1;ready=1;
+    mcp3564r_data_ready_callback(ADC_IRQ_Pin);
+    if(faults[i]==0x1a)memset(registers,0,sizeof(registers)); /* Actual POR loses format+IRQ. */
+    complete_irq_dma();
+    assert(!mcp3564r_pending_samples());
+    const unsigned n=dma_calls;ready=1;
+    mcp3564r_data_ready_callback(ADC_IRQ_Pin);assert(dma_calls==n);
+    abort_fail=1;
+    assert(mcp3564r_start_dma()==HAL_ERROR && selected); /* Error cannot release CS/buffers. */
+    status_override=0;
+    assert(mcp3564r_start_dma()==HAL_OK && !selected && !dma_pending);
+    assert(registers[4]==0xf0 && registers[5]==6 && registers[7]==3);
+    receive(0,790010+(int)i);(void)take(0,790010+(int)i);
+  }
+  /* Real asynchronous error, no immediate ISR restart or blocking abort. */
+  ready=1;wire_word=790020;mcp3564r_data_ready_callback(ADC_IRQ_Pin);
+  in_isr=1;mcp3564r_dma_error();in_isr=0;
+  const unsigned n=dma_calls;ready=1;mcp3564r_data_ready_callback(ADC_IRQ_Pin);
+  assert(dma_calls==n && dma_pending && selected);
+  assert(mcp3564r_start_dma()==HAL_OK && !dma_pending && !selected);
+  receive(0,790021);(void)take(0,790021);
+  const unsigned timeouts=g_mcp3564r_dma_timeout_count;
+  /* An acquisition-thread stall after an already completed DMA is healthy. */
+  tick+=20;assert(mcp3564r_start_dma()==HAL_OK);
+  assert(g_mcp3564r_dma_timeout_count==timeouts);
+  /* Lost completion spanning tick wrap: buffers stay owned until abort. */
+  tick=UINT32_MAX-10;ready=1;wire_word=790022;
+  mcp3564r_data_ready_callback(ADC_IRQ_Pin);assert(dma_pending);
+  tick+=19;assert(mcp3564r_start_dma()==HAL_BUSY);
+  assert(g_mcp3564r_dma_timeout_count==timeouts);
+  tick++;abort_fail=1;
+  assert(mcp3564r_start_dma()==HAL_ERROR && dma_pending && selected);
+  assert(g_mcp3564r_dma_timeout_count==timeouts+1);
+  in_isr=1;HAL_SPI_TxRxCpltCallback(&spi);in_isr=0;
+  assert(!mcp3564r_pending_samples()); /* Late callback cannot fabricate success. */
+  assert(mcp3564r_start_dma()==HAL_OK && !dma_pending && !selected);
+  assert(g_mcp3564r_dma_timeout_count==timeouts+1);
+  receive(0,790023);(void)take(0,790023);
+}
+
 int main(int argc, char **argv) {
   assert(argc == 2);
   if (!strcmp(argv[1], "powerfault")) {
@@ -369,13 +482,15 @@ int main(int argc, char **argv) {
   }
   assert(mcp3564r_init(&spi) == TX_SUCCESS);
   assert(powered==GPIO_PIN_SET && power_writes==1 && g_mcp3564r_12v_enable_readback==1);
-  if (!strcmp(argv[1], "config")) test_configuration();
+  if (!strcmp(argv[1], "drdy")) test_drdy_ownership_and_faults();
+  else if (!strcmp(argv[1], "config")) test_configuration();
   else if (!strcmp(argv[1], "response")) test_equal_input_response();
   else if (!strcmp(argv[1], "polling")) test_not_ready_and_recovery();
   else if (!strcmp(argv[1], "temperature")) test_temperature_clock_switch();
   else if (!strcmp(argv[1], "auxiliary")) test_auxiliary_pass();
   else if (!strcmp(argv[1], "p6")) test_p6_fast_selection();
   else assert(0);
+  assert(cache_calls==0);
 }
 '''
 
@@ -393,7 +508,7 @@ class Mcp3564rDriverTests(unittest.TestCase):
         (folder / 'main.h').write_text(
             '#include "stm32u5xx_hal.h"\n'
             '#define EN_12V_GPIO_Port ((void *)1)\n#define EN_12V_Pin 1\n'
-            '#define ADC_NCS_GPIO_Port ((void *)2)\n#define ADC_NCS_Pin 2\n')
+            '#define ADC_NCS_GPIO_Port ((void *)2)\n#define ADC_NCS_Pin 2\n#define ADC_IRQ_GPIO_Port ((void *)3)\n#define ADC_IRQ_Pin 1024\n')
         harness = folder / 'driver_test.c'
         harness.write_text(HARNESS)
         cls.binary = folder / 'driver_test'
@@ -402,6 +517,9 @@ class Mcp3564rDriverTests(unittest.TestCase):
                         '-I', str(folder), '-I', str(ROOT / 'Core/Inc'),
                         str(ROOT / 'Core/Src/mcp3564r.c'), str(harness),
                         '-o', str(cls.binary)], check=True, capture_output=True, text=True)
+
+    def test_falling_edge_dma_ownership_status_fault_and_scan_recovery(self):
+        subprocess.run([str(self.binary), "drdy"], check=True)
 
     def test_12v_enable_readback_failure_stops_before_spi_without_power_cycles(self):
         subprocess.run([str(self.binary), 'powerfault'], check=True)

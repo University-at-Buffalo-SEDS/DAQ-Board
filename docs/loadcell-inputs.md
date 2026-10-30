@@ -121,8 +121,13 @@ sections 5.6, 5.15, 6.2–6.4, and 8.2–8.8.
 `tests/test_mcp3564r_driver.py` compiles the complete production driver against
 a mocked HAL/SPI boundary. It verifies the actual transmitted register writes,
 identical scaling for identical codes on either channel, sign extension,
-changing CH1 samples with CH0 held constant, ring-buffer wrap, skipped polls
-without fresh data, and recovery after a DMA start failure. The mock supplies
+changing CH1 samples with CH0 held constant, ring-buffer wrap, spurious/busy
+PB10 edges, full five-byte DMA ownership, active-low STATUS/address validation,
+scan/configuration races, stale-low recovery, POR register restoration and
+failed/missing DMA completion recovery (including tick wrap and abort failure).
+The DRDY cadence model drives conversions independently of the2 ms worker and
+checks owned SD batches and explicit ring losses during injected worker stalls.
+The mock supplies
 ADC frames; it does not prove that physical bridge voltages change under load.
 
 `tests/test_kg50_acquisition.py` checks separation of interleaved samples into

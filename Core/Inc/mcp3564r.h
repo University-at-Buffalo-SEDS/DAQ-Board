@@ -42,17 +42,18 @@ extern const mcp3564r_config_t MCP3564R_DEFAULT_CONFIG;
 /* GPIO enable-level readback only, NOT a measurement of the +12VA rail.
  * UINT32_MAX before initialization, then0/1. Init status4 means stuck low. */
 extern volatile uint32_t g_mcp3564r_12v_enable_readback;
+/* Explicit stalled-DMA recoveries; never a synthetic conversion/sample. */
+extern volatile uint32_t g_mcp3564r_dma_timeout_count;
 
 /* 0: AMP2/CH1; 1: P6 differential CH2-CH3 (scan channel 9). */
 void mcp3564r_request_kg50_input(uint8_t input);
 uint8_t mcp3564r_kg50_input(void);
 
 UINT mcp3564r_init(SPI_HandleTypeDef *spi);
-void mcp3564r_set_start_offset_us(uint32_t offset_us);
 HAL_StatusTypeDef mcp3564r_start_dma(void);
 void mcp3564r_dma_complete(void);
 void mcp3564r_dma_error(void);
-void mcp3564r_timer_elapsed_callback(TIM_HandleTypeDef *htim);
+void mcp3564r_data_ready_callback(uint16_t pin);
 UINT mcp3564r_get_sample(mcp3564r_sample_t *sample);
 uint8_t mcp3564r_pending_samples(void);
 

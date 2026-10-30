@@ -2,7 +2,7 @@
 
 Virtual SPI has zero service time: this verifies cadence and ownership, not a
 hardware CPU/SD bandwidth guarantee. ADC conversions run independently of the
-180/271 us poll and the 2 ms acquisition worker, including AZ_MUX and aux/temp.
+DRDY interrupt and the 2 ms acquisition worker, including AZ_MUX and aux/temp.
 """
 import json
 import pathlib
@@ -77,7 +77,7 @@ static unsigned conversion_us(void) {
 int main(int argc,char **argv) {
  assert(argc==2);const unsigned stall=(unsigned)atoi(argv[1]);
  assert(mcp3564r_init(&spi)==TX_SUCCESS);
- model_us=(uint64_t)tick*1000;poll_at=model_us+htim2.reload+1;
+ model_us=(uint64_t)tick*1000;
  uint64_t next_adc=model_us+conversion_us();
  const uint64_t end=model_us+10000000ULL,start=model_us;
  unsigned scan=registers[7],cfg=registers[2],starts=start_commands,ch=15;
@@ -87,19 +87,19 @@ int main(int argc,char **argv) {
   tick=(uint32_t)(model_us/1000);
   if(model_us==next_adc) {
    do {ch=ch?ch-1:15;} while(!(scan&(1U<<ch)));
-   if(ready && timer_running && (scan&(3U|DAQ_CHAMBER_SCAN_MASK)))physical_overwrite++;
+   if(ready && (scan&(3U|DAQ_CHAMBER_SCAN_MASK)))physical_overwrite++;
    wire_word=(ch<<28)|(++sequence&0xfffffU);ready=1;
    if(ch==12){wire_word=(12U<<28)|305656U;temps++;}
    else if(!(scan&(3U|DAQ_CHAMBER_SCAN_MASK)))aux++;
    next_adc+=conversion_us();
+   /* DRDY falls per conversion; its auto-clear interval precedes the next
+    * conversion even when an old result was not read. */
+   in_isr=1;mcp3564r_data_ready_callback(ADC_IRQ_Pin);in_isr=0;
   }
-  if(timer_running && model_us==poll_at) {
-   mcp3564r_timer_elapsed_callback(&htim2);
-   if(dma_pending) {
-    const unsigned rawch=wire_word>>28;
-    dma_pending=0;HAL_SPI_TxRxCpltCallback(&spi);
-    if(rawch!=12)dma_raw++;
-   }
+  if(dma_pending) {
+   const unsigned rawch=wire_word>>28;
+   dma_pending=0;in_isr=1;HAL_SPI_TxRxCpltCallback(&spi);in_isr=0;
+   if(rawch!=12)dma_raw++;
    const unsigned pending=mcp3564r_pending_samples();if(pending>peak)peak=pending;
   }
   const uint64_t elapsed=model_us-start;
@@ -155,11 +155,10 @@ class ScanAccountingTests(unittest.TestCase):
             p=pathlib.Path(tmp)
             (p/'stm32u5xx_hal.h').write_text(HAL)
             (p/'tx_api.h').write_text('typedef unsigned UINT;\n#define TX_SUCCESS 0\n#define TX_PTR_ERROR 1\n#define TX_NOT_DONE 2\n')
-            (p/'main.h').write_text('#include "stm32u5xx_hal.h"\n#define EN_12V_GPIO_Port ((void*)1)\n#define EN_12V_Pin 1\n#define ADC_NCS_GPIO_Port ((void*)2)\n#define ADC_NCS_Pin 2\n')
+            (p/'main.h').write_text('#include "stm32u5xx_hal.h"\n#define EN_12V_GPIO_Port ((void*)1)\n#define EN_12V_Pin 1\n#define ADC_NCS_GPIO_Port ((void*)2)\n#define ADC_NCS_Pin 2\n#define ADC_IRQ_GPIO_Port ((void*)3)\n#define ADC_IRQ_Pin 1024\n')
             h=HARNESS[:HARNESS.index('int main(int argc, char **argv) {')]
-            h=h.replace('static uint32_t tick, wire_word;', 'static uint32_t tick, wire_word;\nstatic uint64_t model_us,poll_at;')
+            h=h.replace('static uint32_t tick, wire_word;', 'static uint32_t tick, wire_word;\nstatic uint64_t model_us;')
             h=h.replace('ready = 0;', 'if(command==0x41) ready = 0;')
-            h=h.replace('timer_running = 1; return HAL_OK;', 'timer_running = 1; poll_at=model_us+t->reload+1; return HAL_OK;')
             h=h.replace('static void test_', 'static __attribute__((unused)) void test_')
             (p/'model.c').write_text(h+MODEL+enqueue+SIM)
             results={}

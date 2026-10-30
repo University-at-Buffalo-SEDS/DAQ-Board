@@ -817,13 +817,26 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Alternate = GPIO_AF0_MCO;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
+  /* ADC data-ready is active low. IRQ_MODE drives inactive high. */
+  GPIO_InitStruct.Pin = ADC_IRQ_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(ADC_IRQ_GPIO_Port, &GPIO_InitStruct);
+  HAL_NVIC_SetPriority(EXTI10_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI10_IRQn);
+
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-extern void mcp3564r_timer_elapsed_callback(TIM_HandleTypeDef *htim);
+extern void mcp3564r_data_ready_callback(uint16_t pin);
+
+void HAL_GPIO_EXTI_Falling_Callback(uint16_t pin)
+{
+  mcp3564r_data_ready_callback(pin);
+}
 
 /* USER CODE END 4 */
 
@@ -845,7 +858,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */
-  mcp3564r_timer_elapsed_callback(htim);
+  /* ADC conversions are serviced by PB10 EXTI, never a timer poll. */
 
   /* USER CODE END Callback 1 */
 }

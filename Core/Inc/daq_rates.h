@@ -28,10 +28,9 @@
 #ifndef DAQ_BROADCAST_RATE_HZ
 #define DAQ_BROADCAST_RATE_HZ 250U
 #endif
-/* Legacy 3700 rounds to 271us per read; 5556 rounds to 180us. Three fast
- * channels retain at least the default two-channel cadence after rounding.
- * Polling alone does not guarantee fresh conversions: the assigned-pressure
- * default also budgets settled SCAN conversion time and AZ_MUX above. */
+/* DRDY controls actual reads. This legacy rate setting conservatively sizes
+ * acquisition drains/batches; it does not program a timer or ADC conversion.
+ * Three-channel defaults also budget settled SCAN time and AZ_MUX above. */
 #if DAQ_CHAMBER_SCAN_MASK != 0U && DAQ_ADC_READ_RATE_HZ < 5556U
 #error "Chamber fast scan requires DAQ_ADC_READ_RATE_HZ>=5556 and a compatible OSR; current settings would slow load cells"
 #endif

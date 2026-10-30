@@ -86,8 +86,8 @@ between checks, retaining the five-millisecond timeout. This prevents a
 disconnected CAN bus from starving the lower-priority SD writer. Interrupt
 and startup callers do not sleep. The isolated-CAN test requires zero SD row
 or raw-batch drops and at least two observations after its startup warmup.
-TIM2 runs at 1 MHz (160 MHz input divided by 160), matching the ADC driver's
-microsecond conversion delays; its prescaler is also recorded in CubeMX.
+ADC acquisition uses the MCP3564R data-ready signal on PB10/EXTI10. TIM2
+is not used to schedule or poll ADC reads.
 The created FAT volume is directly readable on macOS, Linux, and Windows.
 
 The SD card is optional for board operation. If it is absent or cannot be
@@ -252,9 +252,28 @@ the onboard amplifiers already convert each bridge's differential signal to
 a ground-referenced voltage. See [load-cell wiring and diagnostics](docs/loadcell-inputs.md).
 The ADC's 32-bit tagged output identifies the channel; only data-ready readings
 are queued. Both cells target independent sample-weighted 250 Hz raw telemetry
-(`KG1000`, ID 118; `KG50`, ID 119). The configured 3700 Hz timer is a polling
-ceiling shared by both channels, not the per-cell sample rate. SCAN settling
-and SPI overhead reduce the acquired rate.
+(`KG1000`, ID 118; `KG50`, ID 119). Falling data-ready edges launch one
+five-byte SPI DMA transaction (opcode, STATUS, four tagged data bytes). Only
+healthy active-low data-ready STATUS results enter the existing sample queue.
+SCAN settling, OSR and SPI service determine acquisition cadence; the legacy
+`DAQ_ADC_READ_RATE_HZ` setting sizes the drain/batch budget rather than a poll
+timer. The existing network publication cap and SD ownership are unchanged.
+Scan/gain changes disarm acquisition before register writes. Startup clears
+stale ready data while in standby, so the next edge follows a settled new
+conversion. Errors and missing completion callbacks recover in the acquisition
+thread; no blocking SPI command or reconfiguration runs in an ISR. A DMA owner
+that remains busy for 20 ms records `g_mcp3564r_dma_timeout_count`; its buffers
+and CS remain owned until HAL abort succeeds. SPI2 uses SYSCLK160 MHz divided
+by16, so a healthy five-byte wire transaction takes4 us; this20 ms bound is a
+fault deadline, not a sample period.
+
+On this STM32U585, both 32-byte DMA buffers are aligned to 32 bytes and pinned to
+`.bss.adc_dma` in internal SRAM, inside startup's zero-fill interval. Both
+application linker scripts reject placement outside 0x20000000..0x200C0000 or
+outside the zeroed BSS interval. [ST's DCACHE training, page 2](https://www.st.com/resource/en/product_training/stm32u5-system-data-cache.pdf)
+explains that DCACHE1 bypasses internal SRAM on this device. The ADC driver
+therefore uses memory barriers before DMA launch and before consuming its
+completed data, and performs no polling DCACHE maintenance in interrupts.
 
 SD raw records identify CH1 as `kg50_raw` and retain its ADC code, historical
 raw calibration value, calibrated kg, and acquisition timestamp. CH0 retains

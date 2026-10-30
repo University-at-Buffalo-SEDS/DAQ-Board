@@ -12,12 +12,24 @@ class RtosAcquisitionClockTests(unittest.TestCase):
         self.assertEqual(frequencies,[frequency]*3)
         self.assertEqual(frequency,1000)
 
-    def test_adc_uses_independent_microsecond_hardware_timer(self):
+    def test_adc_uses_drdy_exti_and_never_blocks_spi_in_interrupt(self):
         source=(ROOT/'Core/Src/mcp3564r.c').read_text()
-        timer=source.split('static HAL_StatusTypeDef mcp3564r_schedule',1)
-        self.assertIn('__HAL_TIM_SET_AUTORELOAD(&htim2, delay_us - 1U)',source)
-        self.assertIn('HAL_TIM_Base_Start_IT(&htim2)',source)
+        main=(ROOT/'Core/Src/main.c').read_text()
+        irq=(ROOT/'Core/Src/stm32u5xx_it.c').read_text()
+        header=(ROOT/'Core/Inc/main.h').read_text()
+        self.assertIn('#define ADC_IRQ_Pin GPIO_PIN_10',header)
+        self.assertIn('#define ADC_IRQ_GPIO_Port GPIOB',header)
+        self.assertIn('GPIO_MODE_IT_FALLING',main)
+        self.assertIn('void HAL_GPIO_EXTI_Falling_Callback(uint16_t pin)',main)
+        self.assertIn('mcp3564r_data_ready_callback(pin)',main)
+        self.assertIn('void EXTI10_IRQHandler(void)',irq)
+        self.assertIn('HAL_GPIO_EXTI_IRQHandler(ADC_IRQ_Pin)',irq)
+        self.assertNotIn('HAL_TIM_Base_Start_IT',source)
         self.assertNotIn('TX_TIMER_TICKS_PER_SECOND',source)
+        read=source.split('static HAL_StatusTypeDef mcp3564r_start_read_dma(void)',1)[1].split('static HAL_StatusTypeDef mcp3564r_clear_stale_ready',1)[0]
+        self.assertIn('HAL_SPI_TransmitReceive_DMA',read)
+        self.assertNotRegex(read,r'HAL_SPI_TransmitReceive\s*\(')
+        self.assertNotIn('HAL_Delay',read)
 
     def test_acquisition_pool_lock_inherits_priority(self):
         source=(ROOT/'Core/Src/sd_card.c').read_text()
