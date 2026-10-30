@@ -16,11 +16,11 @@ class ChamberPressureTests(unittest.TestCase):
             self.assertEqual(result.returncode,0,result.stderr)
             subprocess.run([str(binary)],check=True)
 
-    def test_exact_omega_model_voltage_conversion_and_unassigned_default(self):
+    def test_exact_omega_model_voltage_conversion_and_hvain1_default(self):
         self.compile_run('''#include "daq_chamber_pressure.h"
 #include <assert.h>
 int main(void) {
- assert(DAQ_CHAMBER_SCAN_MASK==0); assert(!daq_chamber_is_channel(6));
+ assert(DAQ_CHAMBER_ADC_CHANNEL==6); assert(DAQ_CHAMBER_SCAN_MASK==(1U<<6)); assert(daq_chamber_is_channel(6));
  assert(daq_chamber_pressure_psi(0)==0);
  assert(fabsf(daq_chamber_pressure_psi(5)-1000)<0.01f);
  assert(fabsf(daq_chamber_pressure_psi(2.5)-500)<0.01f);
@@ -28,7 +28,7 @@ int main(void) {
  assert(daq_chamber_pressure_psi(-0.01f)<0); }
 ''')
 
-    def test_fast_pin_binding_requires_explicit_compatible_acquisition_budget(self):
+    def test_fast_pin_binding_selects_compatible_defaults_and_rejects_unsafe_overrides(self):
         source='''#include "daq_rates.h"
 #include "mcp3564r_board_config.h"
 #include <assert.h>
@@ -38,8 +38,12 @@ int main(void) { assert(DAQ_ADC_READ_INTERVAL_US<=180); assert(MCP3564R_BOARD_SC
 '''
         for pin in (6,7):
             self.compile_run(source,[f'DAQ_CHAMBER_ADC_CHANNEL={pin}','DAQ_ADC_READ_RATE_HZ=5556','DAQ_ADC_OSR=512'])
-            self.compile_run(source,[f'DAQ_CHAMBER_ADC_CHANNEL={pin}'],valid=False)
+            self.compile_run(source,[f'DAQ_CHAMBER_ADC_CHANNEL={pin}'])
+            self.compile_run(source,[f'DAQ_CHAMBER_ADC_CHANNEL={pin}','DAQ_ADC_OSR=1024'],valid=False)
         self.compile_run(source,['DAQ_CHAMBER_ADC_CHANNEL=5'],valid=False)
+
+    def test_explicit_unassigned_opt_out_preserves_legacy_two_channel_profile(self):
+        self.compile_run('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_CHAMBER_SCAN_MASK==0); assert(!daq_chamber_is_channel(6)); assert(DAQ_ADC_OSR==1024); assert(DAQ_ADC_READ_RATE_HZ==3700);}', ['DAQ_CHAMBER_ADC_CHANNEL=-1'])
 
     def test_combined_publication_keeps_aggregate_slot_cadence_and_control_isolation(self):
         self.compile_run('''#include "daq_network_schedule.h"

@@ -31,6 +31,7 @@ static inline uint32_t __get_PRIMASK(void) { return 0; }
 static inline void __disable_irq(void) {}
 static inline void __enable_irq(void) {}
 void HAL_GPIO_WritePin(void *, uint16_t, unsigned);
+unsigned HAL_GPIO_ReadPin(void *, uint16_t);
 void HAL_Delay(uint32_t);
 uint32_t HAL_GetTick(void);
 HAL_StatusTypeDef HAL_SPI_TransmitReceive(SPI_HandleTypeDef *, uint8_t *, uint8_t *, uint16_t, uint32_t);
@@ -50,6 +51,7 @@ HARNESS = r'''
 #include <string.h>
 #include "mcp3564r.h"
 #include "main.h"
+#include "daq_rates.h"
 
 DCACHE_HandleTypeDef hdcache1;
 TIM_HandleTypeDef htim2 = {.Instance = TIM2};
@@ -60,10 +62,12 @@ static unsigned selected, command, reg, byte_index, powered, timer_running;
 static unsigned ready, dma_pending, dma_calls, start_commands, fail_next_dma;
 static uint32_t tick, wire_word;
 static unsigned fail_command;
+static unsigned force_power_low, power_writes;
+extern volatile uint32_t g_mcp3564r_init_status;
 
 void HAL_GPIO_WritePin(void *port, uint16_t pin, unsigned value) {
   (void)pin;
-  if (port == EN_12V_GPIO_Port) { powered = value; return; }
+  if (port == EN_12V_GPIO_Port) { assert(pin==EN_12V_Pin); powered = value; power_writes++; return; }
   assert(port == ADC_NCS_GPIO_Port);
   if (value == GPIO_PIN_RESET) {
     assert(!selected);
@@ -71,6 +75,10 @@ void HAL_GPIO_WritePin(void *port, uint16_t pin, unsigned value) {
   } else {
     selected = 0;
   }
+}
+unsigned HAL_GPIO_ReadPin(void *port, uint16_t pin) {
+  assert(port==EN_12V_GPIO_Port && pin==EN_12V_Pin && tick>=10);
+  return force_power_low ? GPIO_PIN_RESET : powered;
 }
 void HAL_Delay(uint32_t ms) { tick += ms; }
 uint32_t HAL_GetTick(void) { return tick; }
@@ -349,7 +357,18 @@ static void test_p6_fast_selection(void) {
   assert(registers[7]==3);
 }
 int main(int argc, char **argv) {
-  assert(argc == 2 && mcp3564r_init(&spi) == TX_SUCCESS);
+  assert(argc == 2);
+  if (!strcmp(argv[1], "powerfault")) {
+    assert(mcp3564r_init(NULL)==TX_PTR_ERROR && power_writes==0);
+    force_power_low=1;
+    assert(mcp3564r_init(&spi)==TX_NOT_DONE);
+    assert(powered==GPIO_PIN_SET && power_writes==1 && tick==10);
+    assert(g_mcp3564r_12v_enable_readback==0 && g_mcp3564r_init_status==4);
+    assert(!selected && !start_commands && !timer_running);
+    return 0;
+  }
+  assert(mcp3564r_init(&spi) == TX_SUCCESS);
+  assert(powered==GPIO_PIN_SET && power_writes==1 && g_mcp3564r_12v_enable_readback==1);
   if (!strcmp(argv[1], "config")) test_configuration();
   else if (!strcmp(argv[1], "response")) test_equal_input_response();
   else if (!strcmp(argv[1], "polling")) test_not_ready_and_recovery();
@@ -379,9 +398,13 @@ class Mcp3564rDriverTests(unittest.TestCase):
         harness.write_text(HARNESS)
         cls.binary = folder / 'driver_test'
         subprocess.run(['cc', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+                        '-DDAQ_CHAMBER_ADC_CHANNEL=-1',
                         '-I', str(folder), '-I', str(ROOT / 'Core/Inc'),
                         str(ROOT / 'Core/Src/mcp3564r.c'), str(harness),
                         '-o', str(cls.binary)], check=True, capture_output=True, text=True)
+
+    def test_12v_enable_readback_failure_stops_before_spi_without_power_cycles(self):
+        subprocess.run([str(self.binary), 'powerfault'], check=True)
 
     def test_spi_configures_both_channels_like_the_working_input(self):
         subprocess.run([str(self.binary), 'config'], check=True)
@@ -405,7 +428,7 @@ class Mcp3564rDriverTests(unittest.TestCase):
         chamber_test = r"""
 static void test_chamber(void) {
   assert(registers[7] == (3U | DAQ_CHAMBER_SCAN_MASK));
-  assert(registers[2] == 0x10 && registers[3] == 0xcf);
+  assert(registers[2] == (DAQ_ADC_OSR_BITS<<2) && registers[3] == 0xcf);
   const unsigned channel = DAQ_CHAMBER_ADC_CHANNEL;
   receive(channel,1588752);
   mcp3564r_sample_t sample=take(channel,1588752);
@@ -422,7 +445,7 @@ static void test_chamber(void) {
   assert(mcp3564r_start_dma()==HAL_OK && registers[7]==(1U|DAQ_CHAMBER_SCAN_MASK) && registers[3]==0xcf);
 }
 """
-        for pin in (6,7):
+        for pin in (None,6,7):
             with self.subTest(pin=pin):
                 folder=pathlib.Path(self.tmp.name)
                 harness=folder / f'chamber-{pin}.c'
@@ -431,6 +454,6 @@ static void test_chamber(void) {
                 harness.write_text(text)
                 binary=folder / f'chamber-{pin}'
                 subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Werror',
-                    '-DDAQ_CHAMBER_ADC_CHANNEL='+str(pin),'-DDAQ_ADC_READ_RATE_HZ=5556','-DDAQ_ADC_OSR=512',
+                    *([] if pin is None else ['-DDAQ_CHAMBER_ADC_CHANNEL='+str(pin),'-DDAQ_ADC_READ_RATE_HZ=5556','-DDAQ_ADC_OSR=512']),
                     '-I',str(folder),'-I',str(ROOT/'Core/Inc'),str(ROOT/'Core/Src/mcp3564r.c'),str(harness),'-lm','-o',str(binary)],check=True,capture_output=True,text=True)
                 subprocess.run([str(binary),'chamber'],check=True)

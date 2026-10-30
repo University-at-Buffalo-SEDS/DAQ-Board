@@ -109,7 +109,8 @@ not yet a demonstrated explanation for all of the observed rate shortfall.
 
 At 40 bytes per binary sample, 12,000 samples/s require 480,000 bytes/s before
 filesystem overhead. Current SD output is CSV and has a different, larger
-bandwidth requirement. Current ADC OSR is 1024; the 12 kHz request is not the
+bandwidth requirement. The pressure-enabled default ADC OSR is 256 (legacy 1024 when disabled);
+the 12 kHz request is not the
 active conversion/read configuration. Acquisition settings, storage format,
 buffer reserves, and end-to-end network capacity all remain part of the work.
 

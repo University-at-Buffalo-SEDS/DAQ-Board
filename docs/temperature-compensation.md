@@ -32,7 +32,9 @@ legacy points; use live capture for temperature-aware calibration.
 
 ## Acquisition and wire contract
 
-MCP3564R normally scans CH1 and CH0 at the existing 16 MHz clock and OSR 1024.
+MCP3564R normally scans CH6 (chamber), CH1 and CH0 at the existing 16 MHz
+clock and OSR256. Explicitly disabling the chamber input restores the legacy
+CH1/CH0 OSR1024 profile.
 Every 100 ms, the acquisition thread briefly selects TEMP only (bit 12,
 channel ID 12), with the clock prescaled to 4 MHz and OSR 256. After one TEMP
 result it restores the load-cell scan, clock, and filter. Gain remains unity.

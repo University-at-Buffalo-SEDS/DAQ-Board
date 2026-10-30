@@ -82,19 +82,23 @@ the register is shared. `CONFIG3=0xF0` includes the channel ID and signed
 volts = signed_code * 2.4 / 8388608
 ```
 
-The complete shared setup retains the working input's analog settings:
+The shared setup retains the clock, gain, auto-zero and calibration scales.
+The default pressure-enabled profile lowers OSR to preserve fresh load-cell
+density with a third channel; see [chamber pressure](chamber-pressure.md) for
+the noise tradeoff. Explicitly disabled pressure retains the legacy filter:
+
 
 | Register | Written value | Applies to both inputs |
 | --- | --- | --- |
 | CONFIG0 | 0x82, then START makes it 0x83 | Internal reference, external MCLK, bias current sources off |
-| CONFIG1 | 0x14 | MCLK/1, OSR 1024 |
+| CONFIG1 | 0x0C (legacy 0x14) | MCLK/1, OSR256 (legacy 1024) |
 | CONFIG2 | 0xCF | Gain 1, boost 2, MUX/reference auto-zero enabled |
 | CONFIG3 | 0xF0 | Continuous scan cycles, tagged 32-bit data, hardware calibration off |
-| SCAN | 0x000003 | CH1-AGND and CH0-AGND |
+| SCAN | 0x000043 (legacy 0x000003) | CH6 pressure, CH1-AGND and CH0-AGND |
 | TIMER | 0x000000 | No extra delay between scan cycles |
 
 SCAN overrides the MUX register, so its retained `MUX=0x08` does not restrict
-conversions to CH0. The scanner visits CH1 then CH0, and each result is routed
+conversions to CH0. The scanner visits CH6, CH1 then CH0 with pressure enabled, and each result is routed
 by its returned channel ID. The driver sends START once; it does not restart
 the scan at each read. There is no separate CH1 gain/reference/filter register
 to initialize. Auto-zero and scan settling consume conversion time, and the

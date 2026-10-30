@@ -6,10 +6,21 @@
 /* Board-local settings. No network variables; rebuild/reflash to change.
  * MCLK is the physical CubeMX MCO output and must match the board clock. */
 #ifndef DAQ_ADC_OSR
+#if DAQ_CHAMBER_SCAN_MASK != 0U
+/* SCAN conversions settle per channel, doubled by AZ_MUX. At16MHz,
+ * OSR256 allows three fresh channels without reducing either load cell's
+ * former OSR1024/two-channel fresh-sample density. Gain/scale stay unchanged. */
+#define DAQ_ADC_OSR 256U
+#else
 #define DAQ_ADC_OSR 1024U
 #endif
+#endif
 #ifndef DAQ_ADC_READ_RATE_HZ
+#if DAQ_CHAMBER_SCAN_MASK != 0U
+#define DAQ_ADC_READ_RATE_HZ 5556U
+#else
 #define DAQ_ADC_READ_RATE_HZ 3700U
+#endif
 #endif
 #ifndef DAQ_ACQUISITION_PERIOD_MS
 #define DAQ_ACQUISITION_PERIOD_MS 2U
@@ -19,7 +30,8 @@
 #endif
 /* Legacy 3700 rounds to 271us per read; 5556 rounds to 180us. Three fast
  * channels retain at least the default two-channel cadence after rounding.
- * Select a compatible OSR explicitly; default 1024 cannot provide this rate. */
+ * Polling alone does not guarantee fresh conversions: the assigned-pressure
+ * default also budgets settled SCAN conversion time and AZ_MUX above. */
 #if DAQ_CHAMBER_SCAN_MASK != 0U && DAQ_ADC_READ_RATE_HZ < 5556U
 #error "Chamber fast scan requires DAQ_ADC_READ_RATE_HZ>=5556 and a compatible OSR; current settings would slow load cells"
 #endif

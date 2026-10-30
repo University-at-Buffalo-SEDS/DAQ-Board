@@ -39,6 +39,9 @@ typedef struct
 } mcp3564r_sample_t;
 
 extern const mcp3564r_config_t MCP3564R_DEFAULT_CONFIG;
+/* GPIO enable-level readback only, NOT a measurement of the +12VA rail.
+ * UINT32_MAX before initialization, then0/1. Init status4 means stuck low. */
+extern volatile uint32_t g_mcp3564r_12v_enable_readback;
 
 /* 0: AMP2/CH1; 1: P6 differential CH2-CH3 (scan channel 9). */
 void mcp3564r_request_kg50_input(uint8_t input);

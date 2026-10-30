@@ -46,12 +46,13 @@ class DaqRateTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
 
     def test_default_and_fast_settings(self):
-        self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_ADC_OSR_BITS == 5); assert(DAQ_ADC_READ_INTERVAL_US == 271); assert(DAQ_BROADCAST_PERIOD_MS == 4); assert(DAQ_ACQUISITION_PERIOD_MS == 2); assert(DAQ_SD_RAW_QUEUE_DEPTH == 401); assert(DAQ_RAW_BATCH_CAPACITY == 12);}')
+        self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_ADC_OSR_BITS == 3); assert(DAQ_ADC_READ_INTERVAL_US == 180); assert(DAQ_BROADCAST_PERIOD_MS == 4); assert(DAQ_ACQUISITION_PERIOD_MS == 2); assert(DAQ_SD_RAW_QUEUE_DEPTH == 401); assert(DAQ_RAW_BATCH_CAPACITY == 16);}')
+        self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_ADC_OSR_BITS == 5); assert(DAQ_ADC_READ_INTERVAL_US == 271); assert(DAQ_BROADCAST_PERIOD_MS == 4); assert(DAQ_ACQUISITION_PERIOD_MS == 2); assert(DAQ_SD_RAW_QUEUE_DEPTH == 401); assert(DAQ_RAW_BATCH_CAPACITY == 12);}', ['DAQ_CHAMBER_ADC_CHANNEL=-1'])
         self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_ADC_OSR_BITS == 3); assert(DAQ_ADC_READ_INTERVAL_US == 84); assert(DAQ_BROADCAST_PERIOD_MS == 100);}',
                      ['DAQ_ADC_OSR=256', 'DAQ_ADC_READ_RATE_HZ=12000', 'DAQ_ACQUISITION_PERIOD_MS=5', 'DAQ_BROADCAST_RATE_HZ=10'])
 
     def test_unsafe_configurations_fail_compilation(self):
-        for defines in [['DAQ_ADC_READ_RATE_HZ=0'], ['DAQ_ADC_READ_RATE_HZ=12000'],
+        for defines in [['DAQ_ADC_READ_RATE_HZ=0'], ['DAQ_ADC_READ_RATE_HZ=12000', 'DAQ_ADC_OSR=1024'],
                         ['DAQ_SD_RAW_BUFFER_MS=2000'],
                         ['DAQ_BROADCAST_RATE_HZ=1000'], ['DAQ_ADC_OSR=123']]:
             with self.subTest(defines=defines):

@@ -85,6 +85,7 @@ static uint32_t mcp3564r_fast_scan(uint8_t input) {
 }
 
 volatile uint32_t g_mcp3564r_init_status = UINT32_MAX;
+volatile uint32_t g_mcp3564r_12v_enable_readback = UINT32_MAX;
 #if (MCP3564R_USE_DMA_READ != 0U)
 static uint8_t g_mcp3564r_tx_frame[MCP3564R_DCACHE_LINE_SIZE] MCP3564R_DMA_ALIGN;
 static uint8_t g_mcp3564r_rx_frame[MCP3564R_DCACHE_LINE_SIZE] MCP3564R_DMA_ALIGN;
@@ -540,6 +541,16 @@ UINT mcp3564r_init(SPI_HandleTypeDef *spi)
 
   EN_12V;
   HAL_Delay(10U);
+  /* PC4/+12VA_EN drives U17 SHDN directly (schematic sheets2/3).
+   * High enables the analog rail; only verify the GPIO level here. A voltage
+   * measurement at the connector remains a separate hardware observation. */
+  g_mcp3564r_12v_enable_readback =
+    HAL_GPIO_ReadPin(EN_12V_GPIO_Port, EN_12V_Pin) == GPIO_PIN_SET ? 1U : 0U;
+  if (g_mcp3564r_12v_enable_readback == 0U)
+  {
+    g_mcp3564r_init_status = 4U;
+    return TX_NOT_DONE;
+  }
 
   if (mcp3564r_reset_device() != HAL_OK)
   {

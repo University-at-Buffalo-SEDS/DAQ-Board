@@ -31,7 +31,7 @@ KG1000/KG50 raw calibration coordinates and gain/filter settings.
 Architecture labels call PC2/PC3 ADC1_IN3/4; the same physical pins also support
 ADC4_IN3/4, used here with PC0/PC1. P1/P2/P3/P9 use unity-gain buffers, not
 pairwise differential measurement. Their pins 1/6 supply +3V3A, pins 2/5 are
-GND. P4 pins 1/6 supply +12VA/+3V3A; P5/P6 pins 1/6 supply +VREF_BUF/+3V3A.
+GND. P4 pins 1/6 supply +3V3A/+12VA respectively; P5/P6 pins 1/6 supply +VREF_BUF/+3V3A.
 These are supply outputs, not analog input pins. Input clamp rails and connector
 supply voltages do not specify a calibrated measurement range.
 
@@ -65,8 +65,9 @@ NaN and does not prevent the other inputs or external ADC queue from being read.
 The current sensor's unconnected *current path* should nominally report near
 zero amps; open voltage inputs may float and are not detected as disconnected.
 
-MCP CH0/CH1 remain the normal scan. Every 100 ms, a bounded CH2–7 pass uses the
-same reference, gain, clock and OSR, then restores CH0/CH1. Temperature has a
+MCP CH0/CH1 and the assigned chamber input (default CH6) form the normal scan.
+Every 100 ms, a bounded CH2–7 pass excludes that fast pressure channel, uses the
+same reference, gain, clock and OSR, then restores the normal scan. Temperature has a
 separate, higher-priority slow-clock measurement. The auxiliary pass shares
 conversion time with load cells; their achieved rate must be measured again.
 A 25 ms auxiliary timeout restores the normal scan if a conversion is missing.
@@ -176,7 +177,7 @@ input. The 1000 kg raw coordinate and saved calibration are unchanged.
 
 GroundStation keeps separate mass/temperature/filter profiles for P8 and P6.
 A new P6 profile needs zero/span calibration before it produces kilograms.
-SD retains every queued differential conversion as `mcp3564r_ch2_ch3_gain16_raw`,
+SD retains every queued differential conversion as `mcp3564r_ch2_ch3_gain 16_raw`,
 including signed ADC code and unfiltered differential input volts; these records
 are not converted with the AMP2 calibration. P6 mass calibration is applied by
 GroundStation. Auxiliary CH2/CH3 voltage reports remain separate, slow channels.

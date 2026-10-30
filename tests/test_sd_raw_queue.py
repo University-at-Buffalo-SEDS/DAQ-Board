@@ -24,7 +24,8 @@ static void __disable_irq(void){}
 static void __set_PRIMASK(uint32_t value){(void)value;}
 enum {TX_SUCCESS=0, TX_NO_WAIT=0, SD_CARD_STATUS_OK=0,
       SD_CARD_STATUS_BUSY=1, SD_CARD_STATUS_BACKPRESSURE=2};
-#define SD_RAW_BATCH_MAX 12
+#include "daq_rates.h"
+#define SD_RAW_BATCH_MAX DAQ_RAW_BATCH_CAPACITY
 typedef struct {float slope;} daq_calibration_t;
 typedef struct
 {
@@ -52,7 +53,7 @@ static int g_sd_raw_queue;
 static sd_raw_slot_t slot;
 static uint64_t board_uptime_ticks(void) {return 456;}
 static uint64_t sd_run_snapshot(void) {return closed ? 0 : 123;}
-static sd_raw_slot_t *sd_alloc_raw_slot(uint16_t count) {assert(count<=12); return full ? 0 : &slot;}
+static sd_raw_slot_t *sd_alloc_raw_slot(uint16_t count) {assert(count<=SD_RAW_BATCH_MAX); return full ? 0 : &slot;}
 static void sd_free_raw_slot(sd_raw_slot_t *s) {assert(s==&slot); ++freed;}
 static int tx_queue_send(int *q, VOID *message, int wait) {
   assert(q==&g_sd_raw_queue && wait==TX_NO_WAIT);
@@ -71,7 +72,7 @@ int main(void) {
   assert(slot.calibration.slope==2 && slot.session==123);
   assert(slot.samples[0].channel==6 && slot.samples[0].raw_value==2.5f && slot.samples[0].calibrated_value==500);
   assert(slot.samples[0].network_unix_ms==1700000000000ULL && slot.samples[0].monotonic_ms==456 && slot.samples[0].record_sequence==21);
-  assert(sd_card_enqueue_raw_adc_samples(samples,13,&calibration)==SD_CARD_STATUS_BUSY);
+  assert(sd_card_enqueue_raw_adc_samples(samples,SD_RAW_BATCH_MAX+1,&calibration)==SD_CARD_STATUS_BUSY);
   full=1;
   assert(sd_card_enqueue_raw_adc_samples(samples,2,&calibration)==SD_CARD_STATUS_BACKPRESSURE);
   assert(g_sd_raw_batch_drop_count==1 && sent==1);
@@ -88,7 +89,7 @@ int main(void) {
 '''
         with tempfile.TemporaryDirectory() as tmp:
             binary = pathlib.Path(tmp) / 'raw_queue'
-            subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
+            subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-I', str(ROOT / 'Core/Inc'),
                             '-x', 'c', '-', '-o', str(binary)], input=program,
                            text=True, check=True)
             subprocess.run([str(binary)], check=True)

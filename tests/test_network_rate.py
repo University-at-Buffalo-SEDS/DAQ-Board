@@ -113,7 +113,7 @@ static void publish_temperature(float value,uint64_t ms){
 ''' + temperature + r'''
 }
 int main(void){
- assert(DAQ_ADC_READ_RATE_HZ==3700 && DAQ_ACQUISITION_PERIOD_MS==2 && DAQ_BROADCAST_PERIOD_MS==4);
+ assert(DAQ_ADC_READ_RATE_HZ==5556 && DAQ_ACQUISITION_PERIOD_MS==2 && DAQ_BROADCAST_PERIOD_MS==4);
  daq_calibration_t calibration={3,-7};daq_snapshot_t snapshot={.ext_adc_sample_valid=1};
  daq_loadcell_window_t window={.count={0,0,1}};
  const unsigned weights[7]={DAQ_NETWORK_WEIGHT_KG50,DAQ_NETWORK_WEIGHT_KG1000,DAQ_NETWORK_WEIGHT_TEMPERATURE,

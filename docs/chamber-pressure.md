@@ -15,32 +15,43 @@ Physical wiring, rail capacity, calibration and operating envelope remain unveri
 
 ## P4 input and sampling
 
-The checked-in default `DAQ_CHAMBER_ADC_CHANNEL=-1` is **unassigned**. It performs
-no chamber conversion, creates no chamber SD samples, and publishes the unchanged
-scalar KG1000 telemetry. A real zero-pressure sample remains valid after input
-assignment; lack of a sample never creates a zero-pressure reading.
+The checked-in default selects `DAQ_CHAMBER_ADC_CHANNEL=6`: the installed
+HVAIN1 input. Explicit `-1` disables chamber conversion and restores scalar
+KG1000 publication plus the legacy OSR1024/read3700 profile. A real zero-pressure
+sample remains valid; lack of a sample never creates a zero-pressure reading.
 
-The revision A schematic maps P4/3 HVAIN1 to MCP3564R CH6, and P4/4 HVAIN2 to CH7,
-both through 10k/1k dividers. `DAQ_CHAMBER_ADC_CHANNEL=6` or `7` selects one explicitly.
-P4/1 and P4/6 are supply outputs (+12VA/+3V3A), not signal inputs. Selecting P4
-alone does not identify which input is wired. Existing clamp/supply voltages do
-not establish a safe transducer supply or a calibrated measurement range.
+The checked-in schematic sheet 9 traces P4/3 HVAIN1 through R27/R31 (10k/1k),
+U8B and R28 to MCP3564R U7 CH6. P4/4 HVAIN2 is CH7 and remains an explicit
+override. P4/1 is +3V3A; P4/6 is +12VA. Pins 2/5 are ground. These supply
+outputs are not signal inputs; the PX309 requires 9–30 V excitation, not 3.3 V.
+The GPIO enable state does not establish a measured excitation voltage or
+calibrated measurement range; see the README analog-power notes.
 
-An assigned channel joins the unity-gain fast scan and is removed from the slow
-auxiliary scan. It is excluded from the alternate P6 differential gain 16 scan.
-Raw chamber conversions use the same acquisition queue, timestamps, and SD
-record ownership as the load cells.
+The assigned channel joins the unity-gain fast scan and is removed from the
+slow auxiliary scan. It is excluded from the alternate P6 differential gain 16
+scan. Raw chamber conversions use the same owned acquisition FIFO, timestamps,
+and copied SD batches as the load cells.
 
-**Bandwidth constraint:** two fast load cells currently share 3700 aggregate
-reads/s, roughly 1850 each outside diagnostic scans. A third equally sampled
-channel needs at least 5556 configured reads/s (180us per read) to preserve
-the legacy rounded 271us/two-channel cadence. The existing OSR1024
-conversion ceiling is 3906.25/s, so simply adding a third channel would slow the
-load cells. The build rejects this. A candidate explicit configuration of OSR512
-and 5556 aggregate reads/s builds, but changes filtering/noise and remains a
-hardware qualification choice, not the default. The configured per-channel
-rate also depends on diagnostic scans and the selected P6 mode. No physical
-sample-rate or transducer-accuracy acceptance is claimed.
+**Settled conversion budget:** polling frequency is not fresh sample rate.
+The MCP3564R SCAN filter settles separately for every channel, and the retained
+AZ_MUX setting doubles conversion time. At 16 MHz MCLK, the legacy OSR1024
+profile takes 1024 us per channel before service overhead. Three channels at
+OSR512 take 768 us each, reducing the two load cells' density. The default is
+therefore OSR256/read5556:384 us per settled channel, nominal 1152 us per
+three-channel cycle before diagnostics and service overhead. Clock, gain,
+auto-zero and calibration scales remain unchanged. OSR256 provides less
+oversampling/noise rejection than OSR1024; equal noise or effective resolution
+is not promised. Physical noise and achieved cadence still need measurement.
+See [MCP3564R SCAN/AZ_MUX and filter timing](https://ww1.microchip.com/downloads/aemDocuments/documents/APID/ProductDocuments/DataSheets/MCP3561_2_4R-Data-Sheet-DS200006391C.pdf).
+
+The production-driver SCAN/DRDY model includes full per-channel settling,
+auxiliary/temperature passes and 2 ms acquisition service. It compares the
+legacy two-channel profile to the default three-channel profile, requires
+at least the original fresh load-cell density, and uses the actual SD enqueue
+routine to verify immutable ownership through a 600 ms writer stall. A deliberate
+acquisition stall must expose exact FIFO overrun accounting. Virtual SPI service
+is instantaneous in this model; hardware CPU timing and real-card bandwidth
+are separate qualification measurements.
 
 The original 230976-byte variable SD raw pool remains intact. An assertion checks
 that 800 ms of configured raw conversions plus per-batch ownership/allocation

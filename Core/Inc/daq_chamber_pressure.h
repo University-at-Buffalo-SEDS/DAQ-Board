@@ -2,9 +2,11 @@
 #define DAQ_CHAMBER_PRESSURE_H
 #include <math.h>
 #include <stdint.h>
-/* P4/3 HVAIN1=CH6; P4/4 HVAIN2=CH7. No pin is selected implicitly. */
+/* Schematic sheet9: P4/3 HVAIN1 -> R27/R31 divider -> U8B -> U7 CH6.
+ * The installed PX309-1KG5V uses HVAIN1. Explicit -1 disables this input;
+ * P4/4 HVAIN2 remains available as an explicit CH7 override. */
 #ifndef DAQ_CHAMBER_ADC_CHANNEL
-#define DAQ_CHAMBER_ADC_CHANNEL (-1)
+#define DAQ_CHAMBER_ADC_CHANNEL 6
 #endif
 #if DAQ_CHAMBER_ADC_CHANNEL != -1 && DAQ_CHAMBER_ADC_CHANNEL != 6 && DAQ_CHAMBER_ADC_CHANNEL != 7
 #error "Select -1 (unassigned), 6 (P4/3), or 7 (P4/4)"

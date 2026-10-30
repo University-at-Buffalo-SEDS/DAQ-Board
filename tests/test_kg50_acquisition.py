@@ -93,13 +93,20 @@ int main(void) {
   assert(window.sum[1]==7 && window.voltage_sum[1]==0.6f);
   /* Auxiliary samples retain ADC volts and divider-adjusted connector volts,
      with no load-cell calibration/filter or mass-channel count contamination. */
-  snapshot=(daq_snapshot_t){ .ext_adc_sample_valid=1, .ext_adc_channel=6,
+  snapshot=(daq_snapshot_t){ .ext_adc_sample_valid=1, .ext_adc_channel=7,
       .ext_adc_voltage_v=0.6f, .ext_adc_loadcell_kg1000=0.6f };
   assert(daq_drain_ext_adc(&snapshot,records,4,&cal,&window)==1);
-  assert(window.count[0]==0 && window.count[1]==0 && window.count[6]==1);
-  assert(!snapshot.ext_adc_sample_valid && records[0].channel==6);
+  assert(window.count[0]==0 && window.count[1]==0 && window.count[7]==1);
+  assert(!snapshot.ext_adc_sample_valid && records[0].channel==7);
   assert(fabsf(records[0].calibrated_value-6.6f)<1e-6f);
   assert(records[0].raw_value==0.6f);
+  /* Default HVAIN1 pressure records retain connector volts plus psi, while
+     pressure never enters either load-cell calibration/filter. */
+  snapshot.ext_adc_channel=6; snapshot.ext_adc_sample_valid=1;
+  assert(daq_drain_ext_adc(&snapshot,records,4,&cal,&window)==1);
+  assert(window.count[6]==1 && window.count[0]==0 && window.count[1]==0);
+  assert(fabsf(records[0].raw_value-6.6f)<1e-6f);
+  assert(fabsf(records[0].calibrated_value-1320.0f)<0.001f);
   /* P6 differential samples remain individual signed volts in SD and their
      own window; they never inherit AMP2's raw scale or calibration. */
   snapshot=(daq_snapshot_t){ .ext_adc_sample_valid=1, .ext_adc_channel=9,
@@ -134,7 +141,7 @@ int main(void) {
 #include <string.h>
 #include "mcp3564r_board_config.h"
 int main(void) {
-  assert(MCP3564R_BOARD_SCAN == 3);
+  assert(MCP3564R_BOARD_SCAN == (3U | (1U<<6)));
   assert(((MCP3564R_BOARD_CONFIG2 >> 3) & 7) == 1);
   assert(mcp3564r_code_to_voltage(0) == 0);
   /* AMP2's nominal 0.6 V bias is one quarter of the 2.4 V reference. */

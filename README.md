@@ -53,8 +53,9 @@ network/local time, independent 64-bit boot uptime ticks, the nominal clock
 frequency (1000 Hz), and a per-stream sequence. Uptime remains usable when
 network UTC is corrected. Raw rows preserve ADC code, raw/calibrated values
 and ADC temperature. Failed and partial writes retain their pending records;
-queue rejection and storage errors are counted. Acquisition settings are
-unchanged; the default network target is 250 reports/s per loadcell.
+queue rejection and storage errors are counted. The default live network cap
+is 100 sensor packets/s total; the separate load-cell SD report target remains
+250 rows/s per loadcell, using captured fresh samples.
 Every file begins with the four active
 load-cell calibration coefficients and contains both raw and calibrated sample
 values. Values use nine-significant-digit decimal scientific notation, preserving
@@ -133,8 +134,8 @@ network-loss qualification.
 
 Edit `Core/Inc/daq_rates.h` and rebuild/reflash:
 
-- `DAQ_ADC_OSR`: hardware ADC oversampling filter (default 1024).
-- `DAQ_ADC_READ_RATE_HZ`: requested timer-paced ADC reads (default 3700).
+- `DAQ_ADC_OSR`: hardware ADC oversampling filter (default 256 with chamber input; 1024 when explicitly disabled).
+- `DAQ_ADC_READ_RATE_HZ`: requested timer-paced ADC reads (default 5556 with chamber input; 3700 when explicitly disabled).
 - `DAQ_ACQUISITION_PERIOD_MS`: raw queue drain cadence (default 2 ms).
 - `DAQ_BROADCAST_RATE_HZ`: filtered report/SD replay cadence (default 250 Hz per loadcell).
 
@@ -172,7 +173,7 @@ The optional CLI override accepts 1..1000; actual delivered rate also depends on
 available source samples and transport capacity. Empty weighted slots stay empty.
 
 The raw SD byte pool budgets 800 ms at the configured acquisition rate.
-Batch capacity scales with the acquisition interval (12 records per batch and
+Batch capacity scales with the acquisition interval (16 records per batch and
 401 full-batch equivalents at the defaults); the pointer queue can hold
 smaller batches within that same byte budget. No stale
 reports are burst out after a missed deadline. Fresh ADC data, CPU scheduling,
@@ -332,3 +333,47 @@ the arena. TLSF and compact stores are the defaults; physical hardware qualifica
 `--allocator tlsf` selects the board-owned TLSF allocator for SEDSnet.
 ThreadX scheduling and thread stacks retain their existing ownership. The defaults are `tlsf` and `compact`. Use `--allocator threadx --packet-store heap` for an explicit fallback.
 TLSF coalesces adjacent free blocks; packet-arena compaction is a separate option.
+
+### HVAIN1 chamber pressure and analog power
+
+The default chamber sensor is the OMEGA PX309-1KG5V: 0–1000 psig,
+0–5 V output, 9–30 V excitation. The checked-in schematic sheet 9 traces
+P4 / HVIN HVAIN1 through R27/R31 (10k/1k), U8B and R28 to U7 CH6;
+HVAIN2 is CH7. P4 pin 6 supplies +12VA, pin 1 supplies +3V3A, and
+pins 2/5 are ground; the PX309 excitation must not use the 3.3 V supply.
+Firmware selects CH6 by default, reverses the 11:1 divider,
+and converts connector volts to psi at 200 psi/V. Out-of-range measurements
+are preserved, not clamped. The existing combined KG1000/pressure/connector-V
+network slot shares the 40 Hz KG1000 schedule; the aggregate live cap stays 100 Hz.
+The raw SD stream preserves each captured sample and both timestamps.
+
+`DAQ_CHAMBER_ADC_CHANNEL=-1` explicitly disables the chamber channel and
+restores the legacy OSR1024 / read3700 profile. The assigned-channel default uses
+OSR256 / read5556 without changing the 16 MHz clock, unity gain, auto-zero settings
+or load-cell calibration. SCAN settles each channel separately and AZ_MUX
+doubles conversion time; OSR512 with three channels would reduce fresh
+load-cell density. OSR256 preserves density with the pressure channel, at the
+cost of less oversampling/noise rejection than OSR1024. It does not promise the
+same effective resolution or noise floor; evaluate physical load-cell noise
+before interpreting small changes.
+
+The driver owns a 128-entry fresh-conversion FIFO. Acquisition drains up to 16
+records every 2 ms into copied SD batches. A full FIFO increments ADC overruns;
+SD admission and storage errors have separate counters. Polling and firmware
+service delays can still miss hardware conversions before FIFO admission.
+The host SCAN/DRDY accounting test includes auto-zero, auxiliary/temperature
+passes, a 600 ms SD-worker stall and a deliberate acquisition stall; it proves
+software ownership/accounting under that model, not real-card throughput.
+
+PC4/+12VA_EN drives U17 TPS7A4501 SHDN directly: HIGH enables the analog rail.
+Startup already asserts HIGH once, waits 10 ms, and now reads the GPIO back
+before touching the ADC. `g_mcp3564r_12v_enable_readback` is UINT32_MAX before
+initialization, then0/1; a low readback stops initialization with status 4. This
+is logic-level readback, not a voltage measurement. The schematic net is named
++12VA, but R61/R65 (9.1k/820) imply approximately 14.64 V nominal using the
+regulator's 1.21 V reference; verify actual excitation on hardware. Firmware does
+not change the regulator or cycle other rails.
+
+Sensor and conversion references: [OMEGA PX309](https://assets.omega.com/pdf/test-and-measurement-equipment/pressure/pressure-transducers/PX309-100mv.pdf),
+[Microchip MCP3564R](https://ww1.microchip.com/downloads/aemDocuments/documents/APID/ProductDocuments/DataSheets/MCP3561_2_4R-Data-Sheet-DS200006391C.pdf),
+[TI TPS7A45](https://www.ti.com/lit/ds/symlink/tps7a45.pdf).
