@@ -292,7 +292,8 @@ static SedsResult tx_send_with_priority(const uint8_t *bytes, size_t len,
       board_can_arbitration_id(bytes, len, priority,
           sim_probe_packed_data_type(bytes, len), (uint32_t)SEDS_DT_HEARTBEAT, 0x007U);
   if (can_bus_send_large(bytes, len, can_id) == HAL_OK) {
-    if (sim_probe_packed_data_type(bytes, len) == (uint32_t)SEDS_DT_KG1000)
+    if (sim_probe_packed_data_type(bytes, len) == (uint32_t)SEDS_DT_KG1000 ||
+        sim_probe_packed_data_type(bytes, len) == (uint32_t)SEDS_DT_DAQ_LOADCELL_CHAMBER)
       g_daq_loadcell_wire_tx_count++;
     /* LED1 is the CAN egress activity indicator.  Toggle only after the
      * complete SEDSNet packet has been accepted by the hardware transport. */
@@ -300,7 +301,8 @@ static SedsResult tx_send_with_priority(const uint8_t *bytes, size_t len,
     sim_probe_observe_can_tx(bytes, len);
     return SEDS_OK;
   }
-  if (sim_probe_packed_data_type(bytes, len) == (uint32_t)SEDS_DT_KG1000)
+  if (sim_probe_packed_data_type(bytes, len) == (uint32_t)SEDS_DT_KG1000 ||
+      sim_probe_packed_data_type(bytes, len) == (uint32_t)SEDS_DT_DAQ_LOADCELL_CHAMBER)
     g_daq_loadcell_wire_fail_count++;
   return SEDS_IO;
 }
@@ -651,6 +653,9 @@ SedsResult init_telemetry_router(void) {
   /* This board's live load-cell stream must remain on CAN while discovery
    * loses/relearns GroundStation. Other types retain discovered routing. */
   result = seds_router_set_typed_route(r, -1, (uint32_t)SEDS_DT_KG1000,
+                                       g_can_side_id, true);
+  if (result == SEDS_OK)
+    result = seds_router_set_typed_route(r, -1, (uint32_t)SEDS_DT_DAQ_LOADCELL_CHAMBER,
                                        g_can_side_id, true);
   if (result == SEDS_OK)
     result = seds_router_set_typed_route(r, -1, (uint32_t)SEDS_DT_KG50,

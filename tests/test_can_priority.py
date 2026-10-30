@@ -27,6 +27,7 @@ typedef int HAL_StatusTypeDef;
 #define SEDS_IO -2
 #define SEDS_DT_HEARTBEAT 120
 #define SEDS_DT_KG1000 118
+#define SEDS_DT_DAQ_LOADCELL_CHAMBER 141
 #define LED1_GPIO_Port 0
 #define LED1_Pin 0
 static uint32_t g_daq_loadcell_wire_tx_count, g_daq_loadcell_wire_fail_count;
@@ -35,7 +36,7 @@ static uint32_t g_daq_loadcell_wire_tx_count, g_daq_loadcell_wire_fail_count;
 static uint32_t observed;
 static int result;
 static void HAL_GPIO_TogglePin(int a,int b){(void)a;(void)b;}
-static uint32_t sim_probe_packed_data_type(const uint8_t *p,size_t n){(void)n;return p[0]==120?120:0;}
+static uint32_t sim_probe_packed_data_type(const uint8_t *p,size_t n){(void)n;return p[0];}
 static int can_bus_send_large(const uint8_t *p,size_t n,uint32_t id){(void)p;(void)n;observed=id;return result;}
 static void sim_probe_observe_can_tx(const uint8_t *p,size_t n){(void)p;(void)n;}
 """ + callback + r"""
@@ -50,6 +51,11 @@ int main(void) {
    result=HAL_ERROR;
    assert(tx_send_with_priority(opaque[i],8,255,NULL)==SEDS_IO);
  }
+ uint8_t sensor[8]={141}; result=HAL_OK;
+ assert(tx_send_with_priority(sensor,8,16,NULL)==SEDS_OK && g_daq_loadcell_wire_tx_count==1);
+ sensor[0]=118; assert(tx_send_with_priority(sensor,8,16,NULL)==SEDS_OK && g_daq_loadcell_wire_tx_count==2);
+ sensor[0]=141;result=HAL_ERROR;
+ assert(tx_send_with_priority(sensor,8,16,NULL)==SEDS_IO && g_daq_loadcell_wire_fail_count==1);
  assert(tx_send_with_priority(NULL,8,255,NULL)==SEDS_BAD_ARG);
  assert(tx_send_with_priority(opaque[0],0,255,NULL)==SEDS_BAD_ARG);
 }

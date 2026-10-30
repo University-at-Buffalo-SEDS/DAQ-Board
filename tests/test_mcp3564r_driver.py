@@ -107,7 +107,7 @@ HAL_StatusTypeDef HAL_SPI_TransmitReceive(SPI_HandleTypeDef *s, uint8_t *tx,
     if (!command) {
       command = tx[i];
       assert((command >> 6) == 1); /* Device address 01. */
-      rx[i] = ready ? 0x1b : 0x1f; /* STATUS bit 2, not IRQ register bit 6. */
+      rx[i] = ready ? 0x13 : 0x17; /* Address01, complemented ACK bit0, STATUS data-ready bit2. */
       ready = 0;
       if (command == 0x78) memset(registers, 0, sizeof(registers));
       else if (command == 0x68) {
@@ -142,7 +142,7 @@ HAL_StatusTypeDef HAL_SPI_TransmitReceive_DMA(SPI_HandleTypeDef *s,
   if (fail_next_dma) { fail_next_dma = 0; return HAL_ERROR; }
   pending_rx_target=rx;pending_rx_valid=1;
   memset(rx,0,5); /* Stale until the completion memory-order handoff. */
-  pending_rx[0] = status_override ? (uint8_t)(status_override-1) : ready ? 0x1b : 0x1f;
+  pending_rx[0] = status_override ? (uint8_t)(status_override-1) : ready ? 0x13 : 0x17;
   ready=0; command=0x41;
   for (unsigned i = 1; i < len; ++i) {
     assert(tx[i] == 0);
@@ -424,14 +424,14 @@ static void test_drdy_ownership_and_faults(void) {
   complete_irq_dma();(void)take(0,790002);
   assert(mcp3564r_start_dma()==HAL_OK && !dma_pending);
   /* Healthy not-ready STATUS is not a conversion or an error/restart. */
-  status_override=0x1f+1;ready=1;wire_word=790003;
+  status_override=0x17+1;ready=1;wire_word=790003;
   mcp3564r_data_ready_callback(ADC_IRQ_Pin);complete_irq_dma();
   assert(!mcp3564r_pending_samples());status_override=0;
-  const unsigned faults[]={0x00,0xff,0x19,0x1a,0x3b,0x13};
+  const unsigned faults[]={0x00,0xff,0x11,0x12,0x3b,0x1b};
   for(unsigned i=0;i<sizeof(faults)/sizeof(faults[0]);i++) {
     status_override=faults[i]+1;ready=1;
     mcp3564r_data_ready_callback(ADC_IRQ_Pin);
-    if(faults[i]==0x1a)memset(registers,0,sizeof(registers)); /* Actual POR loses format+IRQ. */
+    if(faults[i]==0x12)memset(registers,0,sizeof(registers)); /* Actual POR loses format+IRQ. */
     complete_irq_dma();
     assert(!mcp3564r_pending_samples());
     const unsigned n=dma_calls;ready=1;

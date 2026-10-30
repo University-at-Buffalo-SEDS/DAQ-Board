@@ -594,9 +594,11 @@ void mcp3564r_dma_complete(void)
   if (g_mcp3564r.dma_busy == 0U || g_mcp3564r.recovery_needed != 0U) return;
   __DMB(); /* Observe completed DMA writes before consuming STATUS/data. */
   const uint8_t status = g_mcp3564r_rx_frame[0];
-  /* STATUS address01/ack, active-low POR/CRC faults, active-low DR_STATUS.
-   * 0x00/0xff or a different device must never become a valid conversion. */
-  if ((status & 0xF8U) != 0x18U || (status & 0x03U) != 0x03U)
+  /* DS20006391C section6.2/Figure6-1: STAT[5:4] is address01;
+   * STAT[3] is the COMPLEMENT of address bit0, hence zero. Healthy replies
+   * are0x13 (ready) or0x17 (not ready), not0x1b/0x1f. Keep rejecting wrong
+   * addresses, high-impedance patterns, and active-low POR/CRC faults. */
+  if ((status & 0xF8U) != 0x10U || (status & 0x03U) != 0x03U)
   {
     mcp3564r_require_recovery();
     return;
