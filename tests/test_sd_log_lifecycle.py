@@ -42,6 +42,11 @@ static unsigned sd_write_telemetry_row(sd_line_slot_t *s) { (void)s; return fail
 static void sd_free_slot(sd_line_slot_t *s) { (void)s; ++freed; }
 static unsigned sd_take_line_message(ULONG *message){return tx_queue_receive(&g_sd_queue,message,TX_NO_WAIT);}
 static unsigned sd_write_telemetry_item(sd_line_slot_t *s,uint16_t *i,uint8_t *done){(void)i;*done=1;return sd_write_telemetry_row(s);}
+#define SD_OPTIONAL_SNAPSHOT_TAG (UINT16_MAX-1U)
+static unsigned g_sd_optional_snapshots_completed;
+static uint16_t sd_telemetry_tag(const sd_line_slot_t*s){(void)s;return 0;}
+static uint8_t sd_optional_snapshot_guard(sd_line_slot_t*s,uint16_t i){(void)s;(void)i;assert(0);return 0;}
+static void sd_release_telemetry_owner(sd_line_slot_t*s){sd_free_slot(s);}
 ''' + functions + r'''
 int main(void) {
   for (unsigned i=0;i<300000;i++) {
@@ -51,11 +56,11 @@ int main(void) {
   }
   assert(freed==600000 && g_sd_csv_rows_written_count==600000);
   queued=24;
-  assert(sd_service_telemetry_rows() && queued==20); /* bounded fairness */
+  assert(sd_service_telemetry_rows() && queued==19); /* bounded five-row fairness */
   fail=1;
-  assert(sd_service_telemetry_rows() && queued==19);
-  assert(g_sd_write_error_count==1 && freed==600004); /* Failed row remains owned. */
-  assert(sd_service_telemetry_rows() && queued==19 && freed==600004);
+  assert(sd_service_telemetry_rows() && queued==18);
+  assert(g_sd_write_error_count==1 && freed==600005); /* Failed row remains owned. */
+  assert(sd_service_telemetry_rows() && queued==18 && freed==600005);
   fail=0;
   while (queued) assert(sd_service_telemetry_rows());
   assert(!sd_service_telemetry_rows());

@@ -207,7 +207,9 @@ class QualificationContractTests(unittest.TestCase):
         csv = sd.index("serviced_work |= sd_service_telemetry_rows()", drain)
         service = sd[sd.index("static uint8_t sd_service_telemetry_rows"):drain]
         self.assertIn("TX_NO_WAIT", service)
-        self.assertIn("budget < 4U", service)
+        # Retained 24-row snapshots intentionally use bounded five-row service.
+        # Actual extracted service/ownership is exercised by SD retention tests.
+        self.assertIn("budget < 5U", service)
         self.assertIn("if (serviced_work == 0U)", sd[csv:])
         calibration = (root / "Core" / "Src" / "daq_calibration.c").read_text(
             encoding="utf-8"

@@ -3,6 +3,7 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
+from test_sd_raw_queue import function
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -10,9 +11,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 class SdPollingTests(unittest.TestCase):
     def test_csv_queue_accepts_mount_pending_but_remains_bounded(self):
         source = (ROOT / "Core/Src/sd_card.c").read_text()
-        adapter = "sd_card_status_t sd_card_enqueue_csv_row" + source.split(
-            "sd_card_status_t sd_card_enqueue_csv_row", 1)[1].split(
-            "sd_card_status_t sd_card_enqueue_raw_adc_samples", 1)[0]
+        adapter = function(source, 'sd_card_enqueue_csv_row')
         required=source[source.index("static uint8_t sd_required_sensor_name("):source.index("static uint64_t sd_row_sequence;")]
         code = r'''
 #include <assert.h>

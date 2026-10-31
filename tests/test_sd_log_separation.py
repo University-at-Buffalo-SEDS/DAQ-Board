@@ -3,6 +3,7 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
+from test_sd_raw_queue import function
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -13,9 +14,7 @@ class LogSeparationTests(unittest.TestCase):
         telemetry = "static UINT sd_write_telemetry_row" + source.split(
             "static UINT sd_write_telemetry_row", 1)[1].split(
             "static UINT sd_marker_exists", 1)[0]
-        raw = "static UINT sd_select_calibration" + source.split(
-            "static UINT sd_select_calibration", 1)[1].split(
-            "static UINT sd_write_telemetry_item", 1)[0]
+        raw = function(source, 'sd_select_calibration')
         harness = r"""
 #include <assert.h>
 #include <stdint.h>

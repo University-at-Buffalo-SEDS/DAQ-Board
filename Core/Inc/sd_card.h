@@ -44,6 +44,13 @@ sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,
                                          uint64_t timestamp_ms,
                                          float value,
                                          const daq_calibration_t *calibration);
+/* Nonblocking, bounded SD-only ownership of all24 optional snapshot rows.
+ * Capture clocks/calibration/session/sequence once. OK means retained, not
+ * persisted. A full ring refuses/counts24 rows once; network owners are free. */
+#define SD_OPTIONAL_SNAPSHOT_ROWS 24U
+sd_card_status_t sd_card_enqueue_optional_snapshot(
+    const float values[SD_OPTIONAL_SNAPSHOT_ROWS], uint64_t timestamp_ms,
+    const daq_calibration_t *calibration);
 sd_card_status_t sd_card_enqueue_raw_adc_samples(
     const sd_raw_adc_record_t *samples, uint16_t count,
     const daq_calibration_t *calibration);

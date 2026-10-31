@@ -168,49 +168,27 @@ static void daq_store_snapshot_csv(const daq_snapshot_t *snapshot,
                                    const daq_loadcell_window_t *window)
 {
 #if (DISABLE_SD_CARD == 0U)
-  /* Format one slow-channel row per worker call, retaining the capture time.
-   * Formatting the whole snapshot here stalls the 2 ms acquisition loop. */
-  static const char *const names[] = {
-    "input_voltage_v", "input_current_a", "adc1_aux_v",
-    "analog_in_1_v", "analog_in_2_v", "analog_in_3_v", "analog_in_4_v",
-    "analog_in_5_v", "analog_in_6_v", "analog_in_7_v", "analog_in_8_v",
-    "isense1_v", "isense2_v", "isense1_a", "isense2_a", "vmon_v", "imon_v",
-    "analog_out_1_v", "analog_out_2_v", "mcp3564r_code", "mcp3564r_voltage_v",
-    "kg1000_raw_window_average", "mcp3564r_temp_c", "mcp3564r_ch1_voltage_v"
-  };
-  static float values[sizeof(names) / sizeof(names[0])];
-  static unsigned next = sizeof(names) / sizeof(names[0]);
-  static uint64_t captured_ms;
-  static daq_calibration_t captured_calibration;
-  if (snapshot->analog_sample_fresh)
-  {
-    g_daq_sd_snapshot_row_drop_count += sizeof(names) / sizeof(names[0]) - next;
-    values[0] = snapshot->input_voltage_v;
-    values[1] = snapshot->input_current_a;
-    values[2] = snapshot->adc1_aux_v;
-    memcpy(&values[3], snapshot->analog_inputs_v, sizeof(snapshot->analog_inputs_v));
-    memcpy(&values[11], snapshot->current_sense_v, sizeof(snapshot->current_sense_v));
-    memcpy(&values[13], snapshot->current_sense_a, sizeof(snapshot->current_sense_a));
-    memcpy(&values[15], snapshot->power_monitor_v, sizeof(snapshot->power_monitor_v));
-    memcpy(&values[17], snapshot->analog_outputs_v, sizeof(snapshot->analog_outputs_v));
-    values[19] = snapshot->ext_adc_sample_valid ? (float)snapshot->ext_adc_code : NAN;
-    values[20] = snapshot->ext_adc_sample_valid ? snapshot->ext_adc_voltage_v : NAN;
-    values[21] = snapshot->ext_adc_sample_valid ? snapshot->ext_adc_loadcell_kg1000 : NAN;
-    values[22] = snapshot->ext_adc_temp_c;
-    values[23] = window->count[1] ? window->voltage_sum[1] / window->count[1] : NAN;
-    captured_ms = snapshot->monotonic_ms;
-    captured_calibration = *calibration;
-    next = 0U;
-  }
-  if (next < sizeof(names) / sizeof(names[0]))
-  {
-    (void)sd_card_enqueue_csv_row(names[next], captured_ms, values[next], &captured_calibration);
-    ++next;
-  }
+  if (!snapshot->analog_sample_fresh) return;
+  /* SD has its own bounded static owners. Never retain this acquisition/network
+   * work block or re-publish its network data while storage is backpressured. */
+  float values[SD_OPTIONAL_SNAPSHOT_ROWS];
+  values[0] = snapshot->input_voltage_v;
+  values[1] = snapshot->input_current_a;
+  values[2] = snapshot->adc1_aux_v;
+  memcpy(&values[3], snapshot->analog_inputs_v, sizeof(snapshot->analog_inputs_v));
+  memcpy(&values[11], snapshot->current_sense_v, sizeof(snapshot->current_sense_v));
+  memcpy(&values[13], snapshot->current_sense_a, sizeof(snapshot->current_sense_a));
+  memcpy(&values[15], snapshot->power_monitor_v, sizeof(snapshot->power_monitor_v));
+  memcpy(&values[17], snapshot->analog_outputs_v, sizeof(snapshot->analog_outputs_v));
+  values[19] = snapshot->ext_adc_sample_valid ? (float)snapshot->ext_adc_code : NAN;
+  values[20] = snapshot->ext_adc_sample_valid ? snapshot->ext_adc_voltage_v : NAN;
+  values[21] = snapshot->ext_adc_sample_valid ? snapshot->ext_adc_loadcell_kg1000 : NAN;
+  values[22] = snapshot->ext_adc_temp_c;
+  values[23] = window->count[1] ? window->voltage_sum[1] / window->count[1] : NAN;
+  if (sd_card_enqueue_optional_snapshot(values, snapshot->monotonic_ms, calibration) != SD_CARD_STATUS_OK)
+    g_daq_sd_snapshot_row_drop_count += SD_OPTIONAL_SNAPSHOT_ROWS;
 #else
-  (void)snapshot;
-  (void)calibration;
-  (void)window;
+  (void)snapshot; (void)calibration; (void)window;
 #endif
 }
 
@@ -726,11 +704,8 @@ static void daq_analog_thread_entry(ULONG argument)
     if (tx_queue_receive(&g_analog_queue, &message, TX_WAIT_FOREVER) != TX_SUCCESS) continue;
     daq_analog_work_t *work = (daq_analog_work_t *)(uintptr_t)message;
     daq_publish_analog(&work->snapshot, &work->window);
-    /* Each call emits one row from the same captured snapshot. */
-    for (unsigned i = 0; i < 24U; ++i) {
-      daq_store_snapshot_csv(&work->snapshot, &work->calibration, &work->window);
-      work->snapshot.analog_sample_fresh = 0U;
-    }
+    /* One nonblocking SD handoff; network publication above is never retried. */
+    daq_store_snapshot_csv(&work->snapshot, &work->calibration, &work->window);
     (void)tx_block_release(work);
   }
 }

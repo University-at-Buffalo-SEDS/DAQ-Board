@@ -230,6 +230,12 @@ static UINT tx_queue_receive(TX_QUEUE *q,void *data,ULONG wait){
 }
 static unsigned sd_take_line_message(ULONG *message){return tx_queue_receive(&g_sd_queue,message,TX_NO_WAIT);}
 static unsigned sd_write_telemetry_item(sd_line_slot_t *s,uint16_t *i,uint8_t *done){(void)i;*done=1;return sd_write_telemetry_row(s);}
+#define SD_OPTIONAL_SNAPSHOT_TAG (UINT16_MAX-1U)
+static unsigned g_sd_optional_snapshots_completed;
+static uint16_t sd_telemetry_tag(const sd_line_slot_t *s){return s->len;}
+static uint8_t sd_optional_snapshot_guard(sd_line_slot_t*s,uint16_t i){(void)s;(void)i;assert(0);return 0;}
+static void sd_release_telemetry_owner(sd_line_slot_t*s){sd_free_slot(s);}
+
 """+function(source,'sd_telemetry_epoch_ready')+'\n'+function(source,'sd_service_telemetry_rows')+'\n'+function(source,'sd_service_pressure_rows')+r"""
 int main(void){
  sd_line_slot_t launch={.route_epoch=UINT32_MAX,.session=10,.len=1};

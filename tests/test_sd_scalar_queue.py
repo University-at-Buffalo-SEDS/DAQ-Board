@@ -38,7 +38,12 @@ static TX_BLOCK_POOL g_sd_line_pool;
 static unsigned char line_pool_storage[62U*1024U+8];
 static TX_QUEUE g_sd_queue;
 static unsigned irq_mask,g_sd_route_epoch,g_sd_line_slots_used,g_sd_line_slots_peak;
-static unsigned g_sd_line_drop_count,g_sd_essential_telemetry_dropped;
+static unsigned g_sd_line_drop_count,g_sd_essential_telemetry_dropped,g_sd_optional_telemetry_dropped;
+static unsigned g_sd_optional_scalar_records_enqueued,g_sd_optional_scalar_records_written,g_sd_optional_scalar_records_coalesced;
+/* This original required-only regression never calls either optional guard.
+ * Optional admission/ownership is exercised by the separate burst invariant. */
+static unsigned sd_raw_optional_admitted(void){assert(0);return 0;}
+static unsigned sd_optional_telemetry_admitted(void){assert(0);return 0;}
 static unsigned g_sd_scalar_records_enqueued,g_sd_scalar_records_written,g_sd_scalar_records_coalesced;
 static uint64_t sd_row_sequence;
 static uint64_t clock_now=4294967000ULL,session=5;
@@ -61,6 +66,9 @@ static UINT sd_write_telemetry_row(const sd_line_slot_t *slot){
  assert(slot->len==strlen(expected[i]));assert(slot->session==expected_sessions[i]&&slot->route_epoch==expected_epochs[i]);
  assert(slot->calibration.kg1000_slope==expected_cal[i]);assert(!seen[i]++);return FX_SUCCESS;
 }
+'''
+        code += r'''
+static UINT sd_write_optional_snapshot_item(const sd_line_slot_t*s,uint16_t*i,uint8_t*c){(void)s;(void)i;(void)c;assert(0);return FX_IO_ERROR;}
 '''
         for name in ['sd_pool_allocate','sd_pool_release','sd_alloc_slot','sd_free_slot','sd_take_line_message',
                      'sd_next_row_sequence','sd_enqueue_scalar','sd_write_telemetry_item']:

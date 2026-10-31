@@ -6,6 +6,8 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+_snapshot_header=(ROOT/'Core/Inc/daq_board.h').read_text()
+SNAPSHOT_TYPE=_snapshot_header[_snapshot_header.index('typedef struct'):_snapshot_header.index('daq_snapshot_t;')+len('daq_snapshot_t;')]
 
 HAL = r'''
 #ifndef MOCK_HAL_H
@@ -183,48 +185,40 @@ int main(void) {
             self.assertEqual(result.returncode,0,result.stderr)
             subprocess.run([str(binary)],check=True)
 
-    def test_snapshot_logging_spreads_work_and_retains_capture(self):
+    def test_snapshot_logging_hands_off_once_without_retaining_network_work(self):
         source = (ROOT/'Core/Src/daq_thread.c').read_text()
         code = source[source.index('volatile uint32_t g_daq_sd_snapshot_row_drop_count;'):
-                      source.index('volatile uint32_t g_daq_analog_publish_ok_count;')]
+                      source.index('extern volatile uint32_t g_daq_analog_publish_ok_count;')]
         harness = r'''
 #include <assert.h>
 #include <stdint.h>
 #include <math.h>
 #include <string.h>
 #define DISABLE_SD_CARD 0
-#include "daq_board.h"
+#define SD_OPTIONAL_SNAPSHOT_ROWS 24U
+#define SD_CARD_STATUS_OK 0
+''' + SNAPSHOT_TYPE + r'''
 typedef struct {float value;} daq_calibration_t;
 typedef struct {unsigned count[8];float voltage_sum[8];} daq_loadcell_window_t;
-static unsigned calls;
-static int sd_card_enqueue_csv_row(const char *name,uint64_t ms,float value,const daq_calibration_t *cal) {
- assert(ms==123 && cal->value==42);
- if(strcmp(name,"analog_in_8_v")==0)assert(value==8);
- if(strcmp(name,"mcp3564r_ch1_voltage_v")==0)assert(value==3);
- calls++;return 0;
+static unsigned calls, refuse;
+static int sd_card_enqueue_optional_snapshot(const float *values,uint64_t ms,const daq_calibration_t *cal) {
+ assert(ms==123 && cal->value==42 && values[10]==8 && values[23]==3);
+ calls++;return refuse?2:0;
 }
 ''' + code + r'''
 int main(void) {
- daq_snapshot_t s={.monotonic_ms=123,.analog_sample_fresh=1};
- s.analog_inputs_v[7]=8;
+ daq_snapshot_t s={.monotonic_ms=123,.analog_sample_fresh=1};s.analog_inputs_v[7]=8;
  daq_calibration_t c={42};daq_loadcell_window_t w={0};w.count[1]=2;w.voltage_sum[1]=6;
- daq_store_snapshot_csv(&s,&c,&w);assert(calls==1);
- s.analog_sample_fresh=0;s.monotonic_ms=999;s.analog_inputs_v[7]=99;c.value=99;
- for(unsigned i=1;i<24;i++){daq_store_snapshot_csv(&s,&c,&w);assert(calls==i+1);}
- daq_store_snapshot_csv(&s,&c,&w);assert(calls==24);
- assert(g_daq_sd_snapshot_row_drop_count==0);
- s.monotonic_ms=123;s.analog_sample_fresh=1;c.value=42;
- daq_store_snapshot_csv(&s,&c,&w);daq_store_snapshot_csv(&s,&c,&w);
- assert(g_daq_sd_snapshot_row_drop_count==23);
+ daq_store_snapshot_csv(&s,&c,&w);assert(calls==1 && !g_daq_sd_snapshot_row_drop_count);
+ s.analog_sample_fresh=0;daq_store_snapshot_csv(&s,&c,&w);assert(calls==1);
+ s.analog_sample_fresh=1;refuse=1;daq_store_snapshot_csv(&s,&c,&w);
+ assert(calls==2 && g_daq_sd_snapshot_row_drop_count==24);
 }
 '''
         with tempfile.TemporaryDirectory() as tmp:
-            p=pathlib.Path(tmp)
-            (p/'tx_api.h').write_text('typedef unsigned UINT;')
-            (p/'stm32u5xx_hal.h').write_text(HAL)
-            binary=p/'snapshot-test'
-            result=subprocess.run(['cc','-DTELEMETRY_ENABLED=1','-std=c11','-Wall','-Wextra','-Werror','-I',str(p),'-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(binary)],input=harness,text=True,capture_output=True)
-            self.assertEqual(result.returncode,0,result.stderr)
+            binary=pathlib.Path(tmp)/'snapshot-test'
+            compiled=subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(binary)],input=harness,text=True,capture_output=True)
+            self.assertEqual(compiled.returncode,0,compiled.stderr)
             subprocess.run([str(binary)],check=True)
 
     def test_worker_queue_copies_capture_and_counts_backpressure(self):
@@ -234,7 +228,7 @@ int main(void) {
 #include <assert.h>
 #include <stdint.h>
 #include <string.h>
-#include "daq_board.h"
+''' + SNAPSHOT_TYPE + r'''
 typedef struct {float value;} daq_calibration_t;
 typedef struct {unsigned count[8];float voltage_sum[8];} daq_loadcell_window_t;
 typedef uintptr_t ULONG;

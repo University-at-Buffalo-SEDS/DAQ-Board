@@ -1,0 +1,273 @@
+
+#include <assert.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include "daq_rates.h"
+#include "daq_calibration.h"
+#include "board_uptime.h"
+#include "pressure_sd_wire.h"
+#include "sd_float_format.h"
+#include "sd_record_format.h"
+#include "sd_raw_record_format.h"
+#include "daq_chamber_pressure.h"
+#include "daq_timestamp.h"
+typedef uintptr_t ULONG;typedef unsigned UINT;typedef void VOID;typedef unsigned char UCHAR;typedef int sd_card_status_t;
+enum{TX_SUCCESS=0,TX_NO_WAIT=0,FX_SUCCESS=0,FX_IO_ERROR=2,FX_PTR_ERROR=4,SD_CARD_STATUS_OK=0,SD_CARD_STATUS_BUSY=1,SD_CARD_STATUS_BACKPRESSURE=2,SD_CARD_STATUS_IO_ERROR=3};
+#define SD_RAW_BATCH_MAX DAQ_RAW_BATCH_CAPACITY
+#define SD_LINE_MAX 384U
+#define SD_OPTIONAL_RAW_BACKLOG_LIMIT 256U
+
+typedef struct {
+ size_t tx_block_pool_block_size,tx_block_pool_total,tx_block_pool_available,budget;
+ unsigned char *storage; unsigned occupied[1024];
+} TX_BLOCK_POOL;
+
+typedef struct{ULONG messages[1024][16];unsigned head,tail,count,words;}TX_QUEUE;
+static TX_QUEUE g_sd_queue,g_sd_raw_queue;
+static TX_BLOCK_POOL g_sd_line_pool,g_sd_raw_pool;
+static unsigned char line_pool_storage[62U*1024U+8],raw_pool_storage[332U*1024U+8];
+static unsigned irq_mask,g_sd_services_initialized=1,g_sd_route_epoch;
+static unsigned g_sd_raw_records_dropped_count,g_sd_raw_records_enqueued_count,g_sd_raw_records_written_count,g_sd_raw_records_io_lost_count;
+static unsigned g_sd_raw_essential_records_dropped,g_sd_raw_optional_records_dropped,g_sd_raw_records_coalesced,g_sd_raw_batch_drop_count,g_sd_raw_slots_used,g_sd_raw_slots_peak;
+static unsigned g_sd_line_drop_count,g_sd_optional_telemetry_dropped,g_sd_essential_telemetry_dropped,g_sd_line_slots_used,g_sd_line_slots_peak;
+static unsigned g_sd_scalar_records_enqueued,g_sd_scalar_records_written,g_sd_scalar_records_coalesced,g_sd_write_error_count,g_sd_csv_rows_written_count;
+static unsigned g_sd_optional_scalar_records_enqueued,g_sd_optional_scalar_records_written,g_sd_optional_scalar_records_coalesced;
+static uint64_t now,session=42,sd_row_sequence;
+static unsigned raw_seen[160000];
+static unsigned raw_written;
+
+static uint32_t __get_PRIMASK(void){return irq_mask;}
+static void __disable_irq(void){irq_mask=1;}
+static void __set_PRIMASK(uint32_t m){irq_mask=m;}
+uint64_t board_uptime_ticks(void){return now;}
+static uint64_t g_sd_session=42,g_sd_close_local_ms=20000;
+static uint8_t g_sd_launch_closed,g_sd_deadline_anchored=1;
+static uint64_t daq_log_monotonic_ms(void){return now;}
+/* SOURCE_FUNCTION:sd_route_session_locked */
+/* SOURCE_FUNCTION:sd_run_snapshot */
+
+static uint64_t daq_log_unix_ms(void){return 1700000000000ULL+now;}
+static unsigned sd_calibration_snapshot(daq_calibration_t *c){memset(c,0,sizeof(*c));c->kg1000_slope=1;return 1;}
+static unsigned sd_telemetry_epoch_ready(unsigned epoch,unsigned pressure){(void)epoch;(void)pressure;return 1;}
+
+static TX_BLOCK_POOL *mock_pools[2];
+static unsigned mock_pool_count,mock_force_full,mock_allocations_count;
+static void mock_pool_init(TX_BLOCK_POOL *pool,unsigned char *storage,size_t budget,size_t requested){
+ assert(mock_pool_count<2);
+ pool->tx_block_pool_block_size=(requested+sizeof(void*)-1)/sizeof(void*)*sizeof(void*);
+ pool->budget=budget/sizeof(void*)*sizeof(void*);
+ pool->tx_block_pool_total=pool->budget/(pool->tx_block_pool_block_size+sizeof(void*));
+ assert(pool->tx_block_pool_total&&pool->tx_block_pool_total<=1024);
+ pool->tx_block_pool_available=pool->tx_block_pool_total;
+ pool->storage=storage+4; /* test eight-byte alignment above word-aligned memory */
+ mock_pools[mock_pool_count++]=pool;
+}
+static unsigned tx_block_allocate(TX_BLOCK_POOL *pool,void **out,unsigned wait){
+ assert(!irq_mask&&wait==TX_NO_WAIT);
+ if(mock_force_full||!pool->tx_block_pool_available)return 1;
+ for(size_t i=0;i<pool->tx_block_pool_total;i++)if(!pool->occupied[i]){
+  pool->occupied[i]=1;--pool->tx_block_pool_available;++mock_allocations_count;
+  *out=pool->storage+i*(pool->tx_block_pool_block_size+sizeof(void*))+sizeof(void*);return TX_SUCCESS;
+ }
+ assert(0);return 1;
+}
+static unsigned tx_block_release(void *memory){
+ assert(!irq_mask);
+ for(unsigned n=0;n<mock_pool_count;n++){
+  TX_BLOCK_POOL *pool=mock_pools[n];
+  for(size_t i=0;i<pool->tx_block_pool_total;i++){
+   void *expected=pool->storage+i*(pool->tx_block_pool_block_size+sizeof(void*))+sizeof(void*);
+   if(expected==memory){assert(pool->occupied[i]&&pool->tx_block_pool_available<pool->tx_block_pool_total);
+    pool->occupied[i]=0;++pool->tx_block_pool_available;return TX_SUCCESS;}
+  }
+ }
+ assert(0);return 1;
+}
+static size_t mock_pool_used_bytes(const TX_BLOCK_POOL *pool){
+ return (pool->tx_block_pool_total-pool->tx_block_pool_available)*(pool->tx_block_pool_block_size+sizeof(void*));
+}
+
+static unsigned tx_queue_send(TX_QUEUE*q,void*m,unsigned wait){assert(!wait);if(q->count==1024)return 1;memcpy(q->messages[q->tail],m,q->words*sizeof(ULONG));q->tail=(q->tail+1)%1024;q->count++;return 0;}
+static unsigned tx_queue_receive(TX_QUEUE*q,void*m,unsigned wait){assert(!wait);if(!q->count)return 1;memcpy(m,q->messages[q->head],q->words*sizeof(ULONG));q->head=(q->head+1)%1024;q->count--;return 0;}
+typedef struct
+{
+  uint64_t network_unix_ms;
+  uint32_t monotonic_ms;
+  uint32_t record_sequence;
+  int32_t raw_adc_code;
+  float raw_value;
+  float calibrated_value;
+  float adc_temperature_c;
+  int32_t adc_temperature_code;
+  uint8_t channel;
+} sd_raw_adc_record_t;
+/* SOURCE_TYPES */static sd_raw_slot_t *g_sd_raw_append_tail;
+static sd_scalar_slot_t *g_sd_scalar_append_tail;
+/* SOURCE_SENSORS */typedef struct {
+  pressure_sd_batch_t batch;
+  uint64_t session;
+  uint32_t route_epoch;
+} sd_pressure_message_t;
+#define SD_PRESSURE_MESSAGE_WORDS ((sizeof(sd_pressure_message_t) + sizeof(ULONG) - 1U) / sizeof(ULONG))
+_Static_assert(SD_PRESSURE_MESSAGE_WORDS <= 16U, "ThreadX pressure message bounds");
+static TX_QUEUE g_sd_pressure_queue;
+/* 800 pressure samples cover3.2s of SD-card programming/flush latency. */
+#define SD_PRESSURE_QUEUE_BATCHES 200U
+
+static uint8_t g_sd_pressure_pending;
+static uint32_t g_sd_pressure_pending_epoch;
+static uint8_t g_sd_line_pending;
+static uint32_t g_sd_line_pending_epoch;
+volatile uint32_t g_sd_pressure_records_enqueued;
+volatile uint32_t g_sd_pressure_records_dropped;
+volatile uint32_t g_sd_pressure_records_written;
+volatile uint32_t g_sd_pressure_records_flushed;
+
+
+
+
+static struct expected_row { char line[384]; uint64_t session; unsigned epoch; float slope; } expected[256];
+static unsigned expected_count, consumed, fail_write;
+static UINT sd_write_telemetry_row(const sd_line_slot_t *slot){
+ assert(!irq_mask);if(fail_write){--fail_write;return FX_IO_ERROR;}
+ assert(consumed<expected_count);struct expected_row *e=&expected[consumed++];
+ assert(slot->session==e->session&&slot->route_epoch==e->epoch&&slot->calibration.kg1000_slope==e->slope);
+ assert(slot->len==strlen(e->line)&&!strcmp(slot->line,e->line));return FX_SUCCESS;
+}
+
+/* SOURCE_STORAGE *//* SOURCE_FUNCTION:sd_pool_allocate */
+/* SOURCE_FUNCTION:sd_pool_release */
+/* SOURCE_FUNCTION:sd_alloc_slot */
+/* SOURCE_FUNCTION:sd_free_slot */
+/* SOURCE_FUNCTION:sd_alloc_raw_slot */
+/* SOURCE_FUNCTION:sd_free_raw_slot */
+/* SOURCE_FUNCTION:sd_take_line_message */
+/* SOURCE_FUNCTION:sd_take_raw_message */
+/* SOURCE_FUNCTION:sd_raw_backlog_records */
+/* SOURCE_FUNCTION:sd_raw_optional_admitted */
+/* SOURCE_FUNCTION:sd_optional_telemetry_admitted */
+/* SOURCE_FUNCTION:sd_optional_snapshot_guard */
+/* SOURCE_FUNCTION:sd_release_telemetry_owner */
+/* SOURCE_FUNCTION:sd_raw_is_essential */
+/* SOURCE_FUNCTION:sd_raw_count_dropped */
+/* SOURCE_FUNCTION:sd_next_row_sequence */
+/* SOURCE_FUNCTION:sd_scalar_sensor_index */
+/* SOURCE_FUNCTION:sd_required_sensor_name */
+/* SOURCE_FUNCTION:sd_enqueue_line */
+/* SOURCE_FUNCTION:sd_enqueue_scalar */
+/* SOURCE_FUNCTION:sd_card_enqueue_csv_row */
+/* SOURCE_FUNCTION:sd_card_enqueue_raw_adc_samples */
+/* SOURCE_FUNCTION:sd_telemetry_tag */
+/* SOURCE_FUNCTION:sd_write_optional_snapshot_item */
+/* SOURCE_FUNCTION:sd_write_telemetry_item */
+/* SOURCE_FUNCTION:sd_service_telemetry_rows */
+/* SOURCE_FUNCTION:sd_service_pressure_rows */
+/* SOURCE_FUNCTION:sd_card_log_pressure_batch */
+/* SOURCE_FUNCTION:sd_card_enqueue_optional_snapshot */
+/* Source-derived raw owner turn: same <=DAQ_RAW_BATCH_CAPACITY cursor/ownership;
+ * exact source loop below uses format and byte-write seams; only FileX is mocked. */
+static sd_raw_slot_t *pending_raw;static uint16_t pending_raw_index;
+static sd_raw_format_cache_t raw_format_cache;
+static unsigned last_raw;
+static UINT sd_write_bytes(const char*line,size_t n){assert(n&&n==strlen(line)&&last_raw&&last_raw<160000);assert(!raw_seen[last_raw]++);raw_written++;return FX_SUCCESS;}
+static unsigned serve_raw(void){
+ if(!pending_raw){ULONG m;if(sd_take_raw_message(&m)!=TX_SUCCESS)return 0;pending_raw=(sd_raw_slot_t*)(uintptr_t)m;pending_raw_index=0;}
+ sd_raw_slot_t*slot=pending_raw;assert(slot->session==session&&!slot->route_epoch&&slot!=g_sd_raw_append_tail);char line[256];
+        const uint16_t turn_end = (unsigned)(slot->count - pending_raw_index) > SD_RAW_BATCH_MAX ?
+            pending_raw_index + SD_RAW_BATCH_MAX : slot->count;
+        for (uint16_t i = pending_raw_index; i < turn_end; ++i)
+        {
+          const sd_raw_adc_record_t *sample = &slot->samples[i]; last_raw=(unsigned)sample->record_sequence;assert(sample->raw_adc_code==(int32_t)last_raw&&sample->monotonic_ms==(uint32_t)(sample->network_unix_ms-1700000000000ULL));
+          const uint64_t captured_uptime = board_uptime_project(slot->uptime_reference, sample->monotonic_ms);
+          const char *sensor = daq_chamber_is_channel(sample->channel) ? "chamber_pressure_raw_volts_psi" : sample->channel < 8U ? (const char *const[]){
+              "mcp3564r_raw", "kg50_raw", "mcp3564r_ch2_raw", "mcp3564r_ch3_raw",
+              "mcp3564r_ch4_raw", "mcp3564r_ch5_raw", "mcp3564r_ch6_raw", "mcp3564r_ch7_raw"
+          }[sample->channel] : sample->channel == 9U ? "mcp3564r_ch2_ch3_gain16_raw" : "invalid_adc_channel";
+          const int len = sd_format_csv_raw_record(line, sizeof(line),
+              sample->network_unix_ms, captured_uptime, sensor, sample->raw_adc_code,
+              sample->raw_value, sample->calibrated_value, sample->adc_temperature_c,
+              sample->adc_temperature_code, sample->record_sequence, &raw_format_cache);
+          if (len <= 0 || (size_t)len >= sizeof(line)) {
+            ++g_sd_write_error_count; ++g_sd_raw_records_io_lost_count;
+            pending_raw_index = i + 1U;
+            continue; /* Count an unformattable record; do not wedge the entire logger. */
+          }
+          if (sd_write_bytes(line, (size_t)len) != FX_SUCCESS) {
+            ++g_sd_write_error_count;
+            assert(0); /* no injected media failures in this throughput case */
+            break; /* Retain this exact record and batch for the next service turn. */
+          }
+          g_sd_raw_records_written_count++;
+          pending_raw_index = i + 1U;
+        }
+        if (pending_raw_index == slot->count) { sd_free_raw_slot(slot); pending_raw = NULL; }
+ return 1;}
+static unsigned measured_turns;
+static void writer_turn(void){++measured_turns;(void)serve_raw();(void)sd_service_telemetry_rows();(void)sd_service_pressure_rows();}
+
+static void add_expected(const char *name,float value,uint64_t captured,uint64_t sequence,uint64_t expected_session,unsigned epoch,daq_calibration_t *cal){
+ assert(expected_count<256);struct expected_row *e=&expected[expected_count++];char text[24];sd_format_float(text,value);
+ assert(sd_format_csv_record(e->line,sizeof e->line,1700000000000ULL+captured,captured,name,text,sequence)>0);
+ e->session=expected_session;e->epoch=epoch;e->slope=cal->kg1000_slope;
+}
+static void snapshot(uint64_t captured,uint64_t expected_session,unsigned epoch,daq_calibration_t *cal){
+ float values[24];for(unsigned i=0;i<24;i++)values[i]=i==3?NAN:i==7?INFINITY:i==9?-0.0f:(float)i/7;
+ uint64_t seq=sd_row_sequence+1;assert(sd_card_enqueue_optional_snapshot(values,captured,cal)==SD_CARD_STATUS_OK);
+ for(unsigned i=0;i<24;i++)add_expected(g_sd_scalar_sensors[5+i],values[i],captured,seq+i,expected_session,epoch,cal);
+}
+static void required(uint64_t captured,uint64_t expected_session,unsigned epoch,daq_calibration_t *cal){
+ uint64_t seq=sd_row_sequence+1;assert(sd_card_enqueue_csv_row(g_sd_scalar_sensors[0],captured,2.5f,cal)==SD_CARD_STATUS_OK);
+ add_expected(g_sd_scalar_sensors[0],2.5f,captured,seq,expected_session,epoch,cal);
+}
+static void drain(void){unsigned turns=0;while(g_sd_queue.count||g_sd_line_pending){assert(++turns<100);assert(sd_service_telemetry_rows());}assert(consumed==expected_count);}
+int main(void){
+ g_sd_queue.words=g_sd_raw_queue.words=1;g_sd_pressure_queue.words=SD_PRESSURE_MESSAGE_WORDS;
+ mock_pool_init(&g_sd_line_pool,line_pool_storage,62U*1024U,SD_LINE_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE);
+ mock_pool_init(&g_sd_raw_pool,raw_pool_storage,332U*1024U,SD_RAW_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE);
+ assert(sizeof g_sd_optional_snapshots +64<1024);
+ daq_calibration_t cal={.kg1000_slope=2};now=22;snapshot(22,42,0,&cal);assert(g_sd_optional_snapshot_slots_used==1&&!g_sd_line_slots_used);
+ fail_write=1;assert(sd_service_telemetry_rows()&&!consumed&&g_sd_write_error_count==1);
+ assert(sd_service_telemetry_rows()&&consumed==5&&g_sd_line_pending);
+ g_sd_raw_records_enqueued_count=272;assert(!sd_service_telemetry_rows()&&consumed==5);
+ assert(!sd_service_telemetry_rows()&&g_sd_optional_snapshots_deferred==1&&!g_sd_line_drop_count);
+ now=129;snapshot(122,42,0,&cal);now=229;snapshot(222,42,0,&cal);assert(g_sd_optional_snapshot_slots_used==3);
+ float values[24]={0};now=329;assert(sd_card_enqueue_optional_snapshot(values,322,&cal)==SD_CARD_STATUS_BACKPRESSURE);
+ assert(g_sd_optional_snapshots_refused==1&&g_sd_line_drop_count==24&&g_sd_optional_telemetry_dropped==24&&g_sd_optional_snapshot_slots_used==3);
+ required(329,42,0,&cal);assert(g_sd_scalar_records_enqueued==1);
+ /* Time and coefficients can change while media is stalled; none of the
+  * already queued values/context may be resampled by a retry. */
+ now=999;cal.kg1000_slope=3;g_sd_raw_records_enqueued_count=0;fail_write=1;
+ unsigned before=consumed;assert(sd_service_telemetry_rows()&&consumed==before);drain();
+ assert(g_sd_optional_scalar_records_written==72&&g_sd_optional_snapshots_completed==3&&g_sd_scalar_records_written==1);
+ assert(!g_sd_optional_snapshot_slots_used&&!g_sd_optional_snapshot_used);
+ /* Atomic routing capture before/after20s, delayed writes and calibration. */
+ now=19999;snapshot(19995,42,0,&cal);now=20001;cal.kg1000_slope=4;snapshot(20000,0,1,&cal);
+ assert(g_sd_launch_closed&&g_sd_route_epoch==1);now=30000;drain();
+ /* A new launch/route epoch and source32bit wrap remain immutable. */
+ g_sd_session=88;g_sd_deadline_anchored=1;g_sd_launch_closed=0;g_sd_close_local_ms=UINT64_C(4295000000);g_sd_route_epoch=2;
+ now=UINT64_C(4294967290);sd_row_sequence=UINT64_MAX-5;snapshot(now-7,88,2,&cal);now+=20;drain();
+ /* Below-reserve escape counts only the remaining19 rows, frees the static
+  * head and services required FIFO without changing the raw guard. */
+ snapshot(now,88,2,&cal);assert(sd_service_telemetry_rows());assert(expected_count-consumed==19);
+ sd_line_slot_t *held[100];unsigned held_n=0;unsigned reserve=(g_sd_line_pool.tx_block_pool_total*3U+3U)/4U;
+ while(g_sd_line_pool.tx_block_pool_available>=reserve){held[held_n]=sd_alloc_slot(8);assert(held[held_n]);held_n++;}
+ g_sd_raw_records_enqueued_count=272;expected_count=consumed;required(now,88,2,&cal);
+ unsigned completed=g_sd_optional_snapshots_completed;assert(sd_service_telemetry_rows());
+ assert(g_sd_optional_snapshot_rows_discarded==19&&g_sd_line_drop_count==43&&g_sd_optional_snapshots_completed==completed);
+ assert(consumed==expected_count&&!g_sd_line_pending&&!g_sd_optional_snapshot_slots_used);
+ g_sd_raw_records_enqueued_count=0;while(held_n)sd_free_slot(held[--held_n]);
+ /* Channel refusal and uninitialized services own nothing and count one
+  * permanent24row loss; invalid API input cannot create a phantom owner. */
+ unsigned available=g_sd_line_pool.tx_block_pool_available;g_sd_queue.count=1024;
+ assert(sd_card_enqueue_optional_snapshot(values,now,&cal)==SD_CARD_STATUS_BACKPRESSURE);g_sd_queue.count=0;
+ assert(!g_sd_optional_snapshot_used&&!g_sd_optional_snapshot_slots_used&&g_sd_line_pool.tx_block_pool_available==available&&g_sd_line_drop_count==67);
+ g_sd_services_initialized=0;assert(sd_card_enqueue_optional_snapshot(values,now,&cal)==SD_CARD_STATUS_BUSY);
+ assert(g_sd_line_drop_count==91&&!g_sd_optional_snapshot_slots_used);g_sd_services_initialized=1;
+ assert(sd_card_enqueue_optional_snapshot(NULL,now,&cal)==SD_CARD_STATUS_IO_ERROR&&g_sd_line_drop_count==91);
+ assert(!g_sd_line_slots_used&&g_sd_line_pool.tx_block_pool_available==g_sd_line_pool.tx_block_pool_total);
+ printf("PASS%u exactCSV; static%zuB; partial/cursor/media retry;3owners/full; source clocks/uint32wrap/seq64wrap; launch20s/epoch/calibration; required reserve escape19actualdiscards; init/channel refusal; no phantom completion\n",consumed,sizeof g_sd_optional_snapshots);
+}
