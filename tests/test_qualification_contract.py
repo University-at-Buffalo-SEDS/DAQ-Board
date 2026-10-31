@@ -196,7 +196,7 @@ class QualificationContractTests(unittest.TestCase):
         self.assertIn("timestamp_ms,monotonic_ms,sensor,value,raw_adc_code,raw_value,calibrated_value,time_source", (root / "Core/Inc/sd_record_format.h").read_text())
         self.assertIn("# calibration,kg1000_slope=", sd)
         self.assertIn("sd_calibration_snapshot", sd)
-        drain = sd.index("if (pending_raw == NULL && tx_queue_receive(&g_sd_raw_queue")
+        drain = sd.index("if (pending_raw == NULL && sd_take_raw_message(&message)")
         self.assertLess(sd.index("sd_select_calibration(&slot->calibration)", drain),
                         sd.index("for (uint16_t i", drain))
         self.assertIn("slot->calibration = *calibration;", sd)
@@ -216,8 +216,8 @@ class QualificationContractTests(unittest.TestCase):
         self.assertIn("persistent_store_get", calibration)
         self.assertIn("sd_card_set_calibration(&next)", calibration)
         self.assertIn('"SD Writer"', writer)
-        # Equal-priority bounded slices prevent either I/O worker starving.
-        self.assertGreaterEqual(writer.count("DAQ_IO_THREAD_PRIORITY,"), 2)
+        # Storage is below all live I/O priorities; its driver sleeps for DMA.
+        self.assertGreaterEqual(writer.count("DAQ_SD_WRITER_THREAD_PRIORITY,"), 2)
         self.assertIn("DAQ_IO_THREAD_SLICE_MS", writer)
         self.assertIn("DAQ_IO_THREAD_SLICE_MS", daq)
 

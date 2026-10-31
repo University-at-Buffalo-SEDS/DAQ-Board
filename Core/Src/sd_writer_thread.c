@@ -22,8 +22,8 @@ UINT create_sd_writer_thread(void)
                           0U,
                           g_sd_writer_thread_stack,
                           sizeof(g_sd_writer_thread_stack),
-                          DAQ_IO_THREAD_PRIORITY,
-                          DAQ_IO_THREAD_PRIORITY,
+                          DAQ_SD_WRITER_THREAD_PRIORITY,
+                          DAQ_SD_WRITER_THREAD_PRIORITY,
                           (TX_TIMER_TICKS_PER_SECOND * DAQ_IO_THREAD_SLICE_MS + 999U) / 1000U,
                           TX_AUTO_START);
 }

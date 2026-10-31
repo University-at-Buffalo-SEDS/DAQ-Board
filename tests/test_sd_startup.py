@@ -23,7 +23,7 @@ class SdStartupTests(unittest.TestCase):
         self.assertIn("SEDS_DAQ", provision)
         mounted = source.split("static UINT sd_mount_or_provision(void)", 1)[1].split(
             "static UINT sd_flush_pending", 1)[0]
-        marked = mounted.split("sd_marker_exists() == FX_SUCCESS", 1)[1].split(
+        marked = mounted.split("marker_status == FX_SUCCESS", 1)[1].split(
             "return status;", 1)[0]
         self.assertIn("fx_media_volume_set", marked)
         self.assertNotIn("sd_format_and_mark", marked)

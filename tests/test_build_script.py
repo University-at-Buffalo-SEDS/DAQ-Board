@@ -289,7 +289,7 @@ class OtaBuildScriptTests(unittest.TestCase):
                 return cfg.build_dir/"TestBoard.elf", cfg.build_dir/"TestBoard.bin"
             def delta(command, **kwargs):
                 self.assertEqual(command[1], str(tool))
-                self.assertEqual(command[command.index("--base")+1], str(baseline))
+                self.assertEqual(Path(command[command.index("--base")+1]).resolve(), baseline.resolve())
                 self.assertEqual(Path(command[command.index("--target")+1]).read_bytes(), b"new application")
                 Path(command[command.index("--output")+1]).write_bytes(b"delta package")
                 return build.subprocess.CompletedProcess(command, 0, stdout="", stderr="")

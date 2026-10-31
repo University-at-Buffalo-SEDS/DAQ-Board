@@ -30,7 +30,9 @@ class ReportTests(unittest.TestCase):
     def test_nonblocking_handoff_preserves_capture_and_counts_rejection(self):
         source = (ROOT / "Core/Src/daq_thread.c").read_text()
         start = source.index("#define DAQ_REPORT_DEPTH")
-        end = source.index("#if (DAQ_ENABLE_DUMMY_CAN_TELEMETRY", start)
+        definitions = source[start:source.index("static void daq_offer_live_report(", start)]
+        sd_worker = (function(source, "static void daq_enqueue_report(")
+                     + function(source, "static void daq_report_thread_entry("))
         run_c(r'''
 #include <assert.h>
 #include <stdint.h>
@@ -61,8 +63,7 @@ static UINT tx_queue_receive(TX_QUEUE*q,VOID*p,unsigned wait){(void)q;assert(wai
 static uint64_t daq_log_monotonic_ms(void){return 12350;}
 static void daq_publish_loadcell(const daq_snapshot_t*s,const daq_calibration_t*c,const float*pressure){assert(pressure==NULL);assert(s->monotonic_ms==12300 && s->ext_adc_loadcell_kg1000==1.25f && c->slope==2);published++;}
 static void daq_publish_kg50(float value,uint8_t input,uint64_t time,const daq_calibration_t*c){assert(input==1 && value==2.5f && time==12300 && c->slope==2);published++;}
-static void daq_network_offer(unsigned stream,unsigned type,const float*data,size_t count,uint64_t time){assert(stream==DAQ_NETWORK_TEMPERATURE && type==140 && *data==30 && count==1 && time==12300);published++;}
-''' + source[start:end] + r'''
+''' + definitions + sd_worker + r'''
 int main(void){
  assert(DAQ_BROADCAST_RATE_HZ==250 && DAQ_BROADCAST_PERIOD_MS==4);
  daq_report_t report={.monotonic_ms=12300,.calibration={2},.kg1000=1.25,.kg50=2.5,.temperature=30,.flags=7,.kg50_input=1};
@@ -71,7 +72,7 @@ int main(void){
  fail_send=0;daq_enqueue_report(&report);assert(!published && g_daq_report_enqueued_count==1);
  report.kg50_input=0;report.monotonic_ms=999;report.kg1000=999;report.calibration.slope=999;
  if(!setjmp(finished))daq_report_thread_entry(0);
- assert(published==3 && released==2 && g_daq_report_completed_count==1 && g_daq_report_max_age_ms==50);
+ assert(published==2 && released==2 && g_daq_report_completed_count==1 && g_daq_report_max_age_ms==50);
 }
 ''')
 

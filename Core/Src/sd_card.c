@@ -10,6 +10,7 @@
 #include "sd_raw_record_format.h"
 #include "sd_file_limit.h"
 #include "sd_storage_config.h"
+#include "sd_storage_io.h"
 #include "daq_timestamp.h"
 #include "sd_calendar.h"
 
@@ -82,6 +83,14 @@ typedef struct {
 } sd_scalar_slot_t;
 _Static_assert(offsetof(sd_scalar_slot_t, count) == offsetof(sd_line_slot_t, line),
                "Scalar and CSV slots must share their routing prefix");
+/* Every pool allocation is a constant-time fixed-block pop. Reserve padding
+ * for8-byte alignment even though ThreadX guarantees only ULONG alignment. */
+#define SD_RAW_BLOCK_PAYLOAD (offsetof(sd_raw_slot_t, samples) + SD_RAW_SLOT_CAPACITY * sizeof(sd_raw_adc_record_t))
+#define SD_SCALAR_BLOCK_PAYLOAD (offsetof(sd_scalar_slot_t, records) + SD_SCALAR_BATCH_MAX * sizeof(sd_scalar_record_t) + 1U)
+#define SD_CSV_BLOCK_PAYLOAD (offsetof(sd_line_slot_t, line) + SD_LINE_MAX + 1U)
+#define SD_LINE_BLOCK_PAYLOAD ((SD_SCALAR_BLOCK_PAYLOAD > SD_CSV_BLOCK_PAYLOAD) ? SD_SCALAR_BLOCK_PAYLOAD : SD_CSV_BLOCK_PAYLOAD)
+#define SD_POOL_ALIGNMENT_RESERVE (sizeof(void *) + 7U)
+
 
 
 static TX_QUEUE g_sd_queue;
@@ -118,15 +127,14 @@ volatile uint32_t g_sd_pressure_records_dropped;
 volatile uint32_t g_sd_pressure_records_written;
 volatile uint32_t g_sd_pressure_records_flushed;
 
-static TX_MUTEX g_sd_pool_mutex;
 static TX_EVENT_FLAGS_GROUP g_sd_flags;
 /* Numeric acquisition rows use compact batches instead of full CSV strings.
  * Reinvest that RAM in raw acquisition and pressure stall coverage. */
-static TX_BYTE_POOL g_sd_line_pool, g_sd_raw_pool;
+static TX_BLOCK_POOL g_sd_line_pool, g_sd_raw_pool;
 static UCHAR g_sd_line_pool_storage[62U * 1024U] SD_ALIGN_32;
 static UCHAR g_sd_raw_pool_storage[332U * 1024U] SD_ALIGN_32;
 /* Keep at least the acquisition configuration's original minimum reserve.
- * The larger variable-size pool additionally covers measured multi-second
+ * The fixed-block pool additionally covers measured multi-second
  * card stalls at the observed2.5ksamples/s rate when queued tails coalesce. */
 _Static_assert(DAQ_CHAMBER_SCAN_MASK == 0U ||
     ((DAQ_SD_RAW_BUFFER_MS * DAQ_ADC_READ_RATE_HZ + 999U) / 1000U) * sizeof(sd_raw_adc_record_t) +
@@ -155,6 +163,9 @@ volatile uint32_t g_sd_ready = 0U;
  * 4 open log, 5 ready, 6 formatting. */
 volatile uint32_t g_sd_init_stage = 0U;
 static uint8_t g_sd_hardware_ready = 0U;
+static uint8_t g_sd_media_mounted;
+static uint32_t g_sd_mounted_cid[4], g_sd_mounted_blocks;
+volatile uint32_t g_sd_card_identity_mismatches;
 static uint8_t g_file_open = 0U;
 static daq_calibration_t g_sd_calibration = {1.0f, 0.0f, 1.0f, 0.0f, {0.0f, 1.0f}};
 static volatile uint32_t g_sd_calibration_generation = 1U;
@@ -288,53 +299,26 @@ volatile uint32_t g_sd_csv_rows_written_count = 0U;
 
 static uint32_t sd_calibration_snapshot(daq_calibration_t *calibration)
 {
-  uint32_t generation;
-  if ((g_sd_services_initialized != 0U) &&
-      (tx_mutex_get(&g_sd_pool_mutex, TX_WAIT_FOREVER) == TX_SUCCESS))
-  {
-    *calibration = g_sd_calibration;
-    generation = g_sd_calibration_generation;
-    (void)tx_mutex_put(&g_sd_pool_mutex);
-    return generation;
-  }
+  const uint32_t saved = __get_PRIMASK(); __disable_irq();
   *calibration = g_sd_calibration;
-  return g_sd_calibration_generation;
+  const uint32_t generation = g_sd_calibration_generation;
+  __set_PRIMASK(saved);
+  return generation;
 }
 
-static UINT sd_wait_ready(void)
-{
-  const uint32_t started = HAL_GetTick();
-  while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER)
-  {
-    if ((uint32_t)(HAL_GetTick() - started) >= 2000U) return FX_IO_ERROR;
-    /* Card programming is asynchronous even for HAL polling writes. Yield
-     * while it completes so logging cannot monopolize the networking CPU. */
-    tx_thread_sleep(1U);
-  }
-  return FX_SUCCESS;
-}
-
+/* Only the storage worker calls these adapters. IDMA owns the aligned
+ * bounce buffer until completion or confirmed peripheral quiescence. */
 static UINT sd_hal_read(UCHAR *destination, ULONG sector, ULONG sector_count)
 {
   const uint32_t started = HAL_GetTick();
-  while (sector_count != 0U)
-  {
-    const ULONG count = (sector_count > SD_TRANSFER_SECTORS)
-                            ? SD_TRANSFER_SECTORS
-                            : sector_count;
-    const size_t bytes = (size_t)count * SD_SECTOR_SIZE;
-
-    if ((sd_wait_ready() != FX_SUCCESS) ||
-        (HAL_SD_ReadBlocks(&hsd1, g_sd_transfer_buffer, sector, count, 2000U) != HAL_OK))
-    {
+  while (sector_count != 0U) {
+    const ULONG count = sector_count > SD_TRANSFER_SECTORS ? SD_TRANSFER_SECTORS : sector_count;
+    if (sd_storage_io_read(g_sd_transfer_buffer, sector, count) != FX_SUCCESS) {
+      if (sd_storage_io_requires_reinit()) g_sd_ready = 0U;
       return FX_IO_ERROR;
     }
-    /* Polling HAL reads the FIFO with CPU stores, not DMA. Invalidating
-     * here could discard those fresh stores before FileX sees them. */
-    memcpy(destination, g_sd_transfer_buffer, bytes);
-    destination += bytes;
-    sector += count;
-    sector_count -= count;
+    memcpy(destination, g_sd_transfer_buffer, (size_t)count * SD_SECTOR_SIZE);
+    destination += count * SD_SECTOR_SIZE; sector += count; sector_count -= count;
   }
   const uint32_t elapsed = HAL_GetTick() - started;
   if (elapsed > g_sd_max_read_ms) g_sd_max_read_ms = elapsed;
@@ -344,24 +328,14 @@ static UINT sd_hal_read(UCHAR *destination, ULONG sector, ULONG sector_count)
 static UINT sd_hal_write(const UCHAR *source, ULONG sector, ULONG sector_count)
 {
   const uint32_t started = HAL_GetTick();
-  while (sector_count != 0U)
-  {
-    const ULONG count = (sector_count > SD_TRANSFER_SECTORS)
-                            ? SD_TRANSFER_SECTORS
-                            : sector_count;
-    const size_t bytes = (size_t)count * SD_SECTOR_SIZE;
-
-    memcpy(g_sd_transfer_buffer, source, bytes);
-    /* Polling HAL consumes this buffer with CPU loads; no DMA handoff. */
-    if ((sd_wait_ready() != FX_SUCCESS) ||
-        (HAL_SD_WriteBlocks(&hsd1, g_sd_transfer_buffer, sector, count, 2000U) != HAL_OK) ||
-        (sd_wait_ready() != FX_SUCCESS))
-    {
+  while (sector_count != 0U) {
+    const ULONG count = sector_count > SD_TRANSFER_SECTORS ? SD_TRANSFER_SECTORS : sector_count;
+    memcpy(g_sd_transfer_buffer, source, (size_t)count * SD_SECTOR_SIZE);
+    if (sd_storage_io_write(g_sd_transfer_buffer, sector, count) != FX_SUCCESS) {
+      if (sd_storage_io_requires_reinit()) g_sd_ready = 0U;
       return FX_IO_ERROR;
     }
-    source += bytes;
-    sector += count;
-    sector_count -= count;
+    source += count * SD_SECTOR_SIZE; sector += count; sector_count -= count;
   }
   const uint32_t elapsed = HAL_GetTick() - started;
   if (elapsed > g_sd_max_write_ms) g_sd_max_write_ms = elapsed;
@@ -828,7 +802,17 @@ static UINT sd_mount_or_provision(void)
   UINT status = fx_media_open(&g_sd_media, "DAQ SD", sd_filex_driver, FX_NULL,
                               g_sd_media_cache, sizeof(g_sd_media_cache));
   g_sd_mount_status = status;
-  if ((status == FX_SUCCESS) && (sd_marker_exists() == FX_SUCCESS))
+  /* A transport fault is not an unformatted card. Never turn a failed DMA
+   * read into filesystem formatting. The worker retries initialization. */
+  /* FileX wraps transport failures as FX_BOOT_ERROR/FX_FAT_READ_ERROR.
+   * Only a successfully read but invalid filesystem permits provisioning. */
+  if (status != FX_SUCCESS && status != FX_MEDIA_INVALID) return status;
+  const UINT marker_status = status == FX_SUCCESS ? sd_marker_exists() : FX_NOT_FOUND;
+  if (status == FX_SUCCESS && marker_status != FX_SUCCESS && marker_status != FX_NOT_FOUND) {
+    (void)fx_media_close(&g_sd_media);
+    return marker_status;
+  }
+  if ((status == FX_SUCCESS) && (marker_status == FX_SUCCESS))
   {
     /* Upgrade cards provisioned before the directory label was added,
      * preserving their files and provisioning marker. */
@@ -842,6 +826,26 @@ static UINT sd_mount_or_provision(void)
     (void)fx_media_close(&g_sd_media);
   }
   return sd_format_and_mark();
+}
+
+/* Transport recovery keeps the original FileX state and pending records. */
+static UINT sd_resume_card_media(void)
+{
+  if (g_sd_media_mounted) {
+    if (memcmp(g_sd_mounted_cid, hsd1.CID, sizeof(g_sd_mounted_cid)) != 0 ||
+        g_sd_mounted_blocks != hsd1.SdCard.LogBlockNbr) {
+      ++g_sd_card_identity_mismatches;
+      return FX_IO_ERROR;
+    }
+    return FX_SUCCESS;
+  }
+  const UINT status = sd_mount_or_provision();
+  if (status == FX_SUCCESS) {
+    memcpy(g_sd_mounted_cid, hsd1.CID, sizeof(g_sd_mounted_cid));
+    g_sd_mounted_blocks = hsd1.SdCard.LogBlockNbr;
+    g_sd_media_mounted = 1U;
+  }
+  return status;
 }
 
 static UINT sd_flush_pending(void)
@@ -871,7 +875,7 @@ static UINT sd_write_bytes(const void *data, size_t len)
   return FX_SUCCESS;
 }
 
-/* ThreadX byte pools may return word-aligned memory. Retain the original
+/* ThreadX block pools may return word-aligned memory. Retain the original
  * allocation before an explicitly 8-byte-aligned record (uint64_t members).
  * Allocation is bounded to the static pools and never waits for free memory. */
 /* The writer is the only consumer. FIFO head peeks include a retained failed
@@ -923,11 +927,11 @@ static UINT sd_take_raw_message(ULONG *message)
   return result;
 }
 
-static void *sd_pool_allocate(TX_BYTE_POOL *pool, size_t bytes)
+static void *sd_pool_allocate(TX_BLOCK_POOL *pool, size_t bytes)
 {
   void *allocation = NULL;
-  if (tx_byte_allocate(pool, &allocation, bytes + sizeof(void *) + 7U, TX_NO_WAIT) != TX_SUCCESS)
-    return NULL;
+  if (bytes + SD_POOL_ALIGNMENT_RESERVE > pool->tx_block_pool_block_size ||
+      tx_block_allocate(pool, &allocation, TX_NO_WAIT) != TX_SUCCESS) return NULL;
   const uintptr_t aligned = ((uintptr_t)allocation + sizeof(void *) + 7U) & ~(uintptr_t)7U;
   ((void **)aligned)[-1] = allocation;
   return (void *)aligned;
@@ -935,51 +939,46 @@ static void *sd_pool_allocate(TX_BYTE_POOL *pool, size_t bytes)
 
 static void sd_pool_release(void *slot)
 {
-  (void)tx_byte_release(((void **)slot)[-1]);
+  (void)tx_block_release(((void **)slot)[-1]);
 }
 
 static sd_line_slot_t *sd_alloc_slot(uint16_t len)
 {
-  sd_line_slot_t *slot = NULL;
-  if (tx_mutex_get(&g_sd_pool_mutex, TX_WAIT_FOREVER) != TX_SUCCESS) return NULL;
-  slot = sd_pool_allocate(&g_sd_line_pool, offsetof(sd_line_slot_t, line) + len + 1U);
-  if (slot != NULL && ++g_sd_line_slots_used > g_sd_line_slots_peak)
-    g_sd_line_slots_peak = g_sd_line_slots_used;
-  (void)tx_mutex_put(&g_sd_pool_mutex);
+  sd_line_slot_t *slot = sd_pool_allocate(&g_sd_line_pool, offsetof(sd_line_slot_t, line) + len + 1U);
+  if (slot != NULL) {
+    const uint32_t saved = __get_PRIMASK(); __disable_irq();
+    if (++g_sd_line_slots_used > g_sd_line_slots_peak) g_sd_line_slots_peak = g_sd_line_slots_used;
+    __set_PRIMASK(saved);
+  }
   return slot;
 }
 
 static void sd_free_slot(sd_line_slot_t *slot)
 {
-  if (slot != NULL && tx_mutex_get(&g_sd_pool_mutex, TX_WAIT_FOREVER) == TX_SUCCESS)
-  {
-    --g_sd_line_slots_used;
+  if (slot != NULL) {
+    const uint32_t saved = __get_PRIMASK(); __disable_irq(); --g_sd_line_slots_used; __set_PRIMASK(saved);
     sd_pool_release(slot);
-    (void)tx_mutex_put(&g_sd_pool_mutex);
   }
 }
 
 static sd_raw_slot_t *sd_alloc_raw_slot(uint16_t count)
 {
-  sd_raw_slot_t *slot = NULL;
-  if (tx_mutex_get(&g_sd_pool_mutex, TX_WAIT_FOREVER) != TX_SUCCESS) return NULL;
-  slot = sd_pool_allocate(&g_sd_raw_pool, offsetof(sd_raw_slot_t, samples) +
-                          (size_t)count * sizeof(sd_raw_adc_record_t));
+  sd_raw_slot_t *slot = sd_pool_allocate(&g_sd_raw_pool, offsetof(sd_raw_slot_t, samples) +
+                                       (size_t)count * sizeof(sd_raw_adc_record_t));
   if (slot != NULL) {
     slot->capacity = count;
+    const uint32_t saved = __get_PRIMASK(); __disable_irq();
     if (++g_sd_raw_slots_used > g_sd_raw_slots_peak) g_sd_raw_slots_peak = g_sd_raw_slots_used;
+    __set_PRIMASK(saved);
   }
-  (void)tx_mutex_put(&g_sd_pool_mutex);
   return slot;
 }
 
 static void sd_free_raw_slot(sd_raw_slot_t *slot)
 {
-  if (slot != NULL && tx_mutex_get(&g_sd_pool_mutex, TX_WAIT_FOREVER) == TX_SUCCESS)
-  {
-    --g_sd_raw_slots_used;
+  if (slot != NULL) {
+    const uint32_t saved = __get_PRIMASK(); __disable_irq(); --g_sd_raw_slots_used; __set_PRIMASK(saved);
     sd_pool_release(slot);
-    (void)tx_mutex_put(&g_sd_pool_mutex);
   }
 }
 
@@ -1180,8 +1179,8 @@ void sd_card_writer_thread_entry(ULONG initial_input)
         {
           g_sd_hardware_ready = 1U;
           g_sd_init_stage = 3U;
-          if (sd_mount_or_provision() == FX_SUCCESS)
-          {
+          const UINT media_status = sd_resume_card_media();
+          if (media_status == FX_SUCCESS) {
             g_sd_ready = 1U;
             g_sd_init_stage = 5U;
             failed_retries = 0U;
@@ -1337,15 +1336,13 @@ UINT sd_card_init(TX_BYTE_POOL *byte_pool)
   {
     return TX_SUCCESS;
   }
-  if (tx_mutex_create(&g_sd_pool_mutex, "sd_pool", TX_INHERIT) != TX_SUCCESS)
-  {
-    return TX_MUTEX_ERROR;
-  }
-  if (tx_byte_pool_create(&g_sd_line_pool, "sd_lines", g_sd_line_pool_storage,
-                           sizeof(g_sd_line_pool_storage)) != TX_SUCCESS ||
-      tx_byte_pool_create(&g_sd_raw_pool, "sd_raw", g_sd_raw_pool_storage,
-                           sizeof(g_sd_raw_pool_storage)) != TX_SUCCESS)
+  if (tx_block_pool_create(&g_sd_line_pool, "sd_lines", SD_LINE_BLOCK_PAYLOAD + SD_POOL_ALIGNMENT_RESERVE,
+                           g_sd_line_pool_storage, sizeof(g_sd_line_pool_storage)) != TX_SUCCESS ||
+      tx_block_pool_create(&g_sd_raw_pool, "sd_raw", SD_RAW_BLOCK_PAYLOAD + SD_POOL_ALIGNMENT_RESERVE,
+                           g_sd_raw_pool_storage, sizeof(g_sd_raw_pool_storage)) != TX_SUCCESS)
     return TX_POOL_ERROR;
+  const UINT io_status = sd_storage_io_init();
+  if (io_status != TX_SUCCESS) return io_status;
   if (tx_queue_create(&g_sd_queue, "sd_queue", TX_1_ULONG,
                       g_sd_queue_storage, sizeof(g_sd_queue_storage)) != TX_SUCCESS)
   {
@@ -1371,14 +1368,7 @@ UINT sd_card_init(TX_BYTE_POOL *byte_pool)
   (void)fx_system_time_set(0U, 0U, 0U);
   g_sd_services_initialized = 1U;
 
-  /* A missing card is not a board-startup failure. The writer task retries
-   * insertion and reports the condition after SEDSNet starts. */
-  if ((g_sd_hardware_ready != 0U) &&
-      (HAL_SD_ConfigWideBusOperation(&hsd1, SDMMC_BUS_WIDE_4B) == HAL_OK) &&
-      (sd_mount_or_provision() == FX_SUCCESS))
-  {
-    g_sd_ready = 1U;
-  }
+  /* All card/media operations belong to the lower-priority writer. */
   return TX_SUCCESS;
 }
 
@@ -1427,13 +1417,13 @@ static void sd_raw_count_dropped(const sd_raw_adc_record_t *samples, uint16_t co
 static uint8_t sd_raw_optional_admitted(void)
 {
   return sd_raw_backlog_records() <= SD_OPTIONAL_RAW_BACKLOG_LIMIT &&
-      g_sd_raw_pool.tx_byte_pool_available >= g_sd_raw_pool.tx_byte_pool_size / 4U;
+      g_sd_raw_pool.tx_block_pool_available >= (g_sd_raw_pool.tx_block_pool_total + 3U) / 4U;
 }
 
 static uint8_t sd_optional_telemetry_admitted(void)
 {
   return sd_raw_optional_admitted() &&
-      g_sd_line_pool.tx_byte_pool_available >= (g_sd_line_pool.tx_byte_pool_size / 4U) * 3U;
+      g_sd_line_pool.tx_block_pool_available >= (g_sd_line_pool.tx_block_pool_total * 3U + 3U) / 4U;
 }
 
 static uint8_t sd_required_sensor_name(const char *name)
@@ -1556,7 +1546,7 @@ sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,
   /* The bounded row queue can accept startup records while the writer mounts
    * the card. Do not discard the first network row merely because mounting
    * runs in another task. A missing/slow card still produces backpressure
-   * when the static byte pool fills; the general-purpose heap is not used. */
+   * when the fixed block pool fills; the general-purpose heap is not used. */
   if ((g_sd_services_initialized == 0U) || (sensor_name == NULL))
   {
     return SD_CARD_STATUS_BUSY;
@@ -1690,22 +1680,9 @@ void sd_card_set_calibration(const daq_calibration_t *calibration)
 {
   if (calibration == NULL) return;
   const uint8_t finished = sd_launch_finished();
-  if ((g_sd_services_initialized != 0U) &&
-      (tx_mutex_get(&g_sd_pool_mutex, TX_WAIT_FOREVER) == TX_SUCCESS))
-  {
-    if (memcmp(&g_sd_calibration, calibration, sizeof(*calibration)) != 0)
-    {
-      g_sd_calibration = *calibration;
-      g_sd_calibration_generation++;
-      if (finished) sd_card_set_launch_clock(0U, 0U);
-    }
-    (void)tx_mutex_put(&g_sd_pool_mutex);
-    return;
-  }
-  if (memcmp(&g_sd_calibration, calibration, sizeof(*calibration)) != 0)
-  {
-    g_sd_calibration = *calibration;
-    g_sd_calibration_generation++;
-    if (finished) sd_card_set_launch_clock(0U, 0U);
-  }
+  const uint32_t saved = __get_PRIMASK(); __disable_irq();
+  const uint8_t changed = memcmp(&g_sd_calibration, calibration, sizeof(*calibration)) != 0;
+  if (changed) { g_sd_calibration = *calibration; ++g_sd_calibration_generation; }
+  __set_PRIMASK(saved);
+  if (changed && finished) sd_card_set_launch_clock(0U, 0U);
 }

@@ -19,7 +19,7 @@ def function(source, name):
 class PressureSdHandoffTests(unittest.TestCase):
     def test_receive_copies_once_and_writer_retains_failed_row_without_duplicate(self):
         source = (ROOT/'Core/Src/sd_card.c').read_text()
-        declarations = source[source.index('typedef struct {\n  pressure_sd_batch_t batch;'):source.index('static TX_MUTEX g_sd_pool_mutex;')]
+        declarations = source[source.index('typedef struct {\n  pressure_sd_batch_t batch;'):source.index('static TX_EVENT_FLAGS_GROUP g_sd_flags;')]
         # Other static queue declarations are not needed by these two functions.
         declarations = declarations.replace('static ULONG g_sd_pressure_queue_storage[SD_PRESSURE_QUEUE_BATCHES * SD_PRESSURE_MESSAGE_WORDS];', '')
         prefix = r'''

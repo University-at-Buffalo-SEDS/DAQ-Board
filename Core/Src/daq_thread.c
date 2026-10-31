@@ -374,16 +374,8 @@ static void daq_publish_loadcell(const daq_snapshot_t *snapshot, const daq_calib
   }
 #endif
 
-#ifdef TELEMETRY_ENABLED
-  if (chamber != NULL && isfinite(chamber[0]) && isfinite(chamber[1])) {
-    const float combined[] = {loadcell_kg1000, chamber[0], chamber[1]};
-    daq_network_offer(DAQ_NETWORK_KG1000, SEDS_DT_DAQ_LOADCELL_CHAMBER, combined, 3U, snapshot->monotonic_ms);
-  } else {
-    daq_network_offer(DAQ_NETWORK_KG1000, SEDS_DT_KG1000, &loadcell_kg1000, 1U, snapshot->monotonic_ms);
-  }
-#else
   (void)chamber;
-#endif
+
 }
 
 static void daq_publish_kg50(float raw, uint8_t input, uint64_t monotonic_ms,
@@ -398,14 +390,10 @@ static void daq_publish_kg50(float raw, uint8_t input, uint64_t monotonic_ms,
   (void)monotonic_ms;
   (void)calibration;
 #endif
-#ifdef TELEMETRY_ENABLED
-  const float tagged[] = {(float)input, raw};
-  daq_network_offer(DAQ_NETWORK_KG50, input == 0U ? SEDS_DT_KG50 : SEDS_DT_DAQ_KG50_SELECTED,
-                    input == 0U ? &raw : tagged, input == 0U ? 1U : 2U, monotonic_ms);
-#endif
 }
 
-/* Acquisition never waits for network publication. A work item keeps the
+/* This queue is for SD rows only; live values use an independent latest-slot handoff.
+ * A work item keeps the
  * captured timestamp and calibration; saturation rejects the newest item and
  * is counted separately from the raw SD path. */
 #define DAQ_REPORT_DEPTH 16U
@@ -431,6 +419,34 @@ volatile uint32_t g_daq_report_enqueued_count;
 volatile uint32_t g_daq_report_completed_count;
 volatile uint32_t g_daq_report_drop_count;
 volatile uint32_t g_daq_report_max_age_ms;
+
+/* Acquisition publishes only into fixed latest-value slots. SD queue or
+ * writer delays must never hold the live path behind historical reports. */
+static void daq_offer_live_report(const daq_report_t *report)
+{
+#ifdef TELEMETRY_ENABLED
+  if (report->flags & DAQ_REPORT_KG1000) {
+    if (report->chamber_valid && isfinite(report->chamber[0]) && isfinite(report->chamber[1])) {
+      const float combined[] = {report->kg1000, report->chamber[0], report->chamber[1]};
+      daq_network_offer(DAQ_NETWORK_KG1000, SEDS_DT_DAQ_LOADCELL_CHAMBER,
+                        combined, 3U, report->monotonic_ms);
+    } else daq_network_offer(DAQ_NETWORK_KG1000, SEDS_DT_KG1000,
+                            &report->kg1000, 1U, report->monotonic_ms);
+  }
+  if (report->flags & DAQ_REPORT_KG50) {
+    const float tagged[] = {(float)report->kg50_input, report->kg50};
+    daq_network_offer(DAQ_NETWORK_KG50,
+        report->kg50_input == 0U ? SEDS_DT_KG50 : SEDS_DT_DAQ_KG50_SELECTED,
+        report->kg50_input == 0U ? &report->kg50 : tagged,
+        report->kg50_input == 0U ? 1U : 2U, report->monotonic_ms);
+  }
+  if (report->flags & DAQ_REPORT_TEMPERATURE)
+    daq_network_offer(DAQ_NETWORK_TEMPERATURE, SEDS_DT_DAQ_ADC_TEMPERATURE,
+                      &report->temperature, 1U, report->monotonic_ms);
+#else
+  (void)report;
+#endif
+}
 
 static void daq_enqueue_report(const daq_report_t *report)
 {
@@ -467,11 +483,6 @@ static void daq_report_thread_entry(ULONG argument)
     }
     if (work->flags & DAQ_REPORT_KG50)
       daq_publish_kg50(work->kg50, work->kg50_input, work->monotonic_ms, &work->calibration);
-#ifdef TELEMETRY_ENABLED
-    if (work->flags & DAQ_REPORT_TEMPERATURE)
-      daq_network_offer(DAQ_NETWORK_TEMPERATURE, SEDS_DT_DAQ_ADC_TEMPERATURE,
-                        &work->temperature, 1U, work->monotonic_ms);
-#endif
     g_daq_report_completed_count++;
     (void)tx_block_release(work);
   }
@@ -553,11 +564,6 @@ void daq_thread_entry(ULONG initial_input)
     const uint16_t raw_count = daq_drain_ext_adc(&snapshot,
                                                  raw_records,
                                                  DAQ_RAW_BATCH_MAX, &calibration, &window);
-    if ((raw_count != 0U) &&
-        (sd_card_enqueue_raw_adc_samples(raw_records, raw_count, &calibration) != SD_CARD_STATUS_OK))
-    {
-      g_daq_sd_raw_batch_drop_count++;
-    }
 #else
     (void)daq_drain_ext_adc(&snapshot, NULL, DAQ_RAW_BATCH_MAX, &calibration, &window);
 #endif
@@ -572,7 +578,6 @@ void daq_thread_entry(ULONG initial_input)
       report.temperature = snapshot.ext_adc_temp_c;
       report.flags |= DAQ_REPORT_TEMPERATURE;
     }
-    daq_enqueue_analog(&snapshot, &calibration, &window);
     /* Pressure shares the existing acquisition/SD ring and KG1000 network
      * slot. Absence is never a fabricated zero; stale readings restore the
      * original scalar KG1000 publication without changing its cadence. */
@@ -617,7 +622,14 @@ void daq_thread_entry(ULONG initial_input)
       report.kg50 = filtered;
       report.flags |= DAQ_REPORT_KG50;
     }
+    daq_offer_live_report(&report);
+#if (DISABLE_SD_CARD == 0U)
+    if ((raw_count != 0U) &&
+        sd_card_enqueue_raw_adc_samples(raw_records, raw_count, &calibration) != SD_CARD_STATUS_OK)
+      ++g_daq_sd_raw_batch_drop_count;
+#endif
     daq_enqueue_report(&report);
+    daq_enqueue_analog(&snapshot, &calibration, &window);
 
     stage_started = daq_profile_stage(2U, stage_started);
     (void)daq_board_ext_adc_start_dma();

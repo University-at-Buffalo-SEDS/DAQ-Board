@@ -484,6 +484,8 @@ void HAL_SD_MspInit(SD_HandleTypeDef* hsd)
     HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
     /* USER CODE BEGIN SDMMC1_MspInit 1 */
+    HAL_NVIC_SetPriority(SDMMC1_IRQn, 7U, 0U);
+    HAL_NVIC_DisableIRQ(SDMMC1_IRQn);
 
     /* USER CODE END SDMMC1_MspInit 1 */
 
@@ -502,6 +504,8 @@ void HAL_SD_MspDeInit(SD_HandleTypeDef* hsd)
   if(hsd->Instance==SDMMC1)
   {
     /* USER CODE BEGIN SDMMC1_MspDeInit 0 */
+    HAL_NVIC_DisableIRQ(SDMMC1_IRQn);
+    HAL_NVIC_ClearPendingIRQ(SDMMC1_IRQn);
 
     /* USER CODE END SDMMC1_MspDeInit 0 */
     /* Peripheral clock disable */

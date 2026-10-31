@@ -1,5 +1,56 @@
 # Acquisition, recording, and network rate qualification
 
+## 2026-10-31 software isolation candidate (not flashed)
+
+SD work previously shared priority6 with telemetry, and both raw acquisition
+and report publication could wait on the storage allocator mutex. SD delays
+could therefore age queued reports before they reached the live network slots.
+
+The candidate offers fresh loadcell/pressure/temperature values directly from
+acquisition into the existing fixed latest-value network slots, before any SD
+admission or report FIFO work. Network rate and weights remain unchanged. The
+report FIFO is now storage-only. Storage uses fixed ThreadX block pools with
+nonblocking allocation; calibration snapshots use a bounded interrupt-masked
+copy rather than a storage mutex. Acquisition remains priority5, live workers6,
+and storage7 (smaller numbers run first).
+
+SDMMC uses internal DMA with the existing aligned4KiB SRAM buffer. The IRQ only
+signals an event. Vendor completion/CMD12 handling runs in the storage task,
+because it can poll for a command response. The writer sleeps while waiting for
+DMA/card programming. Error recovery quiesces DMA before buffer reuse and
+requires card reinitialization. Same-card recovery keeps FileX handles, dirty
+cache and retry bytes; a replacement CID/geometry is refused instead of writing
+old metadata onto another card. Media read errors do not trigger formatting.
+
+Native production-path tests reproduce pre-fix 190/500/2000 ms live gaps during
+modeled SD/report consumer pauses. The candidate holds both loadcell gaps to
+30 ms and capture age to 2 ms in those tests. These are queue/ownership tests,
+not real ThreadX CPU scheduling or physical card-throughput evidence.
+
+ARM pool geometry provides7808 raw records in332KiB and2240 numeric rows in
+62KiB. That is about3.12s at the observed2500 raw records/s, or1.40s at the
+configured5556 read-budget upper bound. Finite buffers cannot guarantee no
+storage loss through arbitrary or sustained card stalls. The objective of this
+change is that such storage pressure cannot block the live producer path.
+
+The full native suite passes (256 tests, one skipped), including finite-pool
+storage stress and production-path DMA error/timeout/late-IRQ ownership tests.
+Release factory images build with telemetry enabled and with `--no-telemetry`.
+A configurable virtual-clock SDMMC model passes local timing contracts, but
+Jupiter SSH became unreachable before actual Renode firmware timing tests.
+These results do not qualify physical-card durability or hardware timing.
+The existing provisioning policy still formats an invalid filesystem or a
+filesystem without the SEDSDAQ.ID marker; filesystem corruption/marker loss
+is outside this recovery qualification. Vendor command polling can exceed the
+nominal data timeout, but runs only in the preemptible storage task.
+
+Qualification still requires a timed SDMMC simulator run with the actual ELF,
+then a physical-card soak when hardware returns. Verify acquisition and both
+network streams independently of SD admission, including missing cards, delayed
+initialization, periodic multi-second programming delays and timeout/recovery.
+Preserve existing CSV precision, timestamps, acquisition rates and T0+20s
+monotonic launch-file cutoff. No hardware was accessed for this candidate.
+
 The requested operating point is every ADC sample recorded to SD. Current
 firmware caps each fast loadcell network stream at 250 reports per second;
 actual cadence depends on acquisition and the selected input. The proposed raw

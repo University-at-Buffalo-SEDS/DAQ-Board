@@ -45,9 +45,11 @@
 #error "Auxiliary analog period must be 100..1000 ms"
 #endif
 /* Acquisition outranks the I/O workers so reporting or SD backlogs cannot
- * consume its service budget. SD and analog/report workers share a bounded
- * slice; IRQ-driven ADC acquisition continues independently of these tasks. */
+ * consume its service budget. Live I/O workers share a bounded slice; storage
+ * runs below them and sleeps for DMA. ADC interrupts remain independent. */
 #define DAQ_IO_THREAD_PRIORITY 6U
+/* Storage never runs at acquisition/report/network priority. */
+#define DAQ_SD_WRITER_THREAD_PRIORITY 7U
 #define DAQ_ACQUISITION_THREAD_PRIORITY 5U
 #define DAQ_IO_THREAD_SLICE_MS 1U
 /* Size each SD batch for the service interval plus bounded scheduling slack.

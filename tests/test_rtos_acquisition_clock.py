@@ -31,6 +31,8 @@ class RtosAcquisitionClockTests(unittest.TestCase):
         self.assertNotRegex(read,r'HAL_SPI_TransmitReceive\s*\(')
         self.assertNotIn('HAL_Delay',read)
 
-    def test_acquisition_pool_lock_inherits_priority(self):
+    def test_acquisition_sd_admission_cannot_wait_on_a_shared_allocator(self):
         source=(ROOT/'Core/Src/sd_card.c').read_text()
-        self.assertIn('tx_mutex_create(&g_sd_pool_mutex, "sd_pool", TX_INHERIT)',source)
+        self.assertNotIn('tx_mutex_get(',source)
+        self.assertIn('tx_block_allocate(pool, &allocation, TX_NO_WAIT)',source)
+        self.assertNotIn('tx_byte_allocate(',source)

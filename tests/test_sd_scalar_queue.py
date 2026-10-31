@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from test_sd_raw_queue import function
+from sd_fixed_pool_mock import TYPES, FUNCTIONS
 ROOT=Path(__file__).resolve().parents[1]
 
 class ScalarQueueTests(unittest.TestCase):
@@ -31,11 +32,11 @@ SD_CARD_STATUS_OK=0,SD_CARD_STATUS_BUSY=1,SD_CARD_STATUS_BACKPRESSURE=2};
 #define SD_RAW_BATCH_MAX 16U
 #define SD_LINE_MAX 384U
 typedef struct{uint64_t timestamp;uint32_t words[8];} sd_raw_adc_record_t;
-typedef struct{size_t tx_byte_pool_size,tx_byte_pool_available;} TX_BYTE_POOL;
+'''+TYPES+r'''
 typedef struct{ULONG data[1024];unsigned head,tail,count;} TX_QUEUE;
-static TX_BYTE_POOL g_sd_line_pool={62U*1024U,62U*1024U};
+static TX_BLOCK_POOL g_sd_line_pool;
+static unsigned char line_pool_storage[62U*1024U+8];
 static TX_QUEUE g_sd_queue;
-static int g_sd_pool_mutex;
 static unsigned irq_mask,g_sd_route_epoch,g_sd_line_slots_used,g_sd_line_slots_peak;
 static unsigned g_sd_line_drop_count,g_sd_essential_telemetry_dropped;
 static unsigned g_sd_scalar_records_enqueued,g_sd_scalar_records_written,g_sd_scalar_records_coalesced;
@@ -45,21 +46,8 @@ static uint32_t __get_PRIMASK(void){return irq_mask;}
 static void __disable_irq(void){irq_mask=1;}
 static void __set_PRIMASK(uint32_t m){irq_mask=m;}
 static uint64_t sd_run_snapshot(void){assert(irq_mask);return session;}
-static int tx_mutex_get(int *m,unsigned w){(void)m;(void)w;assert(!irq_mask);return 0;}
-static int tx_mutex_put(int *m){(void)m;return 0;}
-static unsigned force_allocation,force_send,fail_write;
-typedef struct{void *base,*returned;size_t bytes;} allocation;
-static allocation allocations[1024];
-static unsigned tx_byte_allocate(TX_BYTE_POOL *p,void **out,size_t size,unsigned w){
- assert(!irq_mask&&!w&&p==&g_sd_line_pool);size_t charged=(size+31U)&~7U;
- if(force_allocation||charged>p->tx_byte_pool_available)return 1;
- for(unsigned i=0;i<1024;i++)if(!allocations[i].base){void *m=malloc(size+16);assert(m);*out=(char*)m+4;
- allocations[i]=(allocation){m,*out,charged};p->tx_byte_pool_available-=charged;return 0;}
- abort();
-}
-static unsigned tx_byte_release(void *p){assert(!irq_mask);for(unsigned i=0;i<1024;i++)if(allocations[i].returned==p){
- g_sd_line_pool.tx_byte_pool_available+=allocations[i].bytes;free(allocations[i].base);allocations[i]=(allocation){0};return 0;}
- abort();}
+static unsigned force_send,fail_write;
+'''+FUNCTIONS+r'''
 static unsigned tx_queue_send(TX_QUEUE *q,void *m,unsigned w){assert(irq_mask&&!w&&q==&g_sd_queue);
  if(force_send||q->count==1024)return 1;q->data[q->tail]=*(ULONG*)m;q->tail=(q->tail+1)%1024;q->count++;return 0;}
 static unsigned tx_queue_receive(TX_QUEUE *q,void *m,unsigned w){assert(irq_mask&&!w&&q==&g_sd_queue);
@@ -89,6 +77,7 @@ static void enqueue(unsigned i,daq_calibration_t *cal){
  assert(sd_enqueue_scalar(sensor,network,clock_now,value,cal)==0);
 }
 int main(void){
+ mock_pool_init(&g_sd_line_pool,line_pool_storage,62U*1024U,SD_LINE_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE);
  daq_calibration_t calibration={.kg1000_slope=2};sd_line_slot_t *pending=NULL;uint16_t index=0;
  unsigned phase_credit=0,peak=0;
  /* 500 protected CSV rows/s. Producer continues throughout repeated3s card
@@ -110,24 +99,24 @@ int main(void){
    if(result!=FX_SUCCESS){assert(result==FX_IO_ERROR);continue;}
    if(done){sd_free_slot(pending);pending=NULL;}
   }}
-  unsigned used=g_sd_line_pool.tx_byte_pool_size-g_sd_line_pool.tx_byte_pool_available;if(used>peak)peak=used;
+  unsigned used=(unsigned)mock_pool_used_bytes(&g_sd_line_pool);if(used>peak)peak=used;
  }
  while(pending||g_sd_queue.count){if(!pending){pending=take();index=0;}uint8_t done;
  assert(!sd_write_telemetry_item(pending,&index,&done));if(done){sd_free_slot(pending);pending=NULL;}}
  assert(rows_written==13000&&g_sd_scalar_records_enqueued==13000&&g_sd_scalar_records_written==13000);
  assert(!g_sd_line_drop_count&&!g_sd_essential_telemetry_dropped&&g_sd_scalar_records_coalesced>0);
- assert(!g_sd_scalar_append_tail&&g_sd_line_pool.tx_byte_pool_available==g_sd_line_pool.tx_byte_pool_size);
+ assert(!g_sd_scalar_append_tail&&g_sd_line_pool.tx_block_pool_available==g_sd_line_pool.tx_block_pool_total);
  /* Allocation and send failures are explicit, bounded losses, never leaks. */
- force_allocation=1;assert(sd_enqueue_scalar(0,0,clock_now,1,&calibration)==SD_CARD_STATUS_BACKPRESSURE);force_allocation=0;
+ mock_force_full=1;assert(sd_enqueue_scalar(0,0,clock_now,1,&calibration)==SD_CARD_STATUS_BACKPRESSURE);mock_force_full=0;
  force_send=1;assert(sd_enqueue_scalar(0,0,clock_now,1,&calibration)==SD_CARD_STATUS_BACKPRESSURE);force_send=0;
  assert(g_sd_essential_telemetry_dropped==2&&!g_sd_scalar_append_tail);
- assert(g_sd_line_pool.tx_byte_pool_available==g_sd_line_pool.tx_byte_pool_size);
- printf("compact scalar:13000rows saved; peak%u/%zu bytes;3s stalls; exactCSV/clocks/epochs/retries verified\n",peak,g_sd_line_pool.tx_byte_pool_size);
+ assert(g_sd_line_pool.tx_block_pool_available==g_sd_line_pool.tx_block_pool_total);
+ printf("compact scalar:13000rows saved; peak%u/%zu bytes;3s stalls; exactCSV/clocks/epochs/retries verified\n",peak,g_sd_line_pool.budget);
 }
 '''
         with tempfile.TemporaryDirectory() as d:
             exe=Path(d)/'scalar'
-            build=subprocess.run(['cc','-std=c11','-O1','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',
+            build=subprocess.run(['cc','-std=c11','-O1','-Wall','-Wextra','-Werror','-Wno-unused-function','-fsanitize=address,undefined',
                 '-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(exe)],input=code,text=True,capture_output=True)
             self.assertEqual(build.returncode,0,build.stderr)
             subprocess.run([str(exe)],check=True)

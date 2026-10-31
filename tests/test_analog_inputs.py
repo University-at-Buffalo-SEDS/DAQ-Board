@@ -276,7 +276,7 @@ int main(void) {
             self.assertEqual(result.returncode,0,result.stderr)
             subprocess.run([str(binary)],check=True)
 
-    def test_analog_worker_shares_sd_priority_and_bounded_slice(self):
+    def test_sd_is_below_acquisition_and_live_workers_with_bounded_slice(self):
         daq=(ROOT/'Core/Src/daq_thread.c').read_text().split('UINT create_daq_thread(void)',1)[1]
         sd=(ROOT/'Core/Src/sd_writer_thread.c').read_text().split('UINT create_sd_writer_thread(void)',1)[1]
         harness=r'''
@@ -319,7 +319,7 @@ int main(void){
  /* Acquisition must preempt backlogged I/O; SD cannot starve analog/report
   * peers. ThreadX uses smaller numbers for higher priorities. */
  assert(priorities[1]<priorities[0]);
- assert(priorities[0]==priorities[2] && priorities[0]==priorities[3] && priorities[0]==priorities[4]);
+ assert(priorities[0]<priorities[2] && priorities[0]==priorities[3] && priorities[0]==priorities[4]);
  for(unsigned i=0;i<5;i++){
   assert(thresholds[i]==priorities[i]);
   assert(slices[i]>0 && slices[i]<=TX_TIMER_TICKS_PER_SECOND/1000U);

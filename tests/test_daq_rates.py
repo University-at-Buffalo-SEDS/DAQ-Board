@@ -2,16 +2,17 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
+from test_network_rate import function
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 class DaqRateTests(unittest.TestCase):
     def test_can_report_is_uncalibrated(self):
         source = (ROOT / 'Core/Src/daq_thread.c').read_text()
-        publish = source.split('static void daq_publish_loadcell(', 1)[1].split('#if (DAQ_ENABLE_DUMMY', 1)[0]
-        self.assertIn('loadcell_kg1000 = snapshot->ext_adc_loadcell_kg1000;', publish)
-        self.assertNotIn('calibration->kg1000_slope', publish)
-        self.assertNotIn('calibration->kg1000_intercept', publish)
+        live = function(source, 'static void daq_offer_live_report(')
+        self.assertIn('report->kg1000', live)
+        self.assertNotIn('calibration', live)
+        self.assertNotIn('sd_card_', live)
         self.assertIn('records[count].calibrated_value', source)
 
     def test_sd_uses_default_speed_clock_and_bounded_status_wait(self):
@@ -112,7 +113,7 @@ int main(void) {
     def test_temperature_publication_uses_elapsed_time_not_loop_count(self):
         source = (ROOT / 'Core/Src/daq_thread.c').read_text()
         block = source[source.index('    const uint32_t report_ms ='):
-                       source.index('    daq_enqueue_analog(&snapshot')]
+                       source.index('    /* Pressure shares', source.index('    const uint32_t report_ms ='))]
         self.compile(r'''#include <stdint.h>
 #include <assert.h>
 #include "daq_rates.h"

@@ -1,4 +1,4 @@
-"""Exercise the production polling adapter without an SD card or an RTOS."""
+"""Exercise the production DMA/FileX chunk adapter without an SD card or an RTOS."""
 import pathlib
 import subprocess
 import tempfile
@@ -84,11 +84,11 @@ int main(void) {
 
     def test_chunking_data_integrity_and_errors(self):
         source = (ROOT / "Core/Src/sd_card.c").read_text()
-        adapter = source.split("static UINT sd_wait_ready", 1)[1].split(
+        adapter = source.split("static UINT sd_hal_read", 1)[1].split(
             "static VOID sd_filex_driver", 1)[0]
-        adapter = "static UINT sd_wait_ready" + adapter
-        # No cache APIs are supplied: DMA cache maintenance is invalid for
-        # these CPU-only transfers and must not creep back into the adapter.
+        adapter = "static UINT sd_hal_read" + adapter
+        # No cache APIs are supplied: the shared bounce buffer is internal SRAM;
+        # completion, timeout and quiescence are covered by the DMA driver tests.
         code = r'''
 #include <stdint.h>
 #include <stddef.h>
@@ -103,33 +103,23 @@ typedef unsigned char UCHAR;
 #define HAL_SD_CARD_TRANSFER 4U
 #define FX_SUCCESS 0U
 #define FX_IO_ERROR 1U
-static int hsd1;
-static unsigned tick, busy, program_ticks = 2U;
+static unsigned g_sd_ready=1;
+static unsigned tick, reinit;
 static unsigned g_sd_max_read_ms, g_sd_max_write_ms;
-static unsigned HAL_GetTick(void) { return tick; }
-static void tx_thread_sleep(unsigned n) { tick += n; }
-static unsigned HAL_SD_GetCardState(int *h) {
-  assert(h == &hsd1);
-  if (busy) { --busy; return 7U; }
-  return HAL_SD_CARD_TRANSFER;
-}
+static unsigned HAL_GetTick(void) { return ++tick; }
+static unsigned sd_storage_io_requires_reinit(void){return reinit;}
 static UCHAR g_sd_transfer_buffer[8*512];
 static UCHAR disk[20*512];
 static unsigned calls, fail_call;
 static int transfer(UCHAR *buffer, ULONG sector, ULONG count, int write) {
-  assert(busy == 0U); /* No command may interrupt card programming. */
   assert(count > 0 && count <= 8 && sector + count <= 20);
-  if (++calls == fail_call) return 1;
-  if (write) { memcpy(disk + sector*512, buffer, count*512); busy = program_ticks; }
+  if (++calls == fail_call) return FX_IO_ERROR;
+  if (write) memcpy(disk + sector*512, buffer, count*512);
   else memcpy(buffer, disk + sector*512, count*512);
-  return HAL_OK;
+  return FX_SUCCESS;
 }
-static int HAL_SD_ReadBlocks(int *h, UCHAR *b, ULONG s, ULONG n, unsigned t) {
-  assert(h == &hsd1 && t == 2000); return transfer(b, s, n, 0);
-}
-static int HAL_SD_WriteBlocks(int *h, UCHAR *b, ULONG s, ULONG n, unsigned t) {
-  assert(h == &hsd1 && t == 2000); return transfer(b, s, n, 1);
-}
+static unsigned sd_storage_io_read(UCHAR *b, ULONG s, ULONG n) { return transfer(b,s,n,0); }
+static unsigned sd_storage_io_write(const UCHAR *b, ULONG s, ULONG n) { return transfer((UCHAR*)b,s,n,1); }
 ''' + adapter + r'''
 int main(void) {
   UCHAR input[17*512], output[17*512];
@@ -145,12 +135,11 @@ int main(void) {
   calls=0;
   assert(sd_hal_read(output, 2, 0) == FX_SUCCESS && calls == 0);
   assert(sd_hal_write(input, 2, 0) == FX_SUCCESS && calls == 0);
-  fail_call=0; busy=5000; tick=0;
-  assert(sd_hal_read(output, 2, 1) == FX_IO_ERROR && calls == 0);
-  assert(tick == 2000U);
-  busy=0; tick=0; program_ticks=5000;
-  assert(sd_hal_write(input, 2, 1) == FX_IO_ERROR && calls == 1);
-  assert(tick == 2000U); /* Returning HAL_OK is not durable completion. */
+  calls=0; fail_call=1; reinit=1;
+  assert(sd_hal_read(output,2,1)==FX_IO_ERROR && !g_sd_ready);
+  g_sd_ready=1; calls=0;
+  assert(sd_hal_write(input,2,1)==FX_IO_ERROR && !g_sd_ready);
+
 }
 '''
         with tempfile.TemporaryDirectory() as tmp:

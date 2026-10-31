@@ -35,8 +35,8 @@ class NetworkRateTests(unittest.TestCase):
 
     def harness(self):
         source = (ROOT / 'Core/Src/daq_thread.c').read_text()
-        temperature_start = source.index('daq_network_offer(DAQ_NETWORK_TEMPERATURE,')
-        temperature = source[temperature_start:source.index(';', temperature_start) + 1]
+        report_types = source[source.index('#define DAQ_REPORT_DEPTH'):
+                              source.index('static TX_THREAD g_report_thread')]
         return r'''
 #include <assert.h>
 #include <math.h>
@@ -103,14 +103,24 @@ static int log_telemetry_captured(unsigned type,const void*value,size_t n,size_t
  }
  if(fail_next){--fail_next;return SEDS_IO;}return SEDS_OK;
 }
-''' + '\n'.join(function(source, marker) for marker in [
+''' + report_types + '\n'.join(function(source, marker) for marker in [
             'static void daq_network_offer(', 'static void daq_network_process_once(',
             'static void daq_publish_analog_packet(', 'static void daq_publish_analog(',
-            'static void daq_publish_loadcell(', 'static void daq_publish_kg50(']) + r'''
+            'static void daq_publish_loadcell(', 'static void daq_publish_kg50(',
+            'static void daq_offer_live_report(']) + r'''
+static void capture_loadcell(const daq_snapshot_t*s,const daq_calibration_t*c,const float*pressure){
+ daq_report_t report={.monotonic_ms=s->monotonic_ms,.kg1000=s->ext_adc_loadcell_kg1000,.flags=DAQ_REPORT_KG1000};
+ if(pressure){report.chamber[0]=pressure[0];report.chamber[1]=pressure[1];report.chamber_valid=1;}
+ daq_offer_live_report(&report); /* acquisition owns NETWORK offers */
+ daq_publish_loadcell(s,c,pressure); /* independent SD row path */
+}
+static void capture_kg50(float value,uint8_t input,uint64_t ms,const daq_calibration_t*c){
+ daq_report_t report={.monotonic_ms=ms,.kg50=value,.kg50_input=input,.flags=DAQ_REPORT_KG50};
+ daq_offer_live_report(&report);daq_publish_kg50(value,input,ms,c);
+}
 static void publish_temperature(float value,uint64_t ms){
- struct {float temperature;uint64_t monotonic_ms;} record={value,ms};
- __typeof__(record)*work=&record;
-''' + temperature + r'''
+ daq_report_t report={.monotonic_ms=ms,.temperature=value,.flags=DAQ_REPORT_TEMPERATURE};
+ daq_offer_live_report(&report);
 }
 int main(void){
  assert(DAQ_ADC_READ_RATE_HZ==5556 && DAQ_ACQUISITION_PERIOD_MS==2 && DAQ_BROADCAST_PERIOD_MS==4);
@@ -122,9 +132,9 @@ int main(void){
   if(actual_ms%4==0){
    expected_ms=10000+actual_ms;
    expected_value=100000+(float)expected_ms;snapshot.ext_adc_loadcell_kg1000=expected_value;snapshot.monotonic_ms=expected_ms;
-   daq_publish_loadcell(&snapshot,&calibration,NULL);
+   capture_loadcell(&snapshot,&calibration,NULL);
    expected_value=200000+(float)expected_ms;
-   daq_publish_kg50(expected_value,actual_ms>=5000,expected_ms,&calibration);
+   capture_kg50(expected_value,actual_ms>=5000,expected_ms,&calibration);
   }
   if(actual_ms%100==0){
    expected_ms=10000+actual_ms;publish_temperature(300000+(float)expected_ms,expected_ms);
@@ -157,7 +167,7 @@ int main(void){
  for(unsigned i=0;i<20;i++){
   expected_ms=59000+i*4;expected_value=100000+(float)expected_ms;
   snapshot.monotonic_ms=expected_ms;snapshot.ext_adc_loadcell_kg1000=expected_value;
-  daq_publish_loadcell(&snapshot,&calibration,NULL);
+  capture_loadcell(&snapshot,&calibration,NULL);
  }
  unsigned before=0;for(unsigned i=0;i<7;i++)before+=sent[i];
  fail_next=1;daq_network_process_once(actual_ms);
@@ -173,7 +183,7 @@ int main(void){
         code=code.replace('const float*p=value;', 'const float*p=value; if(type==141){assert(n==3&&p[1]==500.0f&&p[2]==2.5f);}')
         code=code.replace('daq_calibration_t calibration={3,-7};','float pressure[2]={500.0f,2.5f};daq_calibration_t calibration={3,-7};')
         code=code.replace('if(actual_ms%4==0){','if(actual_ms%4==0){pressure[0]=actual_ms<5000?500.0f:NAN;')
-        code=code.replace('daq_publish_loadcell(&snapshot,&calibration,NULL);','daq_publish_loadcell(&snapshot,&calibration,pressure);')
+        code=code.replace('capture_loadcell(&snapshot,&calibration,NULL);','capture_loadcell(&snapshot,&calibration,pressure);')
         self.compile(code)
 
     def test_global_cap_priority_weights_sd_capture_and_input_switch(self):

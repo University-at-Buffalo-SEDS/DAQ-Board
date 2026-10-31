@@ -3,6 +3,7 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
+from sd_fixed_pool_mock import TYPES, FUNCTIONS
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -26,6 +27,7 @@ class RawQueueTest(unittest.TestCase):
 #include <stdlib.h>
 #include <string.h>
 #include "daq_rates.h"
+#include "daq_calibration.h"
 #include "board_uptime.h"
 typedef uintptr_t ULONG;
 typedef void VOID;
@@ -34,8 +36,7 @@ typedef int sd_card_status_t;
 enum {TX_SUCCESS=0,TX_NO_WAIT=0,TX_WAIT_FOREVER=1,SD_CARD_STATUS_OK=0,
  SD_CARD_STATUS_BUSY=1,SD_CARD_STATUS_BACKPRESSURE=2};
 #define SD_RAW_BATCH_MAX DAQ_RAW_BATCH_CAPACITY
-typedef struct {float slope,coefficients[16];} daq_calibration_t;
-typedef struct {size_t tx_byte_pool_size,tx_byte_pool_available;} TX_BYTE_POOL;
+'''+TYPES+r'''
 typedef struct {ULONG messages[1024];unsigned head,tail,count;} TX_QUEUE;
 static unsigned irq_mask;
 static uint32_t __get_PRIMASK(void){return irq_mask;}
@@ -48,33 +49,13 @@ static unsigned g_sd_raw_records_written_count,g_sd_raw_records_io_lost_count;
 static unsigned g_sd_raw_essential_records_dropped,g_sd_raw_optional_records_dropped,g_sd_raw_records_coalesced;
 static unsigned g_sd_raw_batch_drop_count,g_sd_raw_slots_used,g_sd_raw_slots_peak;
 static TX_QUEUE g_sd_raw_queue;
-static int g_sd_pool_mutex;
-static TX_BYTE_POOL g_sd_raw_pool={332U*1024U,332U*1024U};
+static TX_BLOCK_POOL g_sd_raw_pool;
+static unsigned char raw_pool_storage[332U*1024U+8];
 static uint64_t now=456,session=123;
 uint64_t board_uptime_ticks(void){return now;}
 static uint64_t sd_run_snapshot(void){assert(irq_mask);return session;}
-static unsigned force_full,force_send_failure,allocations_count;
-typedef struct {void *base,*returned;size_t bytes;} Allocation;
-static Allocation allocations[1024];
-static int tx_mutex_get(int *mutex,unsigned wait){(void)mutex;(void)wait;return 0;}
-static int tx_mutex_put(int *mutex){(void)mutex;return 0;}
-static int tx_byte_allocate(TX_BYTE_POOL *pool,void **out,size_t bytes,unsigned wait){
- assert(!irq_mask && pool==&g_sd_raw_pool && wait==TX_NO_WAIT);
- const size_t reserved=bytes+16;
- if(force_full||reserved>pool->tx_byte_pool_available)return 1;
- for(unsigned i=0;i<1024;i++)if(!allocations[i].base){
-  void *base=malloc(bytes+16);assert(base);*out=(char*)base+4;
-  allocations[i]=(Allocation){base,*out,reserved};pool->tx_byte_pool_available-=reserved;allocations_count++;return 0;
- }
- abort();
-}
-static int tx_byte_release(void *memory){
- assert(!irq_mask);
- for(unsigned i=0;i<1024;i++)if(allocations[i].returned==memory){
-  g_sd_raw_pool.tx_byte_pool_available+=allocations[i].bytes;free(allocations[i].base);allocations[i]=(Allocation){0};return 0;
- }
- abort();
-}
+static unsigned force_send_failure;
+'''+FUNCTIONS+r'''
 static int tx_queue_send(TX_QUEUE *queue,void *message,unsigned wait){
  assert(irq_mask && queue==&g_sd_raw_queue && wait==TX_NO_WAIT);
  if(force_send_failure||queue->count==1024)return 1;
@@ -100,7 +81,7 @@ static sd_raw_adc_record_t make(uint32_t sequence,unsigned channel){
   .raw_value=(float)sequence/3,.calibrated_value=(float)sequence/2,.adc_temperature_c=26.125f,.adc_temperature_code=123};
 }
 static void basic(void){
- daq_calibration_t calibration={.slope=2};sd_raw_adc_record_t samples[]={make(1,6),make(2,0)};
+ daq_calibration_t calibration={.kg1000_slope=2};sd_raw_adc_record_t samples[]={make(1,6),make(2,0)};
  g_sd_services_initialized=0;assert(sd_card_enqueue_raw_adc_samples(samples,2,&calibration)==SD_CARD_STATUS_BUSY);
  assert(g_sd_raw_essential_records_dropped==2);g_sd_services_initialized=1;
  assert(sd_card_enqueue_raw_adc_samples(samples,2,&calibration)==0);
@@ -113,23 +94,26 @@ static void basic(void){
  assert(sd_card_enqueue_raw_adc_samples(samples,2,&calibration)==0&&g_sd_raw_append_tail!=owned&&owned->count==4);
  sd_free_raw_slot(owned);tail=g_sd_raw_append_tail;
  ++g_sd_route_epoch;assert(sd_card_enqueue_raw_adc_samples(samples,2,&calibration)==0&&g_sd_raw_append_tail!=tail);
- tail=g_sd_raw_append_tail;calibration.slope=3;
+ tail=g_sd_raw_append_tail;calibration.kg1000_slope=3;
  assert(sd_card_enqueue_raw_adc_samples(samples,2,&calibration)==0&&g_sd_raw_append_tail!=tail);
  tail=g_sd_raw_append_tail;session=0;
  assert(sd_card_enqueue_raw_adc_samples(samples,2,&calibration)==0&&g_sd_raw_append_tail!=tail);
  while(g_sd_raw_queue.count)sd_free_raw_slot(take());
- assert(g_sd_raw_pool.tx_byte_pool_available==g_sd_raw_pool.tx_byte_pool_size);
+ assert(g_sd_raw_pool.tx_block_pool_available==g_sd_raw_pool.tx_block_pool_total);
  /* Optional input is shed while required records retain the same payload. */
- g_sd_raw_pool.tx_byte_pool_available=10000;
+ void *held[1024];unsigned held_count=0;
+ while(g_sd_raw_pool.tx_block_pool_available>=(g_sd_raw_pool.tx_block_pool_total+3)/4){
+  held[held_count++]=sd_alloc_raw_slot(SD_RAW_SLOT_CAPACITY);assert(held[held_count-1]);
+ }
  samples[0]=make(20,2);samples[1]=make(21,6);
  assert(sd_card_enqueue_raw_adc_samples(samples,2,&calibration)==SD_CARD_STATUS_BACKPRESSURE);
  owned=take();assert(owned->count==1&&owned->samples[0].record_sequence==21&&g_sd_raw_optional_records_dropped==1);
- sd_free_raw_slot(owned);g_sd_raw_pool.tx_byte_pool_available=g_sd_raw_pool.tx_byte_pool_size;
- force_full=1;assert(sd_card_enqueue_raw_adc_samples(samples,2,&calibration)==SD_CARD_STATUS_BACKPRESSURE);
- assert(g_sd_raw_essential_records_dropped==3&&g_sd_raw_optional_records_dropped==2);force_full=0;
+ sd_free_raw_slot(owned);while(held_count)sd_free_raw_slot(held[--held_count]);
+ mock_force_full=1;assert(sd_card_enqueue_raw_adc_samples(samples,2,&calibration)==SD_CARD_STATUS_BACKPRESSURE);
+ assert(g_sd_raw_essential_records_dropped==3&&g_sd_raw_optional_records_dropped==2);mock_force_full=0;
  force_send_failure=1;assert(sd_card_enqueue_raw_adc_samples(samples,2,&calibration)==SD_CARD_STATUS_BACKPRESSURE);
  assert(g_sd_raw_essential_records_dropped==4&&g_sd_raw_optional_records_dropped==3);
- assert(!g_sd_raw_slots_used&&g_sd_raw_pool.tx_byte_pool_available==g_sd_raw_pool.tx_byte_pool_size);
+ assert(!g_sd_raw_slots_used&&g_sd_raw_pool.tx_block_pool_available==g_sd_raw_pool.tx_block_pool_total);
 }
 static sd_raw_adc_record_t expected[60000];static uint64_t expected_uptime[60000],expected_session[60000];
 static unsigned expected_epoch[60000];static unsigned char seen[60000];static float expected_calibration[60000];
@@ -140,21 +124,21 @@ static void verify(sd_raw_slot_t *slot,unsigned index){
  assert(!memcmp(sample,&expected[sequence],sizeof(*sample)));
  assert(board_uptime_project(slot->uptime_reference,sample->monotonic_ms)==expected_uptime[sequence]);
  assert(slot->session==expected_session[sequence]&&slot->route_epoch==expected_epoch[sequence]);
- assert(slot->calibration.slope==expected_calibration[sequence]);written++;g_sd_raw_records_written_count++;essential_written+=sd_raw_is_essential(sample);
+ assert(slot->calibration.kg1000_slope==expected_calibration[sequence]);written++;g_sd_raw_records_written_count++;essential_written+=sd_raw_is_essential(sample);
 }
 static void stress(unsigned all_protected,unsigned stall_ms){
- daq_calibration_t calibration={.slope=2};sd_raw_slot_t *pending=NULL;unsigned at=0,sequence=0,credit=0;
+ daq_calibration_t calibration={.kg1000_slope=2};sd_raw_slot_t *pending=NULL;unsigned at=0,sequence=0,credit=0;
  unsigned expected_essential=0,peak_backlog=0;
  for(unsigned ms=0;ms<20000;ms++){
   now=4294966000ULL+ms;
   if(ms==4000){session=1234;g_sd_route_epoch++;}
   if(ms==5000){session=0;g_sd_route_epoch++;}
-  if(ms==8000){calibration.slope=3;g_sd_route_epoch++;}
+  if(ms==8000){calibration.kg1000_slope=3;g_sd_route_epoch++;}
   if(!(ms%2)){
    sd_raw_adc_record_t samples[5];const unsigned channels[]={0,6,9,2,3};
    for(unsigned i=0;i<5;i++){
     samples[i]=make(++sequence,channels[all_protected ? i%3 : i]);expected[sequence]=samples[i];expected_uptime[sequence]=now;
-    expected_session[sequence]=session;expected_epoch[sequence]=g_sd_route_epoch;expected_calibration[sequence]=calibration.slope;
+    expected_session[sequence]=session;expected_epoch[sequence]=g_sd_route_epoch;expected_calibration[sequence]=calibration.kg1000_slope;
     expected_essential+=all_protected || i<3;
    }
    (void)sd_card_enqueue_raw_adc_samples(samples,5,&calibration);
@@ -181,14 +165,14 @@ static void stress(unsigned all_protected,unsigned stall_ms){
  else assert(g_sd_raw_optional_records_dropped==0);
  assert(written+g_sd_raw_records_dropped_count==sequence&&written==g_sd_raw_records_enqueued_count);
  assert(g_sd_raw_records_coalesced>0&&g_sd_raw_slots_peak<400);
- assert(g_sd_raw_pool.tx_byte_pool_available==g_sd_raw_pool.tx_byte_pool_size&&!g_sd_raw_append_tail);
+ assert(g_sd_raw_pool.tx_block_pool_available==g_sd_raw_pool.tx_block_pool_total&&!g_sd_raw_append_tail);
  printf("raw stress20s/2.5ksps/%ums stalls: protectedwritten%u protecteddrops%u optionaldrop%u coalesced%u peakbacklog%u slots%u allocations%u\n",
-  stall_ms, essential_written,g_sd_raw_essential_records_dropped,g_sd_raw_optional_records_dropped,g_sd_raw_records_coalesced,peak_backlog,g_sd_raw_slots_peak,allocations_count);
+  stall_ms, essential_written,g_sd_raw_essential_records_dropped,g_sd_raw_optional_records_dropped,g_sd_raw_records_coalesced,peak_backlog,g_sd_raw_slots_peak,mock_allocations_count);
 }
-int main(int argc,char**argv){assert(argc==2);if(!strcmp(argv[1],"basic"))basic();else stress(!strcmp(argv[1],"protected")||!strcmp(argv[1],"capacity-audit"),!strcmp(argv[1],"capacity-audit")?3000:1600);}
+int main(int argc,char**argv){mock_pool_init(&g_sd_raw_pool,raw_pool_storage,332U*1024U,SD_RAW_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE);assert(argc==2);if(!strcmp(argv[1],"basic"))basic();else stress(!strcmp(argv[1],"protected")||!strcmp(argv[1],"capacity-audit"),!strcmp(argv[1],"capacity-audit")?3000:1600);}
 '''
         with tempfile.TemporaryDirectory() as tmp:
             binary=pathlib.Path(tmp)/'raw_queue'
-            subprocess.run(['cc','-std=c11','-O1','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',
+            subprocess.run(['cc','-std=c11','-O1','-Wall','-Wextra','-Werror','-Wno-unused-function','-fsanitize=address,undefined',
                 '-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(binary)],input=program,text=True,check=True)
             for mode in ('basic','stress','protected','capacity-audit'):subprocess.run([str(binary),mode],check=True)

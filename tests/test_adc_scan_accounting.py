@@ -26,32 +26,41 @@ typedef int sd_card_status_t;
 #define SD_CARD_STATUS_BACKPRESSURE 2
 #define SD_RAW_BATCH_MAX DAQ_RAW_BATCH_CAPACITY
 static void __set_PRIMASK(uint32_t n) {(void)n;}
-typedef struct {float slope;} daq_calibration_t;
+typedef struct {float slope,coefficients[16];} daq_calibration_t;
 typedef struct {uint64_t network_unix_ms; uint32_t monotonic_ms, record_sequence;
  int32_t raw_adc_code; float raw_value,calibrated_value,adc_temperature_c;
  int32_t adc_temperature_code; uint8_t channel;} sd_raw_adc_record_t;
-typedef struct {daq_calibration_t calibration; uint64_t uptime_reference,session;
- sd_raw_adc_record_t samples[SD_RAW_BATCH_MAX]; unsigned count;} sd_raw_slot_t;
-static sd_raw_slot_t slots[DAQ_SD_RAW_QUEUE_DEPTH];
+#define SD_RAW_SLOT_CAPACITY 32U
+#define RAW_POOL_BLOCKS 244U
+ typedef struct {uint16_t count,capacity; uint32_t route_epoch; uint64_t uptime_reference;
+ daq_calibration_t calibration; uint64_t session; sd_raw_adc_record_t samples[SD_RAW_SLOT_CAPACITY];} sd_raw_slot_t;
+static sd_raw_slot_t slots[RAW_POOL_BLOCKS];
 static unsigned head,tail,queued,slot_taken,stored,per_channel[16],last_sequence,last_raw;
 static unsigned g_sd_services_initialized=1,g_sd_raw_batch_drop_count;
 static unsigned g_sd_raw_records_dropped_count,g_sd_raw_records_enqueued_count;
 static int g_sd_raw_queue;
+static unsigned g_sd_route_epoch,g_sd_raw_records_coalesced;
+static sd_raw_slot_t *g_sd_raw_append_tail;
+static unsigned sd_raw_optional_admitted(void){return 1;}
+static unsigned sd_raw_is_essential(const sd_raw_adc_record_t *s){return s->channel==0||s->channel==1||s->channel==9||daq_chamber_is_channel(s->channel);}
+static void sd_raw_count_dropped(const sd_raw_adc_record_t *s,unsigned n,unsigned optional){(void)s;(void)n;(void)optional;assert(0);}
+
 static uint64_t board_uptime_ticks(void) {return tick;}
 static uint64_t sd_run_snapshot(void) {return 123;}
 static sd_raw_slot_t *sd_alloc_raw_slot(uint16_t n) {
- assert(n<=SD_RAW_BATCH_MAX); if(queued==DAQ_SD_RAW_QUEUE_DEPTH)return NULL;
- assert(!slot_taken);slot_taken=1;return &slots[head];
+ assert(n<=SD_RAW_SLOT_CAPACITY); if(queued==RAW_POOL_BLOCKS)return NULL;
+ assert(!slot_taken);slot_taken=1;slots[head].capacity=n;return &slots[head];
 }
 static void sd_free_raw_slot(sd_raw_slot_t *s) {assert(s==&slots[head]);slot_taken=0;}
 static int tx_queue_send(int *q,VOID *msg,int wait) {
  assert(q==&g_sd_raw_queue && wait==TX_NO_WAIT && slot_taken);
  assert(*(ULONG*)msg==(ULONG)(uintptr_t)&slots[head]);
- head=(head+1)%DAQ_SD_RAW_QUEUE_DEPTH;queued++;slot_taken=0;return TX_SUCCESS;
+ head=(head+1)%RAW_POOL_BLOCKS;queued++;slot_taken=0;return TX_SUCCESS;
 }
 static void write_owned_sd(void) {
  while(queued) {
   const sd_raw_slot_t *slot=&slots[tail];
+  if(g_sd_raw_append_tail==slot)g_sd_raw_append_tail=NULL;
   for(unsigned i=0;i<slot->count;i++) {
    const sd_raw_adc_record_t *s=&slot->samples[i];
    assert(s->record_sequence==++last_sequence);
@@ -60,7 +69,7 @@ static void write_owned_sd(void) {
    last_raw=(unsigned)s->raw_adc_code;
    per_channel[s->channel]++;stored++;
   }
-  tail=(tail+1)%DAQ_SD_RAW_QUEUE_DEPTH;queued--;
+  tail=(tail+1)%RAW_POOL_BLOCKS;queued--;
  }
 }
 '''
@@ -82,7 +91,7 @@ int main(int argc,char **argv) {
  const uint64_t end=model_us+10000000ULL,start=model_us;
  unsigned scan=registers[7],cfg=registers[2],starts=start_commands,ch=15;
  unsigned sequence=0,drained=0,dma_raw=0,physical_overwrite=0,peak=0,temps=0,aux=0;
- daq_calibration_t calibration={2};
+ daq_calibration_t calibration={.slope=2};
  for(;model_us<end;model_us++) {
   tick=(uint32_t)(model_us/1000);
   if(model_us==next_adc) {
