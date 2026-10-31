@@ -415,3 +415,52 @@ Open-file flags can remain set while pre-cutoff records drain. Cutoff reached wi
 no open files or pending-flush flag does **not** prove lossless capture or that a
 launch file ever opened; use the separate write, flushed and dropped counters.
 This status adds visibility only and does not introduce a launch gate.
+
+
+### SD recording folders
+
+New CSV files are created in `/NO_UTC/` when a valid calendar clock is unavailable,
+`/UTC/` for ordinary timestamped recordings, and `/LAUNCH/` for launch-session
+recordings regardless of clock availability. Directory names describe the context
+at **file creation**. Captured row timestamps, source clocks, sequences, calibration,
+raw ADC samples and remote valve pressure are retained unchanged. Valid zeros are
+retained. No historical files are moved or removed.
+
+An open file keeps its creation category through clock corrections; existing
+calibration/session/size rotations create the next file in the current category.
+This avoids relabelling queued old samples as UTC or adding clock-triggered
+filesystem work to an acquisition turn. The existing launch-stop policy remains
+20 seconds after T0. Both raw and telemetry logs keep their original basenames and
+CSV schema. Directory, collision and media errors retain the existing owner/retry
+behavior rather than discarding samples. FileX operations remain writer-thread only.
+
+`FirmwareSimulator/scripts/inspect-sd-records.py` reads legacy root CSV files and
+new folders recursively, including when inspecting a card image. Supplying a
+folder to the updated inspector discovers nested CSV files without moving them.
+
+
+### OX tank pressure in the main launch recording
+
+`VALVE_PRESSURE_SD_V1` from node `VB` owns the remote `valve_pressure_psi`
+channel: the valve-board ADC code and its firmware-calibrated psi are stored
+unchanged, including valid zeros. File comments identify the source, type,
+units, capture period and source-sequence domain. This is not DAQ chamber PT
+and does not use Ground Station pressure recalibration.
+
+When the VB capture UTC is known, each of the four 4ms samples is routed by
+its capture time: T0 inclusive through T+20s exclusive goes into the main
+`DAQ_LAUNCH` raw file; other samples go into ordinary telemetry. A crossing
+batch is split without duplicating rows. Missing UTC remains explicitly local
+in the existing `time_source` column and ordinary telemetry; no receipt-time UTC
+is substituted for a remote capture. Raw, psi, both source clocks and sequence
+remain available in the same 13-column format. The mask is frozen at atomic
+queue admission in existing message padding; pressure queue storage stays64B
+per batch and its existing200-batch capacity.
+
+Raw and pressure owners serialize their shared main-file generation and failed
+write cursor. Queued pre-cutoff pressure delays launch close until drained.
+A genuinely late packet received after an already committed close creates a
+launch continuation part, rather than reopening/overwriting the closed file
+or pretending its capture was ordinary. Clock corrections do not restamp queued
+rows. Existing part/calibration rotations still apply, so consumers should read
+all matching parts recursively instead of assuming one file per session.

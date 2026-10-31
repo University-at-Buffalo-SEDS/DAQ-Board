@@ -202,6 +202,8 @@ static uint32_t __get_PRIMASK(void){return mask;}
 static void __disable_irq(void){mask=1;}
 static void __set_PRIMASK(uint32_t m){mask=m;}
 static unsigned g_sd_write_error_count,g_sd_csv_rows_written_count,freed,fail;
+static uint8_t g_sd_pressure_raw_retry;
+static uint8_t sd_pressure_raw_epoch_ready(uint32_t epoch){(void)epoch;return 1;}
 static uint64_t file_session=UINT64_MAX;
 static unsigned writes,opens,closes;
 static unsigned sd_calibration_snapshot(unsigned *c){*c=7;return 1;}
@@ -214,12 +216,15 @@ static unsigned sd_write_telemetry_row(const sd_line_slot_t *row){
  if(file_session!=row->session){if(file_session!=UINT64_MAX)++closes;++opens;file_session=row->session;}
  ++writes;return 0;
 }
+/* These cases now exercise ordinary pressure vs CSV ordering; main-launch
+ * pressure/raw epoch arbitration is exercised by test_pressure_launch. */
+static unsigned sd_write_launch_pressure_row(const sd_line_slot_t *s){return sd_write_telemetry_row(s);}
 static void sd_free_slot(sd_line_slot_t *s){(void)s;++freed;}
 """+declarations+r"""
 static ULONG csv[16],pressure[16][SD_PRESSURE_MESSAGE_WORDS];
 static void push_csv(sd_line_slot_t *s){csv[g_sd_queue.tx_queue_enqueued++]=(ULONG)(uintptr_t)s;g_sd_queue.tx_queue_read=csv;}
 static void push_pressure(uint32_t epoch,uint64_t session){
- sd_pressure_message_t p={0};p.route_epoch=epoch;p.session=session;
+ sd_pressure_message_t p={0};p.route_epoch=epoch;p.session=session;p.capture_route=session?15U:0U;
  memcpy(pressure[g_sd_pressure_queue.tx_queue_enqueued++],&p,sizeof(p));g_sd_pressure_queue.tx_queue_read=pressure[0];
 }
 static UINT tx_queue_receive(TX_QUEUE *q,void *data,ULONG wait){

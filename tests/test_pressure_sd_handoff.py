@@ -24,6 +24,7 @@ class PressureSdHandoffTests(unittest.TestCase):
         declarations = declarations.replace('static ULONG g_sd_pressure_queue_storage[SD_PRESSURE_QUEUE_BATCHES * SD_PRESSURE_MESSAGE_WORDS];', '')
         prefix = r'''
 #include "pressure_sd_wire.h"
+#include "sd_calendar.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,6 +46,11 @@ typedef struct { uint16_t len; unsigned calibration; uint64_t session; uint32_t 
 static unsigned g_sd_services_initialized=1, g_sd_launch_closed;
 static unsigned g_sd_write_error_count,g_sd_csv_rows_written_count;
 static uint64_t sd_run_snapshot(void){return g_sd_launch_closed ? 0 : 42;}
+static uint32_t g_sd_launch_route_epoch=77;
+static uint64_t g_sd_session=42,g_sd_close_unix_ms=20000;
+static uint8_t g_sd_pressure_raw_retry;
+static uint8_t sd_pressure_raw_epoch_ready(uint32_t epoch){(void)epoch;return 1;}
+
 static unsigned formatting,writing,fail_write,accepted; static char written[12][384];
 static void sd_format_float(char *out,float v){++formatting;snprintf(out,24,"%.2f",(double)v);}
 static int sd_format_csv_sensor_record(char *out,size_t n,uint64_t utc,uint64_t uptime,const char *sensor,const char *raw,const char *converted,uint32_t sequence){
@@ -52,11 +58,13 @@ static int sd_format_csv_sensor_record(char *out,size_t n,uint64_t utc,uint64_t 
 }
 static unsigned sd_calibration_snapshot(unsigned *value){*value=7;return 1;}
 static unsigned sd_write_telemetry_row(const sd_line_slot_t *slot){
- ++writing;assert(slot->session==(g_sd_launch_closed ? 0U : 42U) && slot->calibration==7);
+ ++writing;assert(slot->session==0U && slot->calibration==7); /* These old handoff inputs have no valid UTC mapping; routing is exercised separately. */
  if(fail_write){fail_write=0;return 1;}
  assert(accepted<12);memcpy(written[accepted++],slot->line,slot->len+1);return 0;
 }
 '''
+        prefix += "\n" + function(source,'sd_pressure_capture_route') + "\n"
+        prefix += "static unsigned sd_write_launch_pressure_row(const sd_line_slot_t *slot){return sd_write_telemetry_row(slot); }\n"
         queues = r'''
 static ULONG messages[2][SD_PRESSURE_MESSAGE_WORDS];static unsigned count;
 static UINT tx_queue_send(TX_QUEUE *q,void *data,ULONG wait){assert(q==&g_sd_pressure_queue && wait==TX_NO_WAIT);if(count==2)return 1;memcpy(messages[count++],data,sizeof(messages[0]));return TX_SUCCESS;}
@@ -102,6 +110,7 @@ int main(void){
         declarations=source[source.index('typedef struct {\n  pressure_sd_batch_t batch;'):source.index('static uint8_t g_sd_pressure_pending;')]
         code=r'''
 #include "pressure_sd_wire.h"
+#include "sd_calendar.h"
 #include <assert.h>
 #include <stdint.h>
 #include <string.h>
@@ -114,6 +123,8 @@ static void __disable_irq(void){mask=1;}
 static void __set_PRIMASK(uint32_t value){mask=value;}
 static uint64_t sd_run_snapshot(void){assert(mask);return 42;}
 static unsigned g_sd_services_initialized=1,g_sd_route_epoch=77;
+static uint32_t g_sd_launch_route_epoch=77;
+static uint64_t g_sd_session=42,g_sd_close_unix_ms=1700000020000ULL;
 static unsigned g_sd_pressure_records_dropped,g_sd_pressure_records_enqueued;
 '''+declarations+r'''
 static UINT tx_queue_send(TX_QUEUE *queue,void *message,ULONG wait){
@@ -122,7 +133,7 @@ static UINT tx_queue_send(TX_QUEUE *queue,void *message,ULONG wait){
  memcpy(queue->storage+queue->tail*SD_PRESSURE_MESSAGE_WORDS,message,SD_PRESSURE_MESSAGE_WORDS*sizeof(ULONG));
  queue->tail=(queue->tail+1)%queue->capacity;queue->count++;return 0;
 }
-'''+function(source,'sd_card_log_pressure_batch')+r'''
+'''+function(source,'sd_pressure_capture_route')+'\n'+function(source,'sd_card_log_pressure_batch')+r'''
 int main(void){
  g_sd_pressure_queue.storage=g_sd_pressure_queue_storage;
  g_sd_pressure_queue.capacity=sizeof(g_sd_pressure_queue_storage)/(SD_PRESSURE_MESSAGE_WORDS*sizeof(ULONG));

@@ -10,6 +10,7 @@
 #include "daq_calibration.h"
 #include "board_uptime.h"
 #include "pressure_sd_wire.h"
+#include "sd_calendar.h"
 #include "sd_float_format.h"
 #include "sd_record_format.h"
 #include "sd_raw_record_format.h"
@@ -111,6 +112,7 @@ static sd_scalar_slot_t *g_sd_scalar_append_tail;
   pressure_sd_batch_t batch;
   uint64_t session;
   uint32_t route_epoch;
+  uint32_t capture_route;
 } sd_pressure_message_t;
 #define SD_PRESSURE_MESSAGE_WORDS ((sizeof(sd_pressure_message_t) + sizeof(ULONG) - 1U) / sizeof(ULONG))
 _Static_assert(SD_PRESSURE_MESSAGE_WORDS <= 16U, "ThreadX pressure message bounds");
@@ -139,6 +141,13 @@ static UINT sd_write_telemetry_row(const sd_line_slot_t *slot){
  assert(slot->len==strlen(e->line)&&!strcmp(slot->line,e->line));return FX_SUCCESS;
 }
 
+/* Optional-owner scenarios retain their existing telemetry mock; explicit
+ * launch routing is covered by the independent actual writer regression. */
+static uint8_t g_sd_pressure_raw_retry;
+static uint64_t g_sd_close_unix_ms;
+static uint32_t g_sd_launch_route_epoch;
+static uint8_t sd_pressure_raw_epoch_ready(uint32_t epoch){(void)epoch;return 1;}
+static UINT sd_write_launch_pressure_row(const sd_line_slot_t*s){return sd_write_telemetry_row(s);}
 /* SOURCE_STORAGE *//* SOURCE_FUNCTION:sd_pool_allocate */
 /* SOURCE_FUNCTION:sd_pool_release */
 /* SOURCE_FUNCTION:sd_alloc_slot */
@@ -166,6 +175,7 @@ static UINT sd_write_telemetry_row(const sd_line_slot_t *slot){
 /* SOURCE_FUNCTION:sd_write_telemetry_item */
 /* SOURCE_FUNCTION:sd_service_telemetry_rows */
 /* SOURCE_FUNCTION:sd_service_pressure_rows */
+/* SOURCE_FUNCTION:sd_pressure_capture_route */
 /* SOURCE_FUNCTION:sd_card_log_pressure_batch */
 /* SOURCE_FUNCTION:sd_card_enqueue_optional_snapshot */
 /* Source-derived raw owner turn: same <=DAQ_RAW_BATCH_CAPACITY cursor/ownership;

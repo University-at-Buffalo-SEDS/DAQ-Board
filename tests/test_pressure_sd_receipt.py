@@ -17,13 +17,13 @@ typedef int SedsResult;
 #define SD_CARD_STATUS_OK 0
 static unsigned g_pressure_sd_batches_received,g_pressure_sd_invalid_batches,calls;
 static int status;
-typedef struct {int ty;const uint8_t *payload;size_t payload_len;}SedsPacketView;
+typedef struct {int ty;const uint8_t *payload;size_t payload_len;const char *sender;size_t sender_len;}SedsPacketView;
 int sd_card_log_pressure_batch(const pressure_sd_batch_t *batch){++calls;assert(batch->first_sequence==42);return status;}
 ''' + helper + r'''
 int main(void){
  pressure_sd_batch_t batch={.first_sequence=42,.uptime_ms=100};uint8_t wire[44];
  assert(pressure_sd_encode(wire,44,&batch)==44);
- SedsPacketView packet={SEDS_DT_VALVE_PRESSURE_SD_V1,wire,44};
+ SedsPacketView packet={SEDS_DT_VALVE_PRESSURE_SD_V1,wire,44,"VB",2};
  assert(pressure_sd_receive(NULL,NULL)==SEDS_OK && calls==0);
  status=1;assert(pressure_sd_receive(&packet,NULL)==SEDS_IO);
  assert(calls==1 && g_pressure_sd_batches_received==0);

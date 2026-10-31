@@ -117,4 +117,9 @@ int main(void) {
     def test_worker_does_not_send_telemetry_to_raw_buffer(self):
         source = (ROOT / "Core/Src/sd_card.c").read_text()
         self.assertIn("sd_write_telemetry_row(pending)", source)
-        self.assertNotIn("sd_write_bytes(slot->line", source)
+        # Ordinary telemetry keeps its independent file/buffer. Only explicit
+        # launch pressure is intentionally archived alongside raw acquisition.
+        from test_sd_raw_queue import function
+        self.assertNotIn("sd_write_bytes", function(source,"sd_service_telemetry_rows"))
+        self.assertNotIn("sd_write_bytes", function(source,"sd_write_telemetry_row"))
+        self.assertIn("sd_write_bytes(slot->line", function(source,"sd_write_launch_pressure_row"))
