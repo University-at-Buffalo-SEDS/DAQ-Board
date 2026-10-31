@@ -147,16 +147,34 @@ processor keeps running. Use `--elf PATH` if a different ELF was flashed.
 If OpenOCD is already serving the DAQ on TCL port 6666, add `--attach`.
 Avoid starting a second debugger against the same probe.
 
-The GUI shows separate CH0/P7 and CH1/P8 traces, with selectable ADC counts,
-nominal volts, raw calibration input, and calibrated kg. **Set plot baseline**
+The GUI defaults to CH0/P7 (1000 kg) and CH9/P6 (50 kg differential). Each
+panel can select CH0–7 or CH9, including chamber pressure on CH6/P4 pin3.
+Select ADC counts, gain-corrected ADC-pin volts, raw input, converted value or
+ADC temperature. CH6 converted values use the default 11:1 divider and
+0–5 V / 0–1000 psi chamber sensor. CH0/CH1 mass uses saved calibration;
+CH9 mass is deliberately absent because P6 calibration belongs to
+GroundStation, not the firmware. Raw P6 differential volts remain available.
+Current firmware has 16-byte entries and 17 calibration floats; the tool checks
+symbol sizes and every immutable flash section against the selected ELF before
+reading samples, then displays its SHA256 identity. Small ring blocks are
+double-read and changed entries discarded so a slow debug scan cannot accept
+a torn whole-ring snapshot. **Set plot baseline**
 subtracts the displayed starting value without changing firmware calibration.
 Stale samples are marked. CSV files are recorded under `build/loadcell-plots/`;
 **Download visible CSV** exports the current time window. Ctrl+C stops the
 script and any OpenOCD process it started. With `--attach`, the existing
 debugger is left running.
 
+The SD health section reads verified firmware counters once per second.
+**WRITING** requires an observed increase in raw or CSV rows, not merely a ready
+flag. It shows init stage, errors, cumulative written/flushed counters, protected
+drops, observed row rate and time since last progress. Missing/failed/stale reads
+show **UNKNOWN**; a ready card without progress shows **READY / IDLE**. Raw and
+PT flush counters are displayed separately because CSV has no independent
+flushed-row counter.
+
 This is a sampled debug capture, not a lossless substitute for the SD logs.
-The firmware's saved calibration is used to calculate kg; identity defaults
+The firmware's saved calibration is used to calculate unsmoothed CH0/CH1 kg; identity defaults
 must be calibrated using GroundStation before treating that display as mass.
 
 ### Analog measurements
