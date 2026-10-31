@@ -23,10 +23,15 @@ typedef struct { unsigned ty; const uint8_t *payload; size_t payload_len; uint64
 enum { SEDS_OK, SEDS_HANDLER_ERROR };
 #define SEDS_DT_DAQ_LOG_CLOCK 139U
 volatile uint32_t g_telemetry_discovery_seen;
-static uint32_t tick, requests, changes;
+static uint32_t tick, requests, changes, mask;
+static uint32_t __get_PRIMASK(void){return mask;}
+static void __disable_irq(void){mask=1;}
+static void __set_PRIMASK(uint32_t m){mask=m;}
 static uint64_t got_session, got_deadline;
 static uint32_t HAL_GetTick(void) { return tick; }
-static void sd_card_set_launch_clock(uint64_t s,uint64_t d) { got_session=s; got_deadline=d; ++changes; }
+static uint64_t before_apply_revision;
+uint64_t daq_log_clock_revision(void);
+static void sd_card_set_launch_clock(uint64_t s,uint64_t d) { assert(!mask); before_apply_revision=daq_log_clock_revision();got_session=s; got_deadline=d; ++changes; }
 static int seds_router_enable_network_variable(SedsRouter *r,unsigned ty,bool read,bool write) {
   assert(r && ty==139 && read && !write); return 0;
 }
@@ -53,6 +58,7 @@ int main(void) {
   for (unsigned i=0;i<8;++i) payload[8+i]=(uint8_t)(end>>(8*i));
   assert(clock_update(&p,NULL)==SEDS_OK && changes==1);
   assert(got_session==7 && got_deadline==end);
+  assert(before_apply_revision==0 && daq_log_clock_revision()==p.timestamp && !mask);
   tick+=1000; daq_log_clock_poll(&router); assert(requests==1);
   /* A recreated router re-registers the read-only subscription and refetches. */
   assert(daq_log_clock_init(&router)==SEDS_OK);

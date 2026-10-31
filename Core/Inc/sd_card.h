@@ -53,6 +53,9 @@ sd_card_status_t sd_card_request_retry(uint32_t token);
 /* Flags, write/flush ages, init stage/retries, accepted/completed token, failures.
  * UINT32_MAX age means no successful progress observed in this boot. */
 void sd_card_health_snapshot(uint32_t words[8]);
+/* Actual storage session/deadline and receiver revision (each lo/hi), flags.
+ * Read-only snapshot; no SDK calls or routing transitions under the IRQ lock. */
+void sd_card_launch_log_snapshot(uint32_t words[7]);
 UINT sd_card_request_flush(void);
 UINT sd_card_notify_power_loss(void);
 UINT sd_card_is_ready(void);

@@ -5,6 +5,9 @@
 #include "fx_api.h"
 #include "main.h"
 #include "daq_log_time.h"
+#ifdef TELEMETRY_ENABLED
+#include "daq_log_clock.h"
+#endif
 #include "sd_float_format.h"
 #include "sd_record_format.h"
 #include "sd_raw_record_format.h"
@@ -1745,6 +1748,30 @@ void sd_card_health_snapshot(uint32_t words[8])
   words[3] = g_sd_init_stage; words[4] = g_sd_retry_count;
   words[5] = g_sd_retry_accepted_token; words[6] = g_sd_retry_completed_token;
   words[7] = g_sd_init_failures;
+  __set_PRIMASK(saved);
+}
+
+/* Read-only diagnostics: never query SDK UTC or advance launch routing here. */
+void sd_card_launch_log_snapshot(uint32_t words[7])
+{
+  if (!words) return;
+#ifdef TELEMETRY_ENABLED
+  /* Read revision before the pair: an interleaved update can only produce an
+   * older revision with a newer pair, never claim a revision before its apply. */
+  const uint64_t revision = daq_log_clock_revision();
+#else
+  const uint64_t revision = 0U;
+#endif
+  const uint32_t saved = __get_PRIMASK(); __disable_irq();
+  const uint64_t session = g_sd_session, deadline = g_sd_close_unix_ms;
+  words[0] = (uint32_t)session; words[1] = (uint32_t)(session >> 32U);
+  words[2] = (uint32_t)deadline; words[3] = (uint32_t)(deadline >> 32U);
+  words[4] = (uint32_t)revision; words[5] = (uint32_t)(revision >> 32U);
+  words[6] = (g_sd_services_initialized ? 1U : 0U) | (g_sd_ready ? 2U : 0U) |
+      (g_sd_deadline_anchored ? 4U : 0U) | (g_sd_launch_closed ? 8U : 0U) |
+      ((session && g_file_open && g_sd_raw_session == session) ? 16U : 0U) |
+      ((session && g_telemetry_file_open && g_sd_telemetry_session == session) ? 32U : 0U) |
+      (g_sd_launch_flush_pending ? 64U : 0U);
   __set_PRIMASK(saved);
 }
 

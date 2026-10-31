@@ -934,6 +934,22 @@
       ],
       "reliable": "Unordered",
       "priority": 240
+    },
+    {
+      "rust": "DaqLaunchLogStatus",
+      "name": "DAQ_LAUNCH_LOG_STATUS",
+      "doc": "Actual DAQ SD launch session, stored close UTC milliseconds, receiver accepted clock revision (each UInt64 lo/hi), flags: services, ready, deadline anchored, cutoff reached, matching raw/telemetry launch handles open, final flush pending. Receipt is not proof of application: compare exact pair and revision.",
+      "class": "Data",
+      "element": {
+        "kind": "Static",
+        "data_type": "UInt32",
+        "count": 7
+      },
+      "endpoints": [
+        "ActuatorGroundStation"
+      ],
+      "reliable": "Off",
+      "priority": 0
     }
   ]
 }

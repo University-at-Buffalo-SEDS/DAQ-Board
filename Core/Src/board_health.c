@@ -67,6 +67,11 @@ void board_health_poll(SedsRouter *router)
   (void)seds_router_log_bytes_ex(router, SEDS_DT_DAQ_SD_HEALTH,
       (const uint8_t *)sd_words, sizeof(sd_words), NULL, true);
   telemetry_unlock();
+  uint32_t launch_words[7]; sd_card_launch_log_snapshot(launch_words);
+  telemetry_lock();
+  (void)seds_router_log_bytes_ex(router, SEDS_DT_DAQ_LAUNCH_LOG_STATUS,
+      (const uint8_t *)launch_words, sizeof(launch_words), NULL, true);
+  telemetry_unlock();
 #endif
 #else
   (void)router;

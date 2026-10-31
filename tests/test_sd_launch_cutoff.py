@@ -116,8 +116,11 @@ int main(void){
  local=24999;assert(sd_run_snapshot()==100);
  local=25000;assert(sd_run_snapshot()==0&&sd_launch_finished());
  publish(100,start+90000,revision+3);assert(sd_run_snapshot()==0); // closed stays closed
+ assert(g_sd_session==100&&g_sd_close_unix_ms==start+24000&&daq_log_clock_revision()==revision+3);
+ /* New receiver receipt MUST NOT pretend the closed storage deadline changed. */
  publish(0,0,revision+4);assert(sd_run_snapshot()==0);
  publish(100,start+90000,revision+5);assert(sd_run_snapshot()==0); // tombstoned ID stays closed
+ assert(g_sd_session==0&&g_sd_close_unix_ms==0&&daq_log_clock_revision()==revision+5);
  utc=start+100000;publish(101,utc+20000,revision+6);assert(sd_run_snapshot()==101);
  publish(0,0,revision+4);publish(0,0,revision+6);assert(sd_run_snapshot()==101);
  publish(0,0,revision+7);assert(sd_run_snapshot()==0); // actual current reset

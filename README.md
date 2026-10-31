@@ -396,3 +396,22 @@ not change the regulator or cycle other rails.
 Sensor and conversion references: [OMEGA PX309](https://assets.omega.com/pdf/test-and-measurement-equipment/pressure/pressure-transducers/PX309-100mv.pdf),
 [Microchip MCP3564R](https://ww1.microchip.com/downloads/aemDocuments/documents/APID/ProductDocuments/DataSheets/MCP3561_2_4R-Data-Sheet-DS200006391C.pdf),
 [TI TPS7A45](https://www.ti.com/lit/ds/symlink/tps7a45.pdf).
+
+### Launch-log receipt diagnostics
+
+`DAQ_LAUNCH_LOG_STATUS` is a low-priority, unreliable seven-word UInt32 companion
+report sent every five seconds alongside existing board/SD health. It reports the
+**actual storage** session and cutoff UTC milliseconds, plus the last receiver
+accepted clock revision, each as low/high UInt32 words. The final word contains
+flags: bit 0 services initialized, 1 card ready, 2 deadline anchored, 3 launch
+admission cutoff reached, 4 current session raw launch file open, 5 current session
+telemetry launch file open, 6 final launch media flush pending.
+
+The revision becomes visible after storage considers the update. An expired or
+closed session can refuse a late correction even though the receiver accepted its
+revision: compare both the exact stored pair and revision to confirm application.
+The snapshot performs no SDK clock reads, I/O, formatting or deadline transitions.
+Open-file flags can remain set while pre-cutoff records drain. Cutoff reached with
+no open files or pending-flush flag does **not** prove lossless capture or that a
+launch file ever opened; use the separate write, flushed and dropped counters.
+This status adds visibility only and does not introduce a launch gate.

@@ -51,8 +51,14 @@ static SedsResult clock_update(const SedsPacketView *packet, void *context)
     clock_session = session;
     reset_ambiguous = stamp < high_before || stamp < UINT64_C(315532800000);
   }
-  clock_revision = stamp; clock_deadline = deadline; clock_value_session = session; revision_seen = true;
+  clock_deadline = deadline; clock_value_session = session; revision_seen = true;
   sd_card_set_launch_clock(session, deadline);
+  /* Publish receipt only after storage has considered this revision. A late
+   * correction may be accepted by the receiver but rejected by the closed
+   * storage session; the status reporter therefore also sends its actual pair. */
+  const uint32_t saved = __get_PRIMASK(); __disable_irq();
+  clock_revision = stamp;
+  __set_PRIMASK(saved);
   return SEDS_OK;
 }
 SedsResult daq_log_clock_init(SedsRouter *router)
@@ -69,4 +75,12 @@ SedsResult daq_log_clock_poll(SedsRouter *router)
   if (clock_seen || !g_telemetry_discovery_seen || (uint32_t)(now-last_request) < 500U) return SEDS_OK;
   last_request = now;
   return seds_router_request_managed_variable(router, SEDS_DT_DAQ_LOG_CLOCK);
+}
+
+uint64_t daq_log_clock_revision(void)
+{
+  const uint32_t saved = __get_PRIMASK(); __disable_irq();
+  const uint64_t revision = clock_revision;
+  __set_PRIMASK(saved);
+  return revision;
 }
