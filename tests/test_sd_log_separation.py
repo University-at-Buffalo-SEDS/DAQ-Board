@@ -15,7 +15,7 @@ class LogSeparationTests(unittest.TestCase):
             "static UINT sd_marker_exists", 1)[0]
         raw = "static UINT sd_select_calibration" + source.split(
             "static UINT sd_select_calibration", 1)[1].split(
-            "static uint8_t sd_service_telemetry_rows", 1)[0]
+            "static UINT sd_write_telemetry_item", 1)[0]
         harness = r"""
 #include <assert.h>
 #include <stdint.h>

@@ -93,18 +93,30 @@ Its raw formatter avoids general `snprintf`, caches unchanged temperature text,
 and reuses identical raw/calibrated text. No sample times or measurements are
 cached in place of newer samples.
 
-Small acquisition batches append into a queued sixteen-record tail only when
+Small acquisition batches append into a queued thirty-two-record tail only when
 calibration, launch session and route epoch match. The writer atomically takes
 ownership before reading a batch; acquisition cannot modify that batch afterward.
 Every record retains its raw code, captured clock, sequence and calibration.
 
-When raw free space falls below 25%, optional ADC channels are shed before the
+When more than 256 accepted raw records remain unwritten (roughly 100 ms at the
+observed acquisition rate), or raw free space falls below 25%, optional ADC
+channels are shed before the
 loadcells (CH0, CH1/P6 CH9) or configured chamber-pressure channel. Optional
 telemetry is also shed before formatting if raw storage is pressured or less
 than 75% of its row pool remains free. Loadcell mirrors, including the selected
 P6 input, bypass this optional gate. The separate valve-pressure queue holds
-512 samples, just over two seconds at 250 samples/s. This reserve is funded
-from the optional telemetry pool; total static memory does not increase.
+800 samples, 3.2 seconds at 250 samples/s. Required numeric telemetry uses
+compact batches of captured values and clocks, sharing calibration/session
+metadata and expanding to unchanged CSV in the writer. The line pool is 62 KiB;
+the reclaimed RAM funds a 332 KiB raw pool. Larger raw allocations retain the
+original sixteen-record service turn so other SD streams are not starved.
+
+Native queue tests save all 50,000 protected raw samples at 2,500 samples/s
+and all 13,000 numeric telemetry rows at 500 rows/s through three-second stalls
+12 seconds apart, with unstalled drain capacities of 3,500 and 1,000 rows/s
+respectively. These tests verify finite burst reserve, not unlimited card
+throughput; sustained production above drain capacity still exhausts RAM.
+Physical card qualification must independently show zero protected drops.
 
 `g_sd_raw_essential_records_dropped` and
 `g_sd_essential_telemetry_dropped` must remain zero during qualification.
@@ -112,6 +124,26 @@ from the optional telemetry pool; total static memory does not increase.
 identify optional shedding, while `g_sd_raw_records_coalesced` shows batching.
 Card errors and outages can still exhaust finite buffers; written/flushed/drop
 counters distinguish acquisition admission from durable media completion.
+
+Contiguous FAT preallocation is **off by default** in
+`Core/Inc/sd_storage_config.h` (`DAQ_SD_PREALLOCATE_ENABLE=0`). Hardware
+qualification measured a 3.7-second allocation stall and increased protected
+sample loss; ordinary FileX writes retain the compact queues and early optional
+shedding without that scan. Experimental opt-in uses
+`DAQ_SD_PREALLOCATE_ENABLE=1`. In that mode, each open log reserves FAT clusters
+in 2 MiB increments, topping up below
+256 KiB only while the raw backlog is low, unless the next write already needs
+space. File size remains the actual CSV length. The ordinary once-per-second
+media flush and both FAT copies remain enabled. A normal close uses
+`fx_file_truncate_release` to free the unwritten reserve. An unclean power loss
+can leave up to 2.25 MiB of reserved tail per open log, plus cluster rounding,
+until filesystem repair;
+existing logs are not rewritten or automatically formatted. A fragmented-card
+`FX_NO_MORE_SPACE` disables that file's reservation hint and leaves normal writes
+enabled. Genuine I/O errors preserve buffered data for retry. Preallocation
+attempts/fallbacks/errors and its maximum observed latency have separate counters.
+FileX searches for a consecutive FAT chain, so reservation byte size is bounded
+but its search time on a nearly full/fragmented card is not a real-time guarantee.
 
 ## Network and GroundStation
 

@@ -97,7 +97,7 @@ int main(void){
             subprocess.run(['cc','-std=c11','-O1','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(executable)],input=code,text=True,check=True)
             subprocess.run([str(executable)],check=True)
 
-    def test_pressure_queue_buffers_more_than_two_seconds_without_pool_allocation(self):
+    def test_pressure_queue_buffers_more_than_three_seconds_without_pool_allocation(self):
         source=(ROOT/'Core/Src/sd_card.c').read_text()
         declarations=source[source.index('typedef struct {\n  pressure_sd_batch_t batch;'):source.index('static uint8_t g_sd_pressure_pending;')]
         code=r'''
@@ -126,14 +126,14 @@ static UINT tx_queue_send(TX_QUEUE *queue,void *message,ULONG wait){
 int main(void){
  g_sd_pressure_queue.storage=g_sd_pressure_queue_storage;
  g_sd_pressure_queue.capacity=sizeof(g_sd_pressure_queue_storage)/(SD_PRESSURE_MESSAGE_WORDS*sizeof(ULONG));
- assert(g_sd_pressure_queue.capacity>=128);
- for(unsigned i=0;i<128;i++){
+ assert(g_sd_pressure_queue.capacity==200);
+ for(unsigned i=0;i<200;i++){
   pressure_sd_batch_t batch={.uptime_ms=100+i*16,.unix_ms=1700000000000ULL+i*16,.first_sequence=i*4};
   for(unsigned j=0;j<4;j++){batch.raw[j]=i*4+j;batch.psi[j]=(float)(i*4+j)/3;}
   assert(sd_card_log_pressure_batch(&batch)==SD_CARD_STATUS_OK);
  }
- assert(g_sd_pressure_records_enqueued==512&&!g_sd_pressure_records_dropped);
- for(unsigned i=0;i<128;i++){
+ assert(g_sd_pressure_records_enqueued==800&&!g_sd_pressure_records_dropped);
+ for(unsigned i=0;i<200;i++){
   sd_pressure_message_t message;
   memcpy(&message,g_sd_pressure_queue.storage+i*SD_PRESSURE_MESSAGE_WORDS,sizeof(message));
   assert(message.batch.uptime_ms==100+i*16&&message.batch.unix_ms==1700000000000ULL+i*16);

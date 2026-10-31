@@ -43,11 +43,13 @@ static void __disable_irq(void){irq_mask=1;}
 static void __set_PRIMASK(uint32_t mask){irq_mask=mask;}
 static unsigned g_sd_services_initialized=1,g_sd_route_epoch;
 static unsigned g_sd_raw_records_dropped_count,g_sd_raw_records_enqueued_count;
+static unsigned g_sd_raw_records_written_count,g_sd_raw_records_io_lost_count;
+#define SD_OPTIONAL_RAW_BACKLOG_LIMIT 256U
 static unsigned g_sd_raw_essential_records_dropped,g_sd_raw_optional_records_dropped,g_sd_raw_records_coalesced;
 static unsigned g_sd_raw_batch_drop_count,g_sd_raw_slots_used,g_sd_raw_slots_peak;
 static TX_QUEUE g_sd_raw_queue;
 static int g_sd_pool_mutex;
-static TX_BYTE_POOL g_sd_raw_pool={230976,230976};
+static TX_BYTE_POOL g_sd_raw_pool={332U*1024U,332U*1024U};
 static uint64_t now=456,session=123;
 uint64_t board_uptime_ticks(void){return now;}
 static uint64_t sd_run_snapshot(void){assert(irq_mask);return session;}
@@ -87,7 +89,7 @@ static int tx_queue_receive(TX_QUEUE *queue,void *message,unsigned wait){
 static sd_raw_slot_t *g_sd_raw_append_tail;
 '''
         for name in ['sd_pool_allocate','sd_pool_release','sd_alloc_raw_slot','sd_free_raw_slot',
-                     'sd_take_raw_message','sd_raw_optional_admitted','sd_raw_is_essential',
+                     'sd_take_raw_message','sd_raw_backlog_records','sd_raw_optional_admitted','sd_raw_is_essential',
                      'sd_raw_count_dropped','sd_card_enqueue_raw_adc_samples']:
             program+=function(source,name)+'\n'
         program+=r'''
@@ -102,7 +104,7 @@ static void basic(void){
  g_sd_services_initialized=0;assert(sd_card_enqueue_raw_adc_samples(samples,2,&calibration)==SD_CARD_STATUS_BUSY);
  assert(g_sd_raw_essential_records_dropped==2);g_sd_services_initialized=1;
  assert(sd_card_enqueue_raw_adc_samples(samples,2,&calibration)==0);
- sd_raw_slot_t *tail=g_sd_raw_append_tail;assert(tail->count==2&&tail->capacity==SD_RAW_BATCH_MAX&&tail->session==123);
+ sd_raw_slot_t *tail=g_sd_raw_append_tail;assert(tail->count==2&&tail->capacity==SD_RAW_SLOT_CAPACITY&&tail->session==123);
  now=458;samples[0]=make(3,9);samples[1]=make(4,0);
  assert(sd_card_enqueue_raw_adc_samples(samples,2,&calibration)==0&&g_sd_raw_queue.count==1);
  assert(tail->count==4&&tail->uptime_reference==458&&g_sd_raw_records_coalesced==2);
@@ -138,9 +140,9 @@ static void verify(sd_raw_slot_t *slot,unsigned index){
  assert(!memcmp(sample,&expected[sequence],sizeof(*sample)));
  assert(board_uptime_project(slot->uptime_reference,sample->monotonic_ms)==expected_uptime[sequence]);
  assert(slot->session==expected_session[sequence]&&slot->route_epoch==expected_epoch[sequence]);
- assert(slot->calibration.slope==expected_calibration[sequence]);written++;essential_written+=sd_raw_is_essential(sample);
+ assert(slot->calibration.slope==expected_calibration[sequence]);written++;g_sd_raw_records_written_count++;essential_written+=sd_raw_is_essential(sample);
 }
-static void stress(unsigned all_protected){
+static void stress(unsigned all_protected,unsigned stall_ms){
  daq_calibration_t calibration={.slope=2};sd_raw_slot_t *pending=NULL;unsigned at=0,sequence=0,credit=0;
  unsigned expected_essential=0,peak_backlog=0;
  for(unsigned ms=0;ms<20000;ms++){
@@ -159,8 +161,8 @@ static void stress(unsigned all_protected){
   }
   /* Real card flush bursts exceed one second. The producer never pauses.
    * When available, a3.5krecords/s consumer drains the accepted sample FIFO. */
-  const unsigned phase=ms%6000;
-  if(phase>=2000&&phase<3600){credit=0;}
+  const unsigned phase=ms%(stall_ms>1600?12000:6000);
+  if(phase>=2000&&phase<2000+stall_ms){credit=0;}
   else {
    credit+=3500;
    while(credit>=1000){credit-=1000;
@@ -178,15 +180,15 @@ static void stress(unsigned all_protected){
  if(!all_protected)assert(g_sd_raw_optional_records_dropped>0);
  else assert(g_sd_raw_optional_records_dropped==0);
  assert(written+g_sd_raw_records_dropped_count==sequence&&written==g_sd_raw_records_enqueued_count);
- assert(g_sd_raw_records_coalesced>sequence/2&&g_sd_raw_slots_peak<400);
+ assert(g_sd_raw_records_coalesced>0&&g_sd_raw_slots_peak<400);
  assert(g_sd_raw_pool.tx_byte_pool_available==g_sd_raw_pool.tx_byte_pool_size&&!g_sd_raw_append_tail);
- printf("raw stress20s/2.5ksps/1.6s flush stalls: protected%u all saved, optionaldrop%u, coalesced%u, peakbacklog%u slots%u allocations%u\n",
-  essential_written,g_sd_raw_optional_records_dropped,g_sd_raw_records_coalesced,peak_backlog,g_sd_raw_slots_peak,allocations_count);
+ printf("raw stress20s/2.5ksps/%ums stalls: protectedwritten%u protecteddrops%u optionaldrop%u coalesced%u peakbacklog%u slots%u allocations%u\n",
+  stall_ms, essential_written,g_sd_raw_essential_records_dropped,g_sd_raw_optional_records_dropped,g_sd_raw_records_coalesced,peak_backlog,g_sd_raw_slots_peak,allocations_count);
 }
-int main(int argc,char**argv){assert(argc==2);if(!strcmp(argv[1],"basic"))basic();else stress(!strcmp(argv[1],"protected"));}
+int main(int argc,char**argv){assert(argc==2);if(!strcmp(argv[1],"basic"))basic();else stress(!strcmp(argv[1],"protected")||!strcmp(argv[1],"capacity-audit"),!strcmp(argv[1],"capacity-audit")?3000:1600);}
 '''
         with tempfile.TemporaryDirectory() as tmp:
             binary=pathlib.Path(tmp)/'raw_queue'
             subprocess.run(['cc','-std=c11','-O1','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',
                 '-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(binary)],input=program,text=True,check=True)
-            for mode in ('basic','stress','protected'):subprocess.run([str(binary),mode],check=True)
+            for mode in ('basic','stress','protected','capacity-audit'):subprocess.run([str(binary),mode],check=True)

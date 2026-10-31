@@ -20,6 +20,7 @@ class SdLifecycleTests(unittest.TestCase):
         self.run_c(r'''
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 #include <assert.h>
 typedef uintptr_t ULONG;
 typedef struct { uint32_t route_epoch; } sd_line_slot_t;
@@ -39,6 +40,8 @@ static unsigned tx_queue_receive(unsigned *q, ULONG *message, unsigned wait) {
 }
 static unsigned sd_write_telemetry_row(sd_line_slot_t *s) { (void)s; return fail; }
 static void sd_free_slot(sd_line_slot_t *s) { (void)s; ++freed; }
+static unsigned sd_take_line_message(ULONG *message){return tx_queue_receive(&g_sd_queue,message,TX_NO_WAIT);}
+static unsigned sd_write_telemetry_item(sd_line_slot_t *s,uint16_t *i,uint8_t *done){(void)i;*done=1;return sd_write_telemetry_row(s);}
 ''' + functions + r'''
 int main(void) {
   for (unsigned i=0;i<300000;i++) {
@@ -89,6 +92,7 @@ static UINT fx_system_date_set(unsigned y,unsigned m,unsigned d) {
 static UINT fx_system_time_set(unsigned h,unsigned m,unsigned s) {
   (void)h; (void)m; (void)s; return 0;
 }
+static UINT sd_release_file_space(FX_FILE *f) {(void)f;return 0;}
 static UINT fx_file_close(FX_FILE *f) { (void)f; ++closes; return 0; }
 static UINT fx_file_date_time_set(unsigned *media,char *name,unsigned y,unsigned m,
                                 unsigned d,unsigned h,unsigned min,unsigned sec) {

@@ -25,9 +25,10 @@ static FX_FILE g_sd_telemetry_file;
 static int g_telemetry_file_open=1;
 static UCHAR g_sd_telemetry_write_buffer[4096];
 static size_t g_sd_telemetry_write_buffer_len;
-static unsigned g_sd_write_error_count, calls, fail;
+static unsigned g_sd_write_error_count, calls, fail, reserve_fail;
 static char disk[20000];
 static size_t written;
+static UINT sd_prepare_file_space(FX_FILE *f,size_t n) {(void)f;(void)n;return reserve_fail?FX_IO_ERROR:0;}
 static UINT fx_file_seek(FX_FILE *f, ULONG offset) { f->fx_file_current_file_offset=offset; return 0; }
 static UINT fx_file_write(FX_FILE *f, void *p, ULONG bytes) {
   assert(f==&g_sd_telemetry_file && bytes && bytes<=4096);
@@ -44,9 +45,13 @@ int main(void) {
   for(unsigned i=0;i<400;++i) assert(sd_write_telemetry_bytes(row,sizeof(row)-1)==0);
   assert(calls<8); /* Not one file write per row. */
   assert(written+g_sd_telemetry_write_buffer_len==400*(sizeof(row)-1));
-  fail=1; size_t tail=g_sd_telemetry_write_buffer_len;
-  assert(sd_flush_telemetry_pending()==FX_IO_ERROR);
+  size_t tail=g_sd_telemetry_write_buffer_len;
+  unsigned before_reserve=calls;reserve_fail=1;
+  assert(sd_flush_telemetry_pending()==FX_IO_ERROR && calls==before_reserve);
   assert(g_sd_telemetry_write_buffer_len==tail && g_sd_write_error_count==1);
+  reserve_fail=0;fail=1;
+  assert(sd_flush_telemetry_pending()==FX_IO_ERROR);
+  assert(g_sd_telemetry_write_buffer_len==tail && g_sd_write_error_count==2);
   fail=0;
   assert(sd_flush_telemetry_pending()==0 && !g_sd_telemetry_write_buffer_len);
   assert(written==400*(sizeof(row)-1));

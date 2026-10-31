@@ -41,6 +41,8 @@ static uint64_t network_ms = 1234;
 static uint64_t daq_log_unix_ms(void) { return network_ms; }
 static uint64_t daq_log_monotonic_ms(void) { return 30; }
 static int sd_enqueue_line(sd_line_slot_t *s) { assert(s->len); enqueued++; return SD_CARD_STATUS_OK; }
+static int sd_scalar_sensor_index(const char *name){(void)name;return -1;}
+static int sd_enqueue_scalar(uint8_t s,uint64_t n,uint64_t u,float v,const daq_calibration_t *c){(void)s;(void)n;(void)u;(void)v;(void)c;assert(0);return -1;}
 ''' + required + adapter + r'''
 int main(void) {
   assert(sd_card_enqueue_csv_row("kg1000_network", 20, 0.25f, NULL)==SD_CARD_STATUS_BUSY);

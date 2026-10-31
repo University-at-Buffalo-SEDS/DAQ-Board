@@ -12,7 +12,7 @@ class SdPartitionDriverTests(unittest.TestCase):
         source = (ROOT / "Core/Src/sd_card.c").read_text()
         driver = "static VOID sd_filex_driver" + source.split(
             "static VOID sd_filex_driver", 1)[1].split(
-            "static void sd_update_filesystem_clock", 1)[0]
+            "/* Reserve FAT chains", 1)[0]
         code = r"""
 #include <assert.h>
 #include <stdint.h>

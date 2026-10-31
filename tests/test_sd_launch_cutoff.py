@@ -221,6 +221,8 @@ static UINT tx_queue_receive(TX_QUEUE *q,void *data,ULONG wait){
  else{assert(q==&g_sd_pressure_queue);memcpy(data,pressure[0],sizeof(pressure[0]));memmove(pressure[0],pressure[1],(q->tx_queue_enqueued-1)*sizeof(pressure[0]));}
  --q->tx_queue_enqueued;return 0;
 }
+static unsigned sd_take_line_message(ULONG *message){return tx_queue_receive(&g_sd_queue,message,TX_NO_WAIT);}
+static unsigned sd_write_telemetry_item(sd_line_slot_t *s,uint16_t *i,uint8_t *done){(void)i;*done=1;return sd_write_telemetry_row(s);}
 """+function(source,'sd_telemetry_epoch_ready')+'\n'+function(source,'sd_service_telemetry_rows')+'\n'+function(source,'sd_service_pressure_rows')+r"""
 int main(void){
  sd_line_slot_t launch={.route_epoch=UINT32_MAX,.session=10,.len=1};
