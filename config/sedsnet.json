@@ -698,7 +698,7 @@
     {
       "rust": "DaqLogClock",
       "name": "DAQ_LOG_CLOCK",
-      "doc": "Retained DAQ log session: two little-endian u64 values (session ID, T+120s UTC deadline); zeros reset to normal recording.",
+      "doc": "Retained DAQ log session: two little-endian u64 values (session ID, T+20s UTC deadline); zeros reset to normal recording.",
       "reliable": "Ordered",
       "priority": 16,
       "class": "Data",
