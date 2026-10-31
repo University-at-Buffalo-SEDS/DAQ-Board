@@ -529,6 +529,23 @@ static SedsResult pressure_sd_receive(const SedsPacketView *packet, void *contex
   return SEDS_OK;
 }
 
+static SedsResult sd_retry_receive(const SedsPacketView *packet, void *context)
+{
+  (void)context;
+  if (!packet) return SEDS_HANDLER_ERROR;
+  /* SD_CARD also carries calibration/clock controls. Other handlers own those
+   * types; ignoring them must not turn their accepted delivery into an error. */
+  if (packet->ty != SEDS_DT_DAQ_SD_RETRY) return SEDS_OK;
+  if (!packet->sender || !((packet->sender_len == 2U && memcmp(packet->sender, "GS", 2U) == 0) ||
+      (packet->sender_len == 4U && memcmp(packet->sender, "RRLS", 4U) == 0)) ||
+      !packet->payload || packet->payload_len != 4U) return SEDS_HANDLER_ERROR;
+  const uint8_t *p = packet->payload;
+  const uint32_t token = (uint32_t)p[0] | ((uint32_t)p[1] << 8U) |
+      ((uint32_t)p[2] << 16U) | ((uint32_t)p[3] << 24U);
+  const sd_card_status_t status = sd_card_request_retry(token);
+  return status == SD_CARD_STATUS_OK ? SEDS_OK : status == SD_CARD_STATUS_BUSY ? SEDS_IO : SEDS_HANDLER_ERROR;
+}
+
 SedsResult init_telemetry_router(void) {
 #ifndef TELEMETRY_ENABLED
   return SEDS_OK;
@@ -564,6 +581,7 @@ SedsResult init_telemetry_router(void) {
 #endif
 
   static const SedsLocalEndpointDesc locals[] = {
+      {.endpoint = SEDS_EP_SD_CARD, .packet_handler = sd_retry_receive, .packed_handler = NULL, .user = NULL},
       {.endpoint = SEDS_EP_VALVE_PRESSURE_LOG, .packet_handler = pressure_sd_receive, .packed_handler = NULL, .user = NULL},
       {
           .endpoint = SEDS_EP_HEART_BEAT,

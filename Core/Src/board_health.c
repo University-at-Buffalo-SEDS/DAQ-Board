@@ -4,6 +4,7 @@
 #include "board_watchdog.h"
 #include "telemetry.h"
 #include "main.h"
+#include "sd_card.h"
 #include <stdint.h>
 #include <stdbool.h>
 #if __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
@@ -60,6 +61,13 @@ void board_health_poll(SedsRouter *router)
       (const uint8_t *)words, sizeof(words), NULL, true);
   telemetry_unlock();
   if (result != SEDS_OK) ++failures;
+#if !defined(DISABLE_SD_CARD) || DISABLE_SD_CARD == 0
+  uint32_t sd_words[8]; sd_card_health_snapshot(sd_words);
+  telemetry_lock();
+  (void)seds_router_log_bytes_ex(router, SEDS_DT_DAQ_SD_HEALTH,
+      (const uint8_t *)sd_words, sizeof(sd_words), NULL, true);
+  telemetry_unlock();
+#endif
 #else
   (void)router;
 #endif

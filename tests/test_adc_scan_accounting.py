@@ -11,6 +11,7 @@ import tempfile
 import unittest
 
 from test_mcp3564r_driver import HAL, HARNESS, ROOT
+from test_sd_raw_queue import function
 
 MODEL = r'''
 #include <stdio.h>
@@ -156,10 +157,7 @@ int main(int argc,char **argv) {
 
 class ScanAccountingTests(unittest.TestCase):
     def test_fresh_density_owned_sd_and_explicit_stall_losses(self):
-        enqueue = (ROOT/'Core/Src/sd_card.c').read_text().split(
-            'sd_card_status_t sd_card_enqueue_raw_adc_samples(', 1)[1].split(
-            'UINT sd_card_request_flush(void)', 1)[0]
-        enqueue = 'sd_card_status_t sd_card_enqueue_raw_adc_samples('+enqueue
+        enqueue = function((ROOT/'Core/Src/sd_card.c').read_text(), 'sd_card_enqueue_raw_adc_samples')
         with tempfile.TemporaryDirectory() as tmp:
             p=pathlib.Path(tmp)
             (p/'stm32u5xx_hal.h').write_text(HAL)

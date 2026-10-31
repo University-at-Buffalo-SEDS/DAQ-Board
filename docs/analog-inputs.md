@@ -145,6 +145,47 @@ attempts/fallbacks/errors and its maximum observed latency have separate counter
 FileX searches for a consecutive FAT chain, so reservation byte size is bounded
 but its search time on a nearly full/fragmented card is not a real-time guarantee.
 
+## SD health and explicit retry
+
+DAQ retains the existing `BOARD_HEALTH` v1 static24-word report. A separate
+`DAQ_SD_HEALTH` static8-word UInt32 report is queued every five seconds so old
+relay schemas do not conflict with a changed message shape.
+
+| Word | Meaning |
+| --- | --- |
+| 0 | Flags: bit0 services initialized, bit1 ready, bit2 launch logging finished, bit3 manual retry queued/in progress |
+| 1 | Age since an actually successful sector-write chunk, milliseconds |
+| 2 | Age since an actually successful FileX media flush, milliseconds |
+| 3 | SD initialization stage |
+| 4 | Initialization retry count |
+| 5 | Last accepted manual retry token |
+| 6 | Last completed manual retry token |
+| 7 | Initialization failure count |
+
+Ages use the extended monotonic HAL millisecond clock, not UTC. `UINT32_MAX`
+means no successful write/flush has been observed; very old valid ages saturate
+at `UINT32_MAX-1`. Readiness alone is not evidence of writing. Existing raw
+written/flushed/drop counters remain in `BOARD_HEALTH`; GroundStation combines
+these with fresh companion status and separately marks stale/unavailable health.
+
+`DAQ_SD_RETRY` is a direct static UInt32 command to `SD_CARD` (endpoint100), with
+unordered reliable delivery. Its canonical type ID is24116261; companion health
+ID is92486907. Only exact `GS`/`RRLS` senders with one nonzero little-endian token
+are accepted. The handler performs no I/O: it only queues the token. Repeated
+recent tokens are deduplicated (eight-token window); another new token while a
+retry is pending/in progress is refused for transport retry. This is not a
+managed variable and must never be replayed as saved settings.
+
+The storage writer consumes a retry only between operations. It reinitializes
+transport and resumes the same CID/geometry while preserving open FileX state,
+pending bytes, launch cutoff and counters. A replacement card is refused.
+A manual retry never permits formatting, including subsequent automatic retries
+in that boot; invalid or unmarked unmounted media fail closed. Completion means
+one initialization attempt finished, **not** that the card is ready or writing.
+An unready card can take tens of seconds to finish HAL initialization, while
+acquisition and networking continue independently. These paths have host fault
+regressions and ARM builds; physical qualification is still required.
+
 ## Network and GroundStation
 
 Loadcell report windows and SD mirrors default to **250 records/s each**, with

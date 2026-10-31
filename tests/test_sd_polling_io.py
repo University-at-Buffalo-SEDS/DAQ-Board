@@ -104,7 +104,13 @@ typedef unsigned char UCHAR;
 #define FX_SUCCESS 0U
 #define FX_IO_ERROR 1U
 static unsigned g_sd_ready=1;
-static unsigned tick, reinit;
+static unsigned tick, reinit, mask;
+static uint64_t g_sd_last_sector_write_ms;
+static unsigned g_sd_write_progress_valid;
+static uint64_t board_uptime_ticks(void){return tick;}
+static uint32_t __get_PRIMASK(void){return mask;}
+static void __disable_irq(void){mask=1;}
+static void __set_PRIMASK(uint32_t m){mask=m;}
 static unsigned g_sd_max_read_ms, g_sd_max_write_ms;
 static unsigned HAL_GetTick(void) { return ++tick; }
 static unsigned sd_storage_io_requires_reinit(void){return reinit;}

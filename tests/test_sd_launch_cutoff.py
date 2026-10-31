@@ -23,6 +23,7 @@ class LaunchCutoffTests(unittest.TestCase):
         self.execute(r"""
 #include <assert.h>
 #include <stdint.h>
+#define sd_media_flush() fx_media_flush(&g_sd_media)
 #include "board_uptime.h"
 static uint64_t utc=1800000000000ULL;
 static uint32_t raw=UINT32_MAX-5000,mask;
@@ -72,6 +73,7 @@ int main(void){
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
+#define sd_media_flush() fx_media_flush(&g_sd_media)
 #include <stddef.h>
 #include "sd_calendar.h"
 typedef int SedsRouter;typedef int SedsResult;
@@ -138,6 +140,7 @@ int main(void){
         self.execute(r"""
 #include <assert.h>
 #include <stdint.h>
+#define sd_media_flush() fx_media_flush(&g_sd_media)
 #define FX_SUCCESS 0U
 static unsigned g_file_open=1,g_telemetry_file_open=1,g_sd_launch_flush_pending;
 static uint64_t g_sd_raw_session=10,g_sd_telemetry_session=10;
@@ -179,6 +182,7 @@ int main(void){
 #include "pressure_sd_wire.h"
 #include <assert.h>
 #include <stdint.h>
+#define sd_media_flush() fx_media_flush(&g_sd_media)
 #include <stdio.h>
 #include <stddef.h>
 #include <string.h>

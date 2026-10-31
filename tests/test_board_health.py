@@ -15,6 +15,7 @@ typedef int SedsRouter;
 typedef int SedsResult;
 #define SEDS_OK 0
 #define SEDS_DT_BOARD_HEALTH 42
+#define SEDS_DT_DAQ_SD_HEALTH 43
 #define SEDS_EK_UNSIGNED 0
 #define BOARD_UPTIME_FREQUENCY_HZ 1000U
 #define SD_AVAILABLE
@@ -26,6 +27,7 @@ volatile uint32_t g_telemetry_tlsf_live_bytes=100,g_telemetry_tlsf_peak_bytes=20
 volatile uint32_t g_can_tx_rejected=11,g_can_tx_high_water=12,g_gateway_uart_rx_ring_drops=13;
 volatile uint32_t g_sd_raw_records_enqueued_count=0xf00d1234U,g_sd_raw_records_written_count=15,g_sd_raw_records_dropped_count=16,g_sd_raw_records_flushed_count=17,g_sd_raw_records_io_lost_count=18,g_sd_write_error_count=19,g_sd_max_write_ms=20;
 volatile uint32_t g_sd_enqueued_records=0xf00d1234U,g_sd_written_records=15,g_sd_flushed_records=17,g_sd_format_errors=16,g_sd_lock_contention_drops=18,g_sd_unavailable_drops=19,g_sd_shutdown_lost_records=20,g_sd_write_errors=21;
+void sd_card_health_snapshot(uint32_t words[8]){for(unsigned i=0;i<8;i++)words[i]=i+70;}
 void board_temperature_poll(void){}
 uint32_t board_temperature_health_flags(void){return 0x17bd0100U;}
 uint64_t board_uptime_ticks(void){return uptime;}
@@ -39,7 +41,9 @@ size_t seds_memory_admission_rejected(void){return 34;}
 void telemetry_lock(void){assert(!mask);++lock_depth;}
 void telemetry_unlock(void){assert(lock_depth==1);--lock_depth;}
 SedsResult seds_router_log_bytes_ex(SedsRouter *router,int dtype,const uint8_t *data,size_t length,const uint64_t *stamp,bool queue){
- assert(router&&dtype==42&&length==96&&!stamp&&queue);
+ assert(router&&!stamp&&queue);
+ if(dtype==43){assert(length==32&&((const uint32_t*)data)[0]==70);return 0;}
+ assert(dtype==42&&length==96);
  assert(!mask&&lock_depth==1);++calls;memcpy(captured,data,sizeof(captured));return refuse?1:0;
 }
 ''' +source+r'''

@@ -47,6 +47,12 @@ sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,
 sd_card_status_t sd_card_enqueue_raw_adc_samples(
     const sd_raw_adc_record_t *samples, uint16_t count,
     const daq_calibration_t *calibration);
+/* Remote retry is deferred, deduplicated across the eight most recent tokens,
+ * and never permits formatting. Completion means one attempt, not a good card. */
+sd_card_status_t sd_card_request_retry(uint32_t token);
+/* Flags, write/flush ages, init stage/retries, accepted/completed token, failures.
+ * UINT32_MAX age means no successful progress observed in this boot. */
+void sd_card_health_snapshot(uint32_t words[8]);
 UINT sd_card_request_flush(void);
 UINT sd_card_notify_power_loss(void);
 UINT sd_card_is_ready(void);

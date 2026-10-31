@@ -8,6 +8,7 @@ from test_sd_raw_queue import function
 ROOT = Path(__file__).resolve().parents[1]
 PREFIX = r'''
 #include <stdint.h>
+#define sd_media_flush() fx_media_flush(&g_sd_media)
 #include <stddef.h>
 #include <string.h>
 #include <assert.h>
@@ -19,6 +20,7 @@ typedef unsigned UINT;typedef uint32_t ULONG;typedef unsigned char UCHAR;
 #define FX_BOOT_ERROR 4U
 #define FX_FAT_READ_ERROR 5U
 #define FX_NULL NULL
+static unsigned g_sd_manual_no_format;
 static unsigned g_sd_media,g_sd_media_mounted,g_sd_card_identity_mismatches,g_sd_mount_status;
 static uint32_t g_sd_mounted_cid[4],g_sd_mounted_blocks;
 static UCHAR g_sd_media_cache[4096];
@@ -108,3 +110,17 @@ int main(void){
  assert(sd_resume_card_media()==FX_SUCCESS&&opens==open_count&&!formats);
 }
 ''')
+
+    def test_manual_retry_never_formats_invalid_or_unmarked_media(self):
+        self.execute(r"""
+int main(void){
+ g_sd_manual_no_format=1;open_status=FX_MEDIA_INVALID;
+ for(unsigned i=0;i<10;i++)assert(sd_resume_card_media()==FX_MEDIA_INVALID);
+ assert(!formats&&!g_sd_media_mounted);
+ open_status=FX_SUCCESS;marker_status=FX_NOT_FOUND;
+ for(unsigned i=0;i<10;i++)assert(sd_resume_card_media()==FX_NOT_FOUND);
+ assert(!formats&&!g_sd_media_mounted&&closes==10);
+ marker_status=FX_SUCCESS;
+ assert(sd_resume_card_media()==FX_SUCCESS&&g_sd_media_mounted&&!formats);
+}
+""")

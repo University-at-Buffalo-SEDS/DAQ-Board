@@ -8,7 +8,7 @@ ROOT=Path(__file__).resolve().parents[1]
 class SdPreallocationTests(unittest.TestCase):
     def test_reserve_preserves_logical_csv_size_and_fragmented_media_fallback(self):
         source=(ROOT/'Core/Src/sd_card.c').read_text()
-        helpers=source[source.index('#define SD_FILE_RESERVE_BYTES'):source.index('static void sd_update_filesystem_clock')]
+        helpers=source[source.index('#define SD_FILE_RESERVE_BYTES'):source.index('static UINT sd_media_flush')]
         code=r'''
 #include <stdint.h>
 #include <stddef.h>

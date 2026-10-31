@@ -19,6 +19,7 @@ class LogSeparationTests(unittest.TestCase):
         harness = r"""
 #include <assert.h>
 #include <stdint.h>
+#define sd_media_flush() fx_media_flush(&g_sd_media)
 #include "sd_file_limit.h"
 #define SD_RAW_BATCH_MAX 32U
 static unsigned g_sd_write_buffer_len, g_sd_telemetry_write_buffer_len;

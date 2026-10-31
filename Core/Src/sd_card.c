@@ -166,6 +166,12 @@ static uint8_t g_sd_hardware_ready = 0U;
 static uint8_t g_sd_media_mounted;
 static uint32_t g_sd_mounted_cid[4], g_sd_mounted_blocks;
 volatile uint32_t g_sd_card_identity_mismatches;
+static uint8_t g_sd_manual_no_format;
+static volatile uint32_t g_sd_retry_pending_token, g_sd_retry_active_token;
+static uint32_t g_sd_retry_accepted_token, g_sd_retry_completed_token;
+static uint32_t g_sd_retry_recent[8], g_sd_retry_recent_next;
+static uint64_t g_sd_last_sector_write_ms, g_sd_last_media_flush_ms;
+static uint8_t g_sd_write_progress_valid, g_sd_flush_progress_valid;
 static uint8_t g_file_open = 0U;
 static daq_calibration_t g_sd_calibration = {1.0f, 0.0f, 1.0f, 0.0f, {0.0f, 1.0f}};
 static volatile uint32_t g_sd_calibration_generation = 1U;
@@ -335,6 +341,9 @@ static UINT sd_hal_write(const UCHAR *source, ULONG sector, ULONG sector_count)
       if (sd_storage_io_requires_reinit()) g_sd_ready = 0U;
       return FX_IO_ERROR;
     }
+    const uint32_t saved = __get_PRIMASK(); __disable_irq();
+    g_sd_last_sector_write_ms = board_uptime_ticks(); g_sd_write_progress_valid = 1U;
+    __set_PRIMASK(saved);
     source += count * SD_SECTOR_SIZE; sector += count; sector_count -= count;
   }
   const uint32_t elapsed = HAL_GetTick() - started;
@@ -473,6 +482,17 @@ static UINT sd_release_file_space(FX_FILE *file)
   return fx_file_truncate_release(file, (ULONG)file->fx_file_current_file_size);
 }
 
+static UINT sd_media_flush(void)
+{
+  const UINT status = fx_media_flush(&g_sd_media);
+  if (status == FX_SUCCESS) {
+    const uint32_t saved = __get_PRIMASK(); __disable_irq();
+    g_sd_last_media_flush_ms = board_uptime_ticks(); g_sd_flush_progress_valid = 1U;
+    __set_PRIMASK(saved);
+  }
+  return status;
+}
+
 static void sd_update_filesystem_clock(void)
 {
   sd_calendar_t now;
@@ -581,7 +601,7 @@ static UINT sd_open_log(FX_FILE *file, char *g_sd_filename, size_t filename_size
   }
   if (status == FX_SUCCESS)
   {
-    status = fx_media_flush(&g_sd_media);
+    status = sd_media_flush();
   }
   if (status != FX_SUCCESS) {
     (void)sd_release_file_space(file);
@@ -643,7 +663,7 @@ static UINT sd_write_telemetry_row(const sd_line_slot_t *slot)
            g_sd_telemetry_write_buffer_len, slot->len)))
   {
     if (sd_flush_telemetry_pending() != FX_SUCCESS ||
-        fx_media_flush(&g_sd_media) != FX_SUCCESS) return FX_IO_ERROR;
+        sd_media_flush() != FX_SUCCESS) return FX_IO_ERROR;
     if (sd_close_log(&g_sd_telemetry_file, g_sd_telemetry_filename) != FX_SUCCESS) return FX_IO_ERROR;
     g_telemetry_file_open = 0U;
   }
@@ -792,7 +812,7 @@ static UINT sd_format_and_mark(void)
   }
   if (status == FX_SUCCESS)
   {
-    status = fx_media_flush(&g_sd_media);
+    status = sd_media_flush();
   }
   return status;
 }
@@ -817,14 +837,14 @@ static UINT sd_mount_or_provision(void)
     /* Upgrade cards provisioned before the directory label was added,
      * preserving their files and provisioning marker. */
     status = fx_media_volume_set(&g_sd_media, "SEDS_DAQ");
-    if (status == FX_SUCCESS) status = fx_media_flush(&g_sd_media);
+    if (status == FX_SUCCESS) status = sd_media_flush();
     if (status != FX_SUCCESS) (void)fx_media_close(&g_sd_media);
     return status;
   }
-  if (status == FX_SUCCESS)
-  {
-    (void)fx_media_close(&g_sd_media);
-  }
+  if (status == FX_SUCCESS) (void)fx_media_close(&g_sd_media);
+  /* A remote retry never grants provisioning permission, including later
+   * automatic retries in this boot. Existing logs/unknown media stay intact. */
+  if (g_sd_manual_no_format) return status == FX_SUCCESS ? FX_NOT_FOUND : status;
   return sd_format_and_mark();
 }
 
@@ -992,7 +1012,7 @@ static UINT sd_select_calibration(const daq_calibration_t *calibration)
       !sd_log_part_needs_rotation((uint64_t)g_sd_file.fx_file_current_file_size +
           g_sd_write_buffer_len, (uint64_t)SD_RAW_BATCH_MAX * 256U))
     return FX_SUCCESS;
-  if (sd_flush_pending() != FX_SUCCESS || fx_media_flush(&g_sd_media) != FX_SUCCESS)
+  if (sd_flush_pending() != FX_SUCCESS || sd_media_flush() != FX_SUCCESS)
     return FX_IO_ERROR;
   if (sd_close_log(&g_sd_file, g_sd_filename) != FX_SUCCESS) return FX_IO_ERROR;
   g_file_open = 0U;
@@ -1134,9 +1154,30 @@ static void sd_close_finished_launch_files(uint8_t raw_drained, uint8_t telemetr
     }
   }
   if (g_sd_launch_flush_pending) {
-    if (fx_media_flush(&g_sd_media) == FX_SUCCESS) g_sd_launch_flush_pending = 0U;
+    if (sd_media_flush() == FX_SUCCESS) g_sd_launch_flush_pending = 0U;
     else ++g_sd_write_error_count;
   }
+}
+
+static uint32_t sd_take_manual_retry(void)
+{
+  const uint32_t saved = __get_PRIMASK(); __disable_irq();
+  const uint32_t token = g_sd_retry_pending_token;
+  if (token != 0U) {
+    g_sd_retry_pending_token = 0U; g_sd_retry_active_token = token;
+    g_sd_manual_no_format = 1U;
+  }
+  __set_PRIMASK(saved);
+  return token;
+}
+
+static void sd_complete_manual_retry(void)
+{
+  const uint32_t saved = __get_PRIMASK(); __disable_irq();
+  if (g_sd_retry_active_token != 0U) {
+    g_sd_retry_completed_token = g_sd_retry_active_token; g_sd_retry_active_token = 0U;
+  }
+  __set_PRIMASK(saved);
 }
 
 void sd_card_writer_thread_entry(ULONG initial_input)
@@ -1157,6 +1198,12 @@ void sd_card_writer_thread_entry(ULONG initial_input)
   {
     ULONG flags = 0U;
     uint8_t serviced_work = 0U;
+    /* This boundary owns no in-flight IDMA buffer or FileX operation. Keep
+     * pending records, dirty cache, handles and monotonic launch deadlines. */
+    if (sd_take_manual_retry() != 0U) {
+      g_sd_ready = 0U;
+      last_retry = tx_time_get() - TX_TIMER_TICKS_PER_SECOND;
+    }
 
     if (g_sd_ready == 0U)
     {
@@ -1187,6 +1234,7 @@ void sd_card_writer_thread_entry(ULONG initial_input)
           }
         }
 
+        sd_complete_manual_retry();
         if (g_sd_ready == 0U)
         {
           g_sd_hardware_ready = 0U;
@@ -1298,7 +1346,7 @@ void sd_card_writer_thread_entry(ULONG initial_input)
       sd_update_filesystem_clock();
       if ((sd_flush_pending() == FX_SUCCESS) &&
           (sd_flush_telemetry_pending() == FX_SUCCESS) &&
-          (fx_media_flush(&g_sd_media) == FX_SUCCESS))
+          (sd_media_flush() == FX_SUCCESS))
       {
         g_sd_launch_flush_pending = 0U;
         g_sd_flush_count++;
@@ -1659,6 +1707,45 @@ sd_card_status_t sd_card_enqueue_raw_adc_samples(const sd_raw_adc_record_t *samp
     return SD_CARD_STATUS_BACKPRESSURE;
   }
   return retained == count ? SD_CARD_STATUS_OK : SD_CARD_STATUS_BACKPRESSURE;
+}
+
+sd_card_status_t sd_card_request_retry(uint32_t token)
+{
+  if (token == 0U) return SD_CARD_STATUS_IO_ERROR;
+  const uint32_t saved = __get_PRIMASK(); __disable_irq();
+  for (unsigned i = 0U; i < 8U; ++i) if (g_sd_retry_recent[i] == token) {
+    __set_PRIMASK(saved); return SD_CARD_STATUS_OK;
+  }
+  if (g_sd_retry_pending_token || g_sd_retry_active_token) {
+    __set_PRIMASK(saved); return SD_CARD_STATUS_BUSY;
+  }
+  g_sd_retry_recent[g_sd_retry_recent_next++ % 8U] = token;
+  g_sd_retry_accepted_token = token; g_sd_retry_pending_token = token;
+  __set_PRIMASK(saved);
+  return SD_CARD_STATUS_OK;
+}
+
+static uint32_t sd_progress_age(uint64_t now, uint64_t last, uint8_t valid)
+{
+  if (!valid) return UINT32_MAX;
+  const uint64_t age = now >= last ? now - last : 0U;
+  return age >= UINT32_MAX ? UINT32_MAX - 1U : (uint32_t)age;
+}
+
+void sd_card_health_snapshot(uint32_t words[8])
+{
+  if (!words) return;
+  const uint32_t saved = __get_PRIMASK(); __disable_irq();
+  const uint64_t now = board_uptime_ticks();
+  words[0] = (g_sd_services_initialized ? 1U : 0U) | (g_sd_ready ? 2U : 0U) |
+      (g_sd_launch_closed ? 4U : 0U) |
+      ((g_sd_retry_pending_token || g_sd_retry_active_token) ? 8U : 0U);
+  words[1] = sd_progress_age(now, g_sd_last_sector_write_ms, g_sd_write_progress_valid);
+  words[2] = sd_progress_age(now, g_sd_last_media_flush_ms, g_sd_flush_progress_valid);
+  words[3] = g_sd_init_stage; words[4] = g_sd_retry_count;
+  words[5] = g_sd_retry_accepted_token; words[6] = g_sd_retry_completed_token;
+  words[7] = g_sd_init_failures;
+  __set_PRIMASK(saved);
 }
 
 UINT sd_card_request_flush(void)

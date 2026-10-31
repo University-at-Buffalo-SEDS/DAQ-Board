@@ -1,11 +1,12 @@
 """A pressure delivery receipt means its entire batch entered the SD writer."""
 from pathlib import Path
 import subprocess,tempfile,unittest
+from test_sd_raw_queue import function
 ROOT=Path(__file__).resolve().parents[1]
 class PressureReceiptTests(unittest.TestCase):
     def test_no_success_receipt_for_refused_atomic_sd_handoff(self):
         source=(ROOT/'Core/Src/telemetry.c').read_text()
-        helper=source[source.index('static SedsResult pressure_sd_receive('):source.index('\nSedsResult init_telemetry_router(',source.index('static SedsResult pressure_sd_receive('))]
+        helper=function(source,'pressure_sd_receive')
         harness=r'''#include "pressure_sd_wire.h"
 #include <assert.h>
 typedef int SedsResult;

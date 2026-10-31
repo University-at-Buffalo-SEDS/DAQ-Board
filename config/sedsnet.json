@@ -902,6 +902,38 @@
       ],
       "reliable": "Off",
       "priority": 16
+    },
+    {
+      "rust": "DaqSdHealth",
+      "name": "DAQ_SD_HEALTH",
+      "doc": "DAQ SD status: flags, successful sector-write/flush ages in milliseconds (UINT32_MAX never), init stage/retries, accepted/completed retry token, init failures. Retry completion is an attempt, not proof of writing.",
+      "class": "Data",
+      "element": {
+        "kind": "Static",
+        "data_type": "UInt32",
+        "count": 8
+      },
+      "endpoints": [
+        "ActuatorGroundStation"
+      ],
+      "reliable": "Off",
+      "priority": 0
+    },
+    {
+      "rust": "DaqSdRetry",
+      "name": "DAQ_SD_RETRY",
+      "doc": "Explicit authenticated GS/RRLS request to retry DAQ SD initialization. One nonzero UInt32 token; direct handler, never replayed as a managed variable; no formatting permission.",
+      "class": "Data",
+      "element": {
+        "kind": "Static",
+        "data_type": "UInt32",
+        "count": 1
+      },
+      "endpoints": [
+        "FillSdCard"
+      ],
+      "reliable": "Unordered",
+      "priority": 240
     }
   ]
 }
