@@ -17,6 +17,16 @@ typedef int SedsResult;
 #define SD_CARD_STATUS_OK 0
 static unsigned g_pressure_sd_batches_received,g_pressure_sd_invalid_batches,calls;
 static int status;
+/* Named-only SDK boundary stub; actual compact/assigned discovery and
+ * collision behavior is exercised by test_pressure_sd_identity with real SDK. */
+static struct { void *r; } g_router = {(void *)1};
+static int seds_router_sender_matches_hostname(void *router,const char *sender,size_t n,
+                                               const char *expected,size_t expected_n)
+{
+ assert(router == g_router.r);
+ return router != NULL && sender != NULL && n == expected_n && memcmp(sender,expected,n)==0;
+}
+
 typedef struct {int ty;const uint8_t *payload;size_t payload_len;const char *sender;size_t sender_len;}SedsPacketView;
 int sd_card_log_pressure_batch(const pressure_sd_batch_t *batch){++calls;assert(batch->first_sequence==42);return status;}
 ''' + helper + r'''

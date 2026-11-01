@@ -621,7 +621,11 @@ static SedsResult pressure_sd_receive(const SedsPacketView *packet, void *contex
   if (!packet || packet->ty != SEDS_DT_VALVE_PRESSURE_SD_V1) return SEDS_OK;
   /* This source owns the remote raw/psi capture contract. No chamber or
    * differently calibrated pressure endpoint may masquerade as OX tank PT. */
-  if (!packet->sender || packet->sender_len != 2U || memcmp(packet->sender, "VB", 2U) != 0)
+  /* Canonical wire packets carry a compact or assigned numeric sender.
+   * Let the router resolve retained discovery identity without guessing a
+   * hash, accepting an unknown alias, or changing this source contract. */
+  if (!seds_router_sender_matches_hostname(g_router.r, packet->sender,
+                                           packet->sender_len, "VB", 2U))
     return SEDS_HANDLER_ERROR;
   pressure_sd_batch_t batch;
   if (pressure_sd_decode(&batch, packet->payload, packet->payload_len) != 0) {
