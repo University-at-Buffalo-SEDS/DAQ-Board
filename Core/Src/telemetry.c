@@ -6,6 +6,7 @@
 #include "daq_log_clock.h"
 #include "sd_card.h"
 #include "flight_state_cache.h"
+#include "board_recovery_transport.h"
 #include "sim_network_probe.h"
 #include "board_can_priority.h"
 #include "ota_stream.h"
@@ -550,6 +551,13 @@ static SedsResult sd_retry_receive(const SedsPacketView *packet, void *context)
   return status == SD_CARD_STATUS_OK ? SEDS_OK : status == SD_CARD_STATUS_BUSY ? SEDS_IO : SEDS_HANDLER_ERROR;
 }
 
+static SedsResult Board_Recovery_handler(const SedsPacketView *packet, void *user)
+{
+  (void)user;
+  return board_recovery_handle(g_router.r, packet, SEDS_EP_BOARD_RECOVERY,
+      (uint32_t)(((uint64_t)tx_time_get() * 1000U) / TX_TIMER_TICKS_PER_SECOND));
+}
+
 SedsResult init_telemetry_router(void) {
 #ifndef TELEMETRY_ENABLED
   return SEDS_OK;
@@ -585,6 +593,12 @@ SedsResult init_telemetry_router(void) {
 #endif
 
   static const SedsLocalEndpointDesc locals[] = {
+      {
+          .endpoint = SEDS_EP_BOARD_RECOVERY,
+          .packet_handler = Board_Recovery_handler,
+          .packed_handler = NULL,
+          .user = NULL,
+      },
       {.endpoint = SEDS_EP_SD_CARD, .packet_handler = sd_retry_receive, .packed_handler = NULL, .user = NULL},
       {.endpoint = SEDS_EP_VALVE_PRESSURE_LOG, .packet_handler = pressure_sd_receive, .packed_handler = NULL, .user = NULL},
       {
@@ -726,6 +740,7 @@ SedsResult init_telemetry_router(void) {
   /* The normal poll loop sends the initial schema after link startup. */
 
   g_router.r = r;
+  board_recovery_transport_set_router(r);
   result = flight_state_cache_init(r);
   if (result == SEDS_OK) result = daq_calibration_init(r);
   if (result == SEDS_OK) result = daq_log_clock_init(r);
