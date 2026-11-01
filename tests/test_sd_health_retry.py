@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 from test_sd_raw_queue import function
+from checked_router_fixture import checked_hooks
+from router_lifecycle_fixture import function as actual_function
 ROOT=Path(__file__).resolve().parents[1]
 
 class SdHealthRetryTests(unittest.TestCase):
@@ -151,7 +153,7 @@ static int seds_router_rx_packed_packet_to_queue_from_side(void *r,uint32_t side
  assert(r&&side==3&&locked&&n==expected_length&&!memcmp(p,expected,n));delivered++;return 0;
 }
 static int seds_router_rx_packed_packet_to_queue(void *r,const uint8_t *p,size_t n){(void)r;(void)p;(void)n;assert(0);return -1;}
-""" + function(source[source.index('void rx_asynchronous('):],'rx_asynchronous')
+""" +checked_hooks(ROOT.parent/'gateway-board')+'\n'+'\n'.join(actual_function(source,n)for n in ('rx_asynchronous_locked','rx_asynchronous'))
         def uleb(value):
             out=[]
             while value>=128:out.append((value&127)|128);value>>=7

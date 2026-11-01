@@ -14,8 +14,8 @@
 extern volatile uint32_t g_telemetry_tlsf_live_bytes, g_telemetry_tlsf_peak_bytes, g_telemetry_tlsf_region_bytes, g_telemetry_tlsf_failures;
 #endif
 extern uint32_t board_health_can_rx_drops(void);
-extern void telemetry_lock(void);
-extern void telemetry_unlock(void);
+extern int telemetry_router_enter(void);
+extern int telemetry_router_leave(void);
 #if !defined(DISABLE_SD_CARD) || DISABLE_SD_CARD == 0
 extern volatile uint32_t g_sd_raw_records_enqueued_count, g_sd_raw_records_written_count, g_sd_raw_records_dropped_count, g_sd_raw_records_flushed_count, g_sd_raw_records_io_lost_count, g_sd_write_error_count, g_sd_max_write_ms;
 #endif
@@ -54,24 +54,24 @@ void board_health_poll(SedsRouter *router)
   words[11] = (uint32_t)seds_memory_admission_rejected();
   words[23] = failures;
   words[1] |= board_temperature_health_flags();
-  telemetry_lock();
+  if (!telemetry_router_enter()) { ++failures; return; }
   /* Static UInt32 schema + exact little-endian bytes: use the existing
    * bounded byte path without pulling every generic numeric converter in. */
   const SedsResult result = seds_router_log_bytes_ex(router, SEDS_DT_BOARD_HEALTH,
       (const uint8_t *)words, sizeof(words), NULL, true);
-  telemetry_unlock();
-  if (result != SEDS_OK) ++failures;
+  const int released = telemetry_router_leave();
+  if (result != SEDS_OK || !released) ++failures;
 #if !defined(DISABLE_SD_CARD) || DISABLE_SD_CARD == 0
   uint32_t sd_words[8]; sd_card_health_snapshot(sd_words);
-  telemetry_lock();
+  if (!telemetry_router_enter()) { ++failures; return; }
   (void)seds_router_log_bytes_ex(router, SEDS_DT_DAQ_SD_HEALTH,
       (const uint8_t *)sd_words, sizeof(sd_words), NULL, true);
-  telemetry_unlock();
+  if (!telemetry_router_leave()) ++failures;
   uint32_t launch_words[7]; sd_card_launch_log_snapshot(launch_words);
-  telemetry_lock();
+  if (!telemetry_router_enter()) { ++failures; return; }
   (void)seds_router_log_bytes_ex(router, SEDS_DT_DAQ_LAUNCH_LOG_STATUS,
       (const uint8_t *)launch_words, sizeof(launch_words), NULL, true);
-  telemetry_unlock();
+  if (!telemetry_router_leave()) ++failures;
 #endif
 #else
   (void)router;

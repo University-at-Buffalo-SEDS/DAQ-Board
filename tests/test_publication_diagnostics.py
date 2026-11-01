@@ -4,6 +4,8 @@ import subprocess
 import tempfile
 import unittest
 
+from checked_router_fixture import checked_hooks
+from router_lifecycle_fixture import function
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -25,6 +27,9 @@ struct {void *r;} g_router={(void *)1};
 volatile uint32_t g_telemetry_alloc_failure_stack[128];
 volatile uint32_t g_telemetry_alloc_failure_stack_words;
 static int result, copies, copy_result=16;
+static unsigned locked;
+void telemetry_lock(void){assert(!locked);++locked;}
+void telemetry_unlock(void){assert(locked==1);--locked;}
 int init_telemetry_router(void){return SEDS_ERR;}
 int guess_kind_from_elem_size(size_t n){return (int)n;}
 int seds_router_log_queue_typed(void *r,uint32_t t,const void *p,size_t n,size_t s,int k){
@@ -40,7 +45,7 @@ int seds_router_copy_queue_counters(SedsRouter *r,uint32_t *out,size_t capacity)
 }
 uint32_t HAL_GetTick(void){return 123;}
 size_t seds_memory_admission_rejected(void){return 7;}
-''' + source[start:end] + r'''
+''' + checked_hooks(ROOT)+'\n'+'\n'.join(function(source,n)for n in ('log_telemetry_asynchronous_locked','log_telemetry_asynchronous')) + r'''
 int main(void){
  float values[6]={0};
  assert(log_telemetry_asynchronous(101,values,6,4)==0);assert(!copies);

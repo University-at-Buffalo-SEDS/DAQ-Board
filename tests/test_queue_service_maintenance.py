@@ -1,26 +1,33 @@
 """Execute DAQ's queue service with instrumented SDK maintenance entry points."""
 from pathlib import Path
 import subprocess,tempfile,unittest
+from checked_router_fixture import checked_hooks
+from router_lifecycle_fixture import function as actual_function
 ROOT=Path(__file__).resolve().parents[1]
 class QueueServiceMaintenanceTests(unittest.TestCase):
     def test_explicit_board_poll_is_not_repeated_by_queue_drain(self):
         source=(ROOT/'Core/Src/telemetry.c').read_text()
-        function=source[source.index('SedsResult process_all_queues_timeout('):source.index('\nstatic SedsResult log_error_impl')]
+        function='\n'.join(actual_function(source,n)for n in ('process_all_queues_timeout_locked','process_all_queues_timeout'))
         harness=r'''
 #include <stdint.h>
 #include <assert.h>
+#include <stddef.h>
 #define TELEMETRY_ENABLED 1
 typedef int SedsResult;
 #define SEDS_OK 0
 #define SEDS_ERR -1
+#define SEDS_BAD_ARG -2
 struct{void *r;}g_router={(void *)1};
 unsigned g_daq_queue_service_error_count, discovery_polls, timesync_polls, drains;
 int32_t g_daq_queue_service_last_result;
 int fail,init_fail;
+static unsigned locked;
+void telemetry_lock(void){assert(!locked);++locked;}
+void telemetry_unlock(void){assert(locked==1);--locked;}
 SedsResult init_telemetry_router(void){return init_fail?SEDS_ERR:SEDS_OK;}
 SedsResult seds_router_drain_queues_with_timeout(void *r,uint32_t timeout){assert(r && timeout==1);++drains;return fail;}
 SedsResult seds_router_process_all_queues_with_timeout(void *r,uint32_t timeout){++discovery_polls;++timesync_polls;return seds_router_drain_queues_with_timeout(r,timeout);}
-''' + function + r'''
+''' +checked_hooks(ROOT)+'\n'+ function + r'''
 int main(void){
  discovery_polls=timesync_polls=1; /* Explicit board poll once per worker pass. */
  assert(process_all_queues_timeout(1)==SEDS_OK);

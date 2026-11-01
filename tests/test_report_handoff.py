@@ -3,6 +3,8 @@ import subprocess
 import tempfile
 import unittest
 
+from checked_router_fixture import checked_hooks
+from router_lifecycle_fixture import function as actual_function
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -88,13 +90,16 @@ int main(void){
 #define SEDS_ERR 2
 typedef int SedsResult;typedef unsigned SedsDataType;
 static struct {void*r;uint64_t start_time;} g_router={(void*)1,100};
+static unsigned locked;
+void telemetry_lock(void){assert(!locked);++locked;}
+void telemetry_unlock(void){assert(locked==1);--locked;}
 static int synced=1;static uint64_t emitted;
 static uint64_t telemetry_now_ms(void){return 1000;}
 static SedsResult init_telemetry_router(void){return SEDS_OK;}
 static int guess_kind_from_elem_size(size_t n){return (int)n;}
 static int seds_router_get_network_time_ms(void*r,uint64_t*t){(void)r;*t=1000000;return synced?SEDS_OK:SEDS_ERR;}
 static int seds_router_log_typed_ex(void*r,unsigned ty,const void*d,size_t n,size_t w,int k,const uint64_t*t,int queued){(void)r;(void)ty;(void)d;(void)n;(void)w;(void)k;assert(queued);emitted=*t;return SEDS_OK;}
-''' + function(source, "SedsResult log_telemetry_captured(") + r'''
+''' +checked_hooks(ROOT)+'\n'+'\n'.join(actual_function(source,n)for n in ('log_telemetry_captured_locked','log_telemetry_captured'))+ r'''
 int main(void){float value=1;
  assert(log_telemetry_captured(118,&value,1,4,950)==SEDS_OK && emitted==999950);
  synced=0;assert(log_telemetry_captured(118,&value,1,4,950)==SEDS_OK && emitted==850);

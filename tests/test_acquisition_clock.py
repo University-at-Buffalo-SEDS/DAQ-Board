@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import unittest
 
+from router_lifecycle_fixture import function
 ROOT=Path(__file__).resolve().parents[1]
 class AcquisitionClockTests(unittest.TestCase):
     def test_clock_extrapolation_invalidation_expiry_and_wrap(self):
@@ -35,7 +36,7 @@ int main(void) {
         self.assertIn('daq_log_unix_ms_cached()',drain)
         self.assertNotIn('daq_log_unix_ms()',drain)
         s=(ROOT/'Core/Src/telemetry.c').read_text()
-        read=s.split('uint64_t telemetry_unix_ms_cached(void)',1)[1].split('uint64_t telemetry_unix_ms(void)',1)[0]
+        read=function(s,'telemetry_unix_ms_cached')
         self.assertNotIn('seds_router_',read)
         self.assertNotIn('tx_mutex_',read)
         self.assertIn('__set_PRIMASK(mask)',read)
