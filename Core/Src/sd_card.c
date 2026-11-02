@@ -673,8 +673,8 @@ static UINT sd_open_log(FX_FILE *file, char *g_sd_filename, size_t filename_size
       status = fx_file_write(file, calibration_line, (ULONG)len);
     if (status == FX_SUCCESS) {
       const int pressure_len = snprintf(calibration_line, sizeof(calibration_line),
-          "# chamber_pressure,p4_adc_channel=%d,model=OMEGA_PX309-1KG5V,raw_units=connector_V,converted_units=psig,divider_ratio=11,zero_V=0,span_V=5,span_psig=1000\r\n",
-          DAQ_CHAMBER_ADC_CHANNEL);
+          "# chamber_pressure,p4_adc_channel=%d,model=OMEGA_PX309-1KG5V,raw_units=connector_V,converted_units=psig,divider_ratio=11,zero_V=0,span_V=5,span_psig=1000,noise_floor_millipsi=%u,noise_floor_rule=finite_raw_psig<floor_millipsi/1000:0,noise_floor_zero=disabled,raw_voltage=unchanged,nonfinite=invalid,overflow=preserved\r\n",
+          DAQ_CHAMBER_ADC_CHANNEL, (unsigned)DAQ_CHAMBER_NOISE_FLOOR_MILLIPSI);
       status = pressure_len > 0 && (size_t)pressure_len < sizeof(calibration_line)
           ? fx_file_write(file, calibration_line, (ULONG)pressure_len) : FX_IO_ERROR;
     }
