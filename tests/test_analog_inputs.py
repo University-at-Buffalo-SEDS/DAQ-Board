@@ -148,7 +148,13 @@ typedef struct {
  float input_voltage_v, input_current_a;
  unsigned analog_sample_fresh;
 } daq_snapshot_t;
-typedef struct {unsigned count[8];float voltage_sum[8];} daq_loadcell_window_t;
+typedef struct
+{
+  int64_t code_sum[10];
+  float sum[10];
+  float voltage_sum[10];
+  uint16_t count[10];
+} daq_loadcell_window_t;
 static float packets[4][8];
 static unsigned counts[4], calls;
 static int log_telemetry_asynchronous(SedsDataType type,const float *data,size_t count,size_t size) {
@@ -198,20 +204,40 @@ int main(void) {
 #define SD_OPTIONAL_SNAPSHOT_ROWS 24U
 #define SD_CARD_STATUS_OK 0
 ''' + SNAPSHOT_TYPE + r'''
-typedef struct {float value;} daq_calibration_t;
-typedef struct {unsigned count[8];float voltage_sum[8];} daq_loadcell_window_t;
+typedef uint32_t sd_capture_t;
+typedef struct
+{
+  float kg1000_slope;
+  float kg1000_intercept;
+  float iadc_slope;
+  float iadc_intercept;
+  /* KG50: ascending polynomial coefficients, input shift, tare offset. */
+  float kg50[7];
+  /* [KG1000 reference C, raw/C, KG50 reference C, raw/C]. */
+  float thermal[4];
+  float filter_tau_ms[2]; /* KG1000, KG50; 0 disables smoothing. */
+} daq_calibration_t;
+typedef struct
+{
+  int64_t code_sum[10];
+  float sum[10];
+  float voltage_sum[10];
+  uint16_t count[10];
+} daq_loadcell_window_t;
 static unsigned calls, refuse;
-static int sd_card_enqueue_optional_snapshot(const float *values,uint64_t ms,const daq_calibration_t *cal) {
- assert(ms==123 && cal->value==42 && values[10]==8 && values[23]==3);
+static void sd_card_capture_fault(sd_capture_t c){assert(c==0);}
+static int sd_card_enqueue_optional_snapshot_captured(const float *values,uint64_t ms,const daq_calibration_t *cal,sd_capture_t capture) {
+ assert(capture==0);
+ assert(ms==123 && cal->kg1000_slope==42 && values[10]==8 && values[23]==3);
  calls++;return refuse?2:0;
 }
 ''' + code + r'''
 int main(void) {
  daq_snapshot_t s={.monotonic_ms=123,.analog_sample_fresh=1};s.analog_inputs_v[7]=8;
- daq_calibration_t c={42};daq_loadcell_window_t w={0};w.count[1]=2;w.voltage_sum[1]=6;
- daq_store_snapshot_csv(&s,&c,&w);assert(calls==1 && !g_daq_sd_snapshot_row_drop_count);
- s.analog_sample_fresh=0;daq_store_snapshot_csv(&s,&c,&w);assert(calls==1);
- s.analog_sample_fresh=1;refuse=1;daq_store_snapshot_csv(&s,&c,&w);
+ daq_calibration_t c={.kg1000_slope=42};daq_loadcell_window_t w={0};w.count[1]=2;w.voltage_sum[1]=6;
+ daq_store_snapshot_csv(&s,&c,&w,0);assert(calls==1 && !g_daq_sd_snapshot_row_drop_count);
+ s.analog_sample_fresh=0;daq_store_snapshot_csv(&s,&c,&w,0);assert(calls==1);
+ s.analog_sample_fresh=1;refuse=1;daq_store_snapshot_csv(&s,&c,&w,0);
  assert(calls==2 && g_daq_sd_snapshot_row_drop_count==24);
 }
 '''
@@ -229,8 +255,26 @@ int main(void) {
 #include <stdint.h>
 #include <string.h>
 ''' + SNAPSHOT_TYPE + r'''
-typedef struct {float value;} daq_calibration_t;
-typedef struct {unsigned count[8];float voltage_sum[8];} daq_loadcell_window_t;
+typedef uint32_t sd_capture_t;
+typedef struct
+{
+  float kg1000_slope;
+  float kg1000_intercept;
+  float iadc_slope;
+  float iadc_intercept;
+  /* KG50: ascending polynomial coefficients, input shift, tare offset. */
+  float kg50[7];
+  /* [KG1000 reference C, raw/C, KG50 reference C, raw/C]. */
+  float thermal[4];
+  float filter_tau_ms[2]; /* KG1000, KG50; 0 disables smoothing. */
+} daq_calibration_t;
+typedef struct
+{
+  int64_t code_sum[10];
+  float sum[10];
+  float voltage_sum[10];
+  uint16_t count[10];
+} daq_loadcell_window_t;
 typedef uintptr_t ULONG;
 typedef void VOID;
 typedef int TX_THREAD;
@@ -238,6 +282,9 @@ typedef int TX_QUEUE;
 typedef int TX_BLOCK_POOL;
 #define TX_SUCCESS 0
 #define TX_NO_WAIT 0
+static void sd_card_capture_retain(sd_capture_t c){assert(c==0);}
+static void sd_card_capture_release(sd_capture_t c){assert(c==0);}
+static void sd_card_capture_fault(sd_capture_t c){assert(c==0);}
 static int tx_block_allocate(TX_BLOCK_POOL *,VOID **,unsigned);
 static int tx_queue_send(TX_QUEUE *,VOID *,unsigned);
 static int tx_block_release(VOID *);
@@ -253,14 +300,14 @@ static int tx_queue_send(TX_QUEUE *q,VOID *msg,unsigned wait) {
 static int tx_block_release(VOID *ptr){assert(ptr==&captured);released++;return 0;}
 int main(void) {
  (void)g_analog_thread;(void)g_analog_stack;(void)g_analog_queue_storage;(void)g_analog_pool_storage;
- daq_snapshot_t s={.monotonic_ms=50};daq_calibration_t c={42};daq_loadcell_window_t w={0};
- w.count[6]=1;w.voltage_sum[6]=0.2f;daq_enqueue_analog(&s,&c,&w);assert(sent==0);
- s.monotonic_ms=100;s.analog_sample_fresh=1;daq_enqueue_analog(&s,&c,&w);
- assert(sent==1 && captured.snapshot.monotonic_ms==100 && captured.calibration.value==42);
+ daq_snapshot_t s={.monotonic_ms=50};daq_calibration_t c={.kg1000_slope=42};daq_loadcell_window_t w={0};
+ w.count[6]=1;w.voltage_sum[6]=0.2f;daq_enqueue_analog(&s,&c,&w,0);assert(sent==0);
+ s.monotonic_ms=100;s.analog_sample_fresh=1;daq_enqueue_analog(&s,&c,&w,0);
+ assert(sent==1 && captured.snapshot.monotonic_ms==100 && captured.calibration.kg1000_slope==42);
  assert(captured.window.count[6]==2 && captured.window.voltage_sum[6]==0.4f);
- s.monotonic_ms=200;c.value=99;assert(captured.snapshot.monotonic_ms==100 && captured.calibration.value==42);
- queue_failure=1;daq_enqueue_analog(&s,&c,&w);assert(released==1 && g_daq_analog_work_drop_count==1);
- allocation_failure=1;daq_enqueue_analog(&s,&c,&w);assert(sent==2 && g_daq_analog_work_drop_count==2);
+ s.monotonic_ms=200;c.kg1000_slope=99;assert(captured.snapshot.monotonic_ms==100 && captured.calibration.kg1000_slope==42);
+ queue_failure=1;daq_enqueue_analog(&s,&c,&w,0);assert(released==1 && g_daq_analog_work_drop_count==1);
+ allocation_failure=1;daq_enqueue_analog(&s,&c,&w,0);assert(sent==2 && g_daq_analog_work_drop_count==2);
 }
 '''
         with tempfile.TemporaryDirectory() as tmp:

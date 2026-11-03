@@ -96,13 +96,20 @@ class NoTelemetryTests(unittest.TestCase):
             (work/'launchcore').mkdir()
             (work/'sedsnet.h').write_text('#error SDK_HEADER_MUST_NOT_BE_INCLUDED\n')
             (work/'launchcore/persist.h').write_text('typedef enum {LAUNCHCORE_PERSIST_OK=0, LAUNCHCORE_PERSIST_NOT_FOUND=1, LAUNCHCORE_PERSIST_STORAGE_ERROR=2} launchcore_persist_status_t;\n')
-            (work/'main.h').write_text('#include <stdint.h>\n')
+            (work/'main.h').write_text('#include <stdint.h>\nuint32_t __get_PRIMASK(void);\nvoid __disable_irq(void);\nvoid __set_PRIMASK(uint32_t);\n')
             (work/'restore.c').write_text(r'''#include <assert.h>
 #include <stdint.h>
 #include <stddef.h>
 #include "flight_state_cache.h"
 #include "persistent_store.h"
 static unsigned inits, reads;
+uint32_t __get_PRIMASK(void){return 0;}
+void __disable_irq(void){}
+void __set_PRIMASK(uint32_t m){assert(!m);}
+persistent_store_owner_t persistent_store_try_enter(void){assert(0);return PERSISTENT_STORE_OWNER_FAULT;}
+bool persistent_store_leave(void){assert(0);return false;}
+bool persistent_store_recovery_ready(void){return true;}
+void persistent_store_note_failure(void){assert(0);}
 launchcore_persist_status_t persistent_store_init(void) { ++inits; return LAUNCHCORE_PERSIST_OK; }
 launchcore_persist_status_t persistent_store_get(uint32_t key, void *value, size_t *size) { assert(key==0x46535445u && *size==1); ++reads; *(uint8_t*)value=3; return LAUNCHCORE_PERSIST_OK; }
 launchcore_persist_status_t persistent_store_set(uint32_t key,const void *value,size_t size) { (void)key;(void)value;(void)size;assert(0);return LAUNCHCORE_PERSIST_STORAGE_ERROR; }

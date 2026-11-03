@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from native_sdk import prepare_native_sdk
 from test_pressure_sd_handoff import function
+from sd_cohort_fixture import pressure_cohort
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -29,6 +30,7 @@ class PressureSdIdentityTests(unittest.TestCase):
             marker = '/* SOURCE_FUNCTION:' + name + ' */'
             assert code.count(marker) == 1, marker
             code = code.replace(marker, function(source, name))
+        code=code.replace('/* SOURCE_FUNCTION:sd_cohort */',pressure_cohort(sd))
         source = cls.path/'identity.c'
         source.write_text(code)
         cls.exe = cls.path/'identity'

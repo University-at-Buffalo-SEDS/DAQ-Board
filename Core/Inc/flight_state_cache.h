@@ -10,6 +10,9 @@
 void flight_state_cache_restore(void);
 bool flight_state_cache_has_value(void);
 uint8_t flight_state_cache_value(void);
+/* RAM state validity is separate from completed physical storage. Never use
+ * this byte-value proof as a new command-origin or recovery-epoch receipt. */
+bool flight_state_cache_is_durable(void);
 /* Explicit operator reset only. Persist and verify Startup before reporting
  * success; never alter power rails, outputs, acquisition or network identity. */
 int32_t flight_state_cache_reset_startup(void);

@@ -1,4 +1,5 @@
 #include "sd_card.h"
+#include "DAQ-Threads.h"
 #include "daq_chamber_pressure.h"
 #include "daq_rates.h"
 
@@ -51,6 +52,7 @@ typedef struct
   uint16_t len;
   uint32_t route_epoch;
   daq_calibration_t calibration;
+  sd_capture_t capture;
   uint64_t session;
   char line[];
 } sd_line_slot_t;
@@ -61,6 +63,7 @@ typedef struct
   uint32_t route_epoch;
   uint64_t uptime_reference;
   daq_calibration_t calibration;
+  sd_capture_t capture;
   uint64_t session;
   sd_raw_adc_record_t samples[];
 } sd_raw_slot_t;
@@ -80,6 +83,7 @@ typedef struct {
   uint16_t len;
   uint32_t route_epoch;
   daq_calibration_t calibration;
+  sd_capture_t capture;
   uint64_t session;
   uint16_t count, capacity;
   uint64_t uptime_reference, sequence_base;
@@ -108,12 +112,17 @@ typedef struct {
   uint16_t len;
   uint32_t route_epoch;
   daq_calibration_t calibration;
+  sd_capture_t capture;
   uint64_t session;
   float values[SD_OPTIONAL_SNAPSHOT_ROWS];
   uint64_t network_ms, uptime, sequence_base;
 } sd_optional_snapshot_t;
 _Static_assert(offsetof(sd_optional_snapshot_t, values) == offsetof(sd_line_slot_t, line),
                "Optional snapshot owners share the ordinary routing prefix");
+_Static_assert(offsetof(sd_line_slot_t, line) == 88U, "Capture lease fills line padding");
+_Static_assert(offsetof(sd_raw_slot_t, samples) == 96U, "Capture lease fills raw padding");
+_Static_assert(offsetof(sd_scalar_slot_t, records) == 112U, "Capture lease fills scalar padding");
+_Static_assert(sizeof(sd_optional_snapshot_t) == 208U, "Capture lease fills snapshot padding");
 _Static_assert(sizeof(sd_optional_snapshot_t) * SD_OPTIONAL_SNAPSHOT_SLOTS + 64U < 1024U,
                "SD-only optional retention must remain below one KiB");
 
@@ -249,6 +258,7 @@ static uint8_t g_sd_launch_flush_pending;
  * A late pressure batch must drain before a newer ordinary CSV row rotates
  * their shared file. These are bounded queue generations, not sample rates. */
 static uint32_t g_sd_route_epoch, g_sd_launch_route_epoch;
+static void sd_route_epoch_advance(void);
 
 /* Caller holds the short IRQ lock; only the local extended uptime is read.
  * No router/network-clock lock is acquired from a receive callback. */
@@ -256,7 +266,7 @@ static uint64_t sd_route_session_locked(uint64_t local)
 {
   if (!g_sd_launch_closed && g_sd_deadline_anchored && local >= g_sd_close_local_ms) {
     g_sd_launch_closed = 1U;
-    ++g_sd_route_epoch;
+    sd_route_epoch_advance();
   }
   return g_sd_deadline_anchored && !g_sd_launch_closed ? g_sd_session : 0U;
 }
@@ -284,7 +294,7 @@ static uint8_t sd_launch_finished(void)
   if (g_sd_close_unix_ms != 0U && !g_sd_deadline_anchored && !g_sd_launch_closed && utc != 0U) {
     g_sd_close_local_ms = local + (utc < g_sd_close_unix_ms ? g_sd_close_unix_ms - utc : 0U);
     g_sd_deadline_anchored = 1U;
-    ++g_sd_route_epoch;
+    sd_route_epoch_advance();
     g_sd_launch_route_epoch = g_sd_route_epoch;
   }
   (void)sd_route_session_locked(local);
@@ -329,7 +339,7 @@ void sd_card_set_launch_clock(uint64_t session, uint64_t close_unix_ms)
     }
   }
   const uint64_t after = sd_route_session_locked(local);
-  if (before != after) ++g_sd_route_epoch;
+  if (before != after) sd_route_epoch_advance();
   if (after != 0U) g_sd_launch_route_epoch = g_sd_route_epoch;
   __set_PRIMASK(mask);
 }
@@ -376,6 +386,113 @@ static uint32_t sd_calibration_snapshot(daq_calibration_t *calibration)
   const uint32_t generation = g_sd_calibration_generation;
   __set_PRIMASK(saved);
   return generation;
+}
+
+/* All producers, reservations and queued/active consumers hold a reference.
+ * A seal moves current references into the old cohort in one short RAM step.
+ * Neither an empty queue nor a copied boolean can prove these references gone. */
+static struct { uint32_t current, old, cutoff, flags; float old_tuple[4]; } g_sd_capture;
+#define SD_CAPTURE_SEALED 1U
+#define SD_CAPTURE_FAULT 2U
+_Static_assert(sizeof(g_sd_capture) == 32U, "Bounded cohort metadata");
+static void sd_route_epoch_advance(void)
+{
+  /* Keep ordinary routing/data behavior. Exhaustion disables only thermal
+   * admission; it must never wrap into a trusted cutover owner identity. */
+  if (g_sd_route_epoch == UINT32_MAX) g_sd_capture.flags |= SD_CAPTURE_FAULT;
+  ++g_sd_route_epoch;
+}
+static uint8_t sd_capture_old_locked(sd_capture_t capture)
+{
+  return (g_sd_capture.flags & SD_CAPTURE_SEALED) != 0U &&
+      capture < g_sd_capture.cutoff;
+}
+static void sd_capture_retain_locked(sd_capture_t capture)
+{
+  uint32_t *count = sd_capture_old_locked(capture) ? &g_sd_capture.old : &g_sd_capture.current;
+  if (*count == UINT32_MAX || (sd_capture_old_locked(capture) && *count == 0U))
+    g_sd_capture.flags |= SD_CAPTURE_FAULT;
+  if (*count != UINT32_MAX) ++*count;
+}
+void sd_card_capture_retain(sd_capture_t capture)
+{
+  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  sd_capture_retain_locked(capture); __set_PRIMASK(mask);
+}
+void sd_card_capture_release(sd_capture_t capture)
+{
+  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  uint32_t *count = sd_capture_old_locked(capture) ? &g_sd_capture.old : &g_sd_capture.current;
+  if (*count == 0U) g_sd_capture.flags |= SD_CAPTURE_FAULT;
+  else --*count;
+  __set_PRIMASK(mask);
+}
+void sd_card_capture_fault(sd_capture_t capture)
+{
+  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  if (sd_capture_old_locked(capture)) g_sd_capture.flags |= SD_CAPTURE_FAULT;
+  __set_PRIMASK(mask);
+}
+sd_capture_t sd_card_capture_begin(const daq_calibration_t *provided, daq_calibration_t *captured)
+{
+  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  const daq_calibration_t actual = daq_calibration_current();
+  *captured = provided ? *provided : actual;
+  const sd_capture_t capture = g_sd_route_epoch;
+  /* Legacy callers without an original lease retain their data, but may not
+   * make a sealed transaction look complete with an untracked old snapshot. */
+  if ((g_sd_capture.flags & SD_CAPTURE_SEALED) &&
+      memcmp(captured, &actual, sizeof(actual)) != 0)
+    g_sd_capture.flags |= SD_CAPTURE_FAULT;
+  sd_capture_retain_locked(capture);
+  __set_PRIMASK(mask); return capture;
+}
+bool sd_card_thermal_seal(const float old_tuple[4])
+{
+  if (!old_tuple || __get_PRIMASK() == 0U || g_sd_capture.flags != 0U || g_sd_route_epoch == UINT32_MAX)
+    return false;
+  sd_route_epoch_advance(); g_sd_capture.cutoff = g_sd_route_epoch;
+  g_sd_capture.old = g_sd_capture.current; g_sd_capture.current = 0U;
+  memcpy(g_sd_capture.old_tuple, old_tuple, sizeof(g_sd_capture.old_tuple));
+  g_sd_capture.flags = SD_CAPTURE_SEALED;
+  return true;
+}
+bool sd_card_thermal_publish_metadata(const float expected[4], const float desired[4])
+{
+  /* Unlike the legacy whole-calibration setter, this cannot finish a launch,
+   * clear its clock/session or perform any SDK/storage work. The service must
+   * separately hold the current safe-apply authority; these bytes are not it. */
+  if (!expected || !desired || __get_PRIMASK() == 0U ||
+      g_sd_capture.flags != SD_CAPTURE_SEALED || g_sd_calibration_generation == UINT32_MAX ||
+      memcmp(g_sd_calibration.thermal, expected, sizeof(g_sd_calibration.thermal)) != 0)
+    return false;
+  if (memcmp(expected, desired, sizeof(g_sd_calibration.thermal)) != 0) {
+    memcpy(g_sd_calibration.thermal, desired, sizeof(g_sd_calibration.thermal));
+    ++g_sd_calibration_generation;
+  }
+  return true;
+}
+bool sd_card_thermal_old_drained(void)
+{
+  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  const bool ready = g_sd_capture.flags == SD_CAPTURE_SEALED && g_sd_capture.old == 0U;
+  __set_PRIMASK(mask); return ready;
+}
+void sd_card_thermal_finish(void)
+{
+  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  if (g_sd_capture.flags == SD_CAPTURE_SEALED && g_sd_capture.old == 0U)
+    g_sd_capture.flags = 0U;
+  else g_sd_capture.flags |= SD_CAPTURE_FAULT;
+  __set_PRIMASK(mask);
+}
+void sd_card_thermal_cohort_snapshot(uint32_t words[4])
+{
+  if (!words) return;
+  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  words[0]=g_sd_capture.current; words[1]=g_sd_capture.old;
+  words[2]=g_sd_capture.cutoff; words[3]=g_sd_capture.flags;
+  __set_PRIMASK(mask);
 }
 
 /* Only the storage worker calls these adapters. IDMA owns the aligned
@@ -986,6 +1103,20 @@ static UINT sd_flush_pending(void)
   return FX_SUCCESS;
 }
 
+/* Sole-writer durable barrier: queued owner retirement alone is insufficient.
+ * FileX media flush updates modified open-file directory entries, FAT/cache and
+ * invokes the real media driver. Failed buffered writes retain their retry
+ * offset and bytes in the existing helpers; never claim the old cohort durable. */
+bool sd_card_thermal_flush_old(void)
+{
+  if (tx_thread_identify() != &sd_writer_thread || !g_sd_ready ||
+      !sd_card_thermal_old_drained()) return false;
+  if (sd_flush_pending() != FX_SUCCESS || sd_flush_telemetry_pending() != FX_SUCCESS ||
+      sd_media_flush() != FX_SUCCESS) return false;
+  return g_sd_write_buffer_len == 0U && g_sd_telemetry_write_buffer_len == 0U &&
+      sd_card_thermal_old_drained();
+}
+
 static UINT sd_write_bytes(const void *data, size_t len)
 {
   if (g_file_open == 0U || data == NULL || len == 0U || len > sizeof(g_sd_write_buffer))
@@ -1136,6 +1267,15 @@ static void sd_free_raw_slot(sd_raw_slot_t *slot)
   }
 }
 
+static uint8_t sd_raw_retire_completed(sd_raw_slot_t **pending, uint16_t index)
+{
+  sd_raw_slot_t *slot = pending ? *pending : NULL;
+  if (!slot || index != slot->count) return 0U;
+  sd_card_capture_release(slot->capture); sd_free_raw_slot(slot);
+  *pending = NULL; g_sd_raw_pending = 0U; g_sd_raw_retry = 0U;
+  return 1U;
+}
+
 /* Every queued batch/row carries its acquisition calibration. A delayed
  * old batch must never be labelled with newly received coefficients. */
 static UINT sd_select_calibration(const daq_calibration_t *calibration)
@@ -1191,7 +1331,7 @@ static UINT sd_write_optional_snapshot_item(const sd_line_slot_t *pending,
     UCHAR bytes[offsetof(sd_line_slot_t, line) + SD_LINE_MAX];
   } storage;
   sd_line_slot_t *expanded = (sd_line_slot_t *)(void *)storage.bytes;
-  expanded->calibration = owner->calibration;
+  expanded->calibration = owner->calibration; expanded->capture = owner->capture;
   expanded->session = owner->session; expanded->route_epoch = owner->route_epoch;
   char value[24]; sd_format_float(value, owner->values[*index]);
   const int length = sd_format_csv_record(expanded->line, SD_LINE_MAX,
@@ -1227,7 +1367,7 @@ static UINT sd_write_telemetry_item(const sd_line_slot_t *pending,
     UCHAR bytes[offsetof(sd_line_slot_t, line) + SD_LINE_MAX];
   } storage;
   sd_line_slot_t *expanded = (sd_line_slot_t *)(void *)storage.bytes;
-  expanded->calibration = batch->calibration; expanded->session = batch->session;
+  expanded->calibration = batch->calibration; expanded->capture = batch->capture; expanded->session = batch->session;
   expanded->route_epoch = batch->route_epoch;
   char value[24]; sd_format_float(value, row->value);
   const int length = sd_format_csv_record(expanded->line, SD_LINE_MAX,
@@ -1264,6 +1404,8 @@ static uint8_t sd_service_telemetry_rows(void)
       const uint8_t guard = sd_optional_snapshot_guard(pending, scalar_index);
       if (guard == 0U) break; /* Retain this exact owner and cursor. */
       if (guard == 2U) {
+        sd_capture_t abandoned; memcpy(&abandoned, (const char *)pending + offsetof(sd_line_slot_t, capture), sizeof(abandoned));
+        sd_card_capture_fault(abandoned);
         sd_release_telemetry_owner(pending);
         pending = NULL; g_sd_line_pending = 0U; serviced = 1U;
         continue; /* This discard consumes one of the same five iterations. */
@@ -1304,9 +1446,14 @@ static uint8_t sd_service_pressure_rows(void)
       g_sd_pressure_pending = 1U; index = 0U; slot->len = 0U;
       g_sd_pressure_pending_epoch = pending.message.route_epoch;
       slot->session = pending.message.session;
+      slot->capture = pending.message.route_epoch;
       /* Pressure raw/converted values come from VB; DAQ coefficients are only
        * the common file metadata and never transform a pressure record. */
+      const uint32_t snapshot_mask = __get_PRIMASK(); __disable_irq();
       (void)sd_calibration_snapshot(&slot->calibration);
+      if (sd_capture_old_locked(pending.message.route_epoch))
+        memcpy(slot->calibration.thermal, g_sd_capture.old_tuple, sizeof(g_sd_capture.old_tuple));
+      __set_PRIMASK(snapshot_mask);
     }
     const uint8_t launch = (pending.message.capture_route & (1U << index)) != 0U;
     if (launch ? !sd_pressure_raw_epoch_ready(pending.message.route_epoch) :
@@ -1324,7 +1471,8 @@ static uint8_t sd_service_pressure_rows(void)
           raw, converted, (uint32_t)(batch->first_sequence + index));
       if (n < 0) {
         ++g_sd_pressure_records_dropped; ++g_sd_write_error_count;
-        if (++index == PRESSURE_SD_SAMPLES) g_sd_pressure_pending = 0U;
+        sd_card_capture_fault(pending.message.route_epoch);
+        if (++index == PRESSURE_SD_SAMPLES) { sd_card_capture_release(pending.message.route_epoch); g_sd_pressure_pending = 0U; }
         continue;
       }
       slot->len = (uint16_t)n;
@@ -1335,7 +1483,7 @@ static uint8_t sd_service_pressure_rows(void)
     g_sd_pressure_raw_retry = 0U;
     ++g_sd_pressure_records_written; ++g_sd_csv_rows_written_count;
     slot->len = 0U;
-    if (++index == PRESSURE_SD_SAMPLES) g_sd_pressure_pending = 0U;
+    if (++index == PRESSURE_SD_SAMPLES) { sd_card_capture_release(pending.message.route_epoch); g_sd_pressure_pending = 0U; }
   }
   return serviced;
 }
@@ -1515,6 +1663,7 @@ void sd_card_writer_thread_entry(ULONG initial_input)
               sample->adc_temperature_code, sample->record_sequence, &raw_format_cache);
           if (len <= 0 || (size_t)len >= sizeof(line)) {
             ++g_sd_write_error_count; ++g_sd_raw_records_io_lost_count;
+            sd_card_capture_fault(slot->capture);
             pending_raw_index = i + 1U;
             continue; /* Count an unformattable record; do not wedge the entire logger. */
           }
@@ -1527,7 +1676,7 @@ void sd_card_writer_thread_entry(ULONG initial_input)
           g_sd_raw_records_written_count++;
           pending_raw_index = i + 1U;
         }
-        if (pending_raw_index == slot->count) { sd_free_raw_slot(slot); pending_raw = NULL; g_sd_raw_pending = 0U; g_sd_raw_retry = 0U; }
+        (void)sd_raw_retire_completed(&pending_raw, pending_raw_index);
       }
     }
 
@@ -1645,7 +1794,8 @@ static sd_card_status_t sd_enqueue_line(sd_line_slot_t *slot)
   if (result != TX_SUCCESS)
   {
     g_sd_line_drop_count++;
-    sd_free_slot(slot);
+    sd_card_capture_fault(slot->capture);
+    sd_card_capture_release(slot->capture); sd_free_slot(slot);
     return SD_CARD_STATUS_BACKPRESSURE;
   }
   return SD_CARD_STATUS_OK;
@@ -1711,6 +1861,9 @@ static uint8_t sd_optional_snapshot_guard(sd_line_slot_t *owner, uint16_t index)
 
 static void sd_release_telemetry_owner(sd_line_slot_t *owner)
 {
+  sd_capture_t capture; memcpy(&capture, (const char *)owner + offsetof(sd_line_slot_t, capture), sizeof(capture));
+  sd_card_capture_release(capture);
+
   for (unsigned slot = 0U; slot < SD_OPTIONAL_SNAPSHOT_SLOTS; ++slot) {
     if ((void *)owner != (void *)&g_sd_optional_snapshots[slot]) continue;
     const uint32_t mask = __get_PRIMASK(); __disable_irq();
@@ -1743,7 +1896,7 @@ static int sd_scalar_sensor_index(const char *name)
 }
 
 static sd_card_status_t sd_enqueue_scalar(uint8_t sensor, uint64_t network_ms,
-    uint64_t uptime, float value, const daq_calibration_t *calibration)
+    uint64_t uptime, float value, const daq_calibration_t *calibration, sd_capture_t capture)
 {
   const uint8_t required = sensor < SD_REQUIRED_SCALAR_SENSORS;
   /* A compact append consumes no new block, but optional work still observes
@@ -1758,7 +1911,7 @@ static sd_card_status_t sd_enqueue_scalar(uint8_t sensor, uint64_t network_ms,
   const uint32_t epoch = g_sd_route_epoch;
   sd_scalar_slot_t *tail = g_sd_scalar_append_tail;
   if (tail && tail->count < tail->capacity && tail->session == session &&
-      tail->route_epoch == epoch && sequence - tail->sequence_base <= UINT32_MAX &&
+      tail->route_epoch == epoch && tail->capture == capture && sequence - tail->sequence_base <= UINT32_MAX &&
       memcmp(&tail->calibration, calibration, sizeof(*calibration)) == 0) {
     tail->records[tail->count++] = (sd_scalar_record_t){network_ms, (uint32_t)uptime,
         (uint32_t)(sequence - tail->sequence_base), value, sensor};
@@ -1787,6 +1940,7 @@ static sd_card_status_t sd_enqueue_scalar(uint8_t sensor, uint64_t network_ms,
   }
   slot->len = SD_SCALAR_SLOT_TAG; slot->count = 1U; slot->capacity = SD_SCALAR_BATCH_MAX;
   slot->session = session; slot->route_epoch = epoch; slot->calibration = *calibration;
+  slot->capture = capture; sd_card_capture_retain(capture);
   slot->sequence_base = sequence; slot->uptime_reference = uptime;
   slot->records[0] = (sd_scalar_record_t){network_ms, (uint32_t)uptime, 0U, value, sensor};
   const ULONG message = (ULONG)(uintptr_t)slot;
@@ -1802,7 +1956,7 @@ static sd_card_status_t sd_enqueue_scalar(uint8_t sensor, uint64_t network_ms,
     ++g_sd_line_drop_count;
     if (required) ++g_sd_essential_telemetry_dropped;
     else ++g_sd_optional_telemetry_dropped;
-    sd_free_slot((sd_line_slot_t *)(void *)slot); return SD_CARD_STATUS_BACKPRESSURE;
+    sd_card_capture_release(capture); sd_free_slot((sd_line_slot_t *)(void *)slot); return SD_CARD_STATUS_BACKPRESSURE;
   }
   return SD_CARD_STATUS_OK;
 }
@@ -1811,23 +1965,26 @@ static sd_card_status_t sd_enqueue_scalar(uint8_t sensor, uint64_t network_ms,
 sd_card_status_t sd_card_log_packet(const SedsPacketView *pkt)
 {
   if (!g_sd_ready || !pkt) return SD_CARD_STATUS_BUSY;
+  daq_calibration_t captured_calibration;
+  const sd_capture_t capture = sd_card_capture_begin(NULL, &captured_calibration);
   if (!sd_optional_telemetry_admitted()) {
     ++g_sd_optional_telemetry_dropped; ++g_sd_line_drop_count;
-    return SD_CARD_STATUS_BACKPRESSURE;
+    { sd_card_capture_fault(capture); sd_card_capture_release(capture); return SD_CARD_STATUS_BACKPRESSURE; }
   }
   const int32_t want = seds_pkt_to_string_len(pkt);
   char value[SD_LINE_MAX], line[SD_LINE_MAX];
   if (want < 0 || (size_t)want >= sizeof(value) ||
-      seds_pkt_to_string(pkt, value, (size_t)want + 1U) != SEDS_OK) return SD_CARD_STATUS_IO_ERROR;
+      seds_pkt_to_string(pkt, value, (size_t)want + 1U) != SEDS_OK) { sd_card_capture_fault(capture); sd_card_capture_release(capture); return SD_CARD_STATUS_IO_ERROR; }
   const uint64_t uptime = board_uptime_ticks(), utc = daq_log_unix_ms();
   const int len = sd_format_csv_record(line, sizeof(line), utc, uptime, "seds_packet", value, sd_next_row_sequence());
-  if (len < 0) return SD_CARD_STATUS_IO_ERROR;
+  if (len < 0) { sd_card_capture_fault(capture); sd_card_capture_release(capture); return SD_CARD_STATUS_IO_ERROR; }
   sd_line_slot_t *slot = sd_alloc_slot((uint16_t)len);
-  if (!slot) { g_sd_line_drop_count++; return SD_CARD_STATUS_BACKPRESSURE; }
-  (void)sd_calibration_snapshot(&slot->calibration);
+  if (!slot) { g_sd_line_drop_count++; { sd_card_capture_fault(capture); sd_card_capture_release(capture); return SD_CARD_STATUS_BACKPRESSURE; } }
+  slot->calibration = captured_calibration;
+  slot->capture = capture; sd_card_capture_retain(capture);
   slot->session = sd_run_snapshot(); slot->len = (uint16_t)len;
   memcpy(slot->line, line, (size_t)len + 1U);
-  return sd_enqueue_line(slot);
+  { sd_card_capture_release(capture); return sd_enqueue_line(slot); }
 }
 
 #endif
@@ -1853,6 +2010,8 @@ sd_card_status_t sd_card_log_pressure_batch(const pressure_sd_batch_t *batch)
   queued.message.route_epoch = (queued.message.capture_route & 15U) != 0U
       ? g_sd_launch_route_epoch : g_sd_route_epoch;
   const UINT result = tx_queue_send(&g_sd_pressure_queue, queued.words, TX_NO_WAIT);
+  if (result == TX_SUCCESS) sd_capture_retain_locked(queued.message.route_epoch);
+  else sd_card_capture_fault(queued.message.route_epoch);
   __set_PRIMASK(mask);
   if (result != TX_SUCCESS) {
     g_sd_pressure_records_dropped += PRESSURE_SD_SAMPLES;
@@ -1862,10 +2021,10 @@ sd_card_status_t sd_card_log_pressure_batch(const pressure_sd_batch_t *batch)
   return SD_CARD_STATUS_OK;
 }
 
-sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,
+static sd_card_status_t sd_card_enqueue_csv_row_captured_impl(const char *sensor_name,
                                          uint64_t timestamp_ms,
                                          float value,
-                                         const daq_calibration_t *calibration)
+                                         const daq_calibration_t *calibration, sd_capture_t capture)
 {
   /* The bounded row queue can accept startup records while the writer mounts
    * the card. Do not discard the first network row merely because mounting
@@ -1891,7 +2050,7 @@ sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,
   const uint64_t uptime = now >= age ? now - age : 0U;
   const uint64_t network_ms = daq_sample_network_ms(daq_log_unix_ms(), now, uptime);
   if (scalar_sensor >= 0)
-    return sd_enqueue_scalar((uint8_t)scalar_sensor, network_ms, uptime, value, &captured_calibration);
+    return sd_enqueue_scalar((uint8_t)scalar_sensor, network_ms, uptime, value, &captured_calibration, capture);
   sd_format_float(value_text, value);
   const int len = sd_format_csv_record(line, sizeof(line), network_ms, uptime,
                                        sensor_name, value_text, sd_next_row_sequence());
@@ -1906,6 +2065,7 @@ sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,
     return SD_CARD_STATUS_BACKPRESSURE;
   }
   slot->calibration = captured_calibration;
+  slot->capture = capture; sd_card_capture_retain(capture);
   slot->session = session;
   memcpy(slot->line, line, (size_t)len + 1U);
   slot->len = (uint16_t)len;
@@ -1915,9 +2075,9 @@ sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,
   return result;
 }
 
-sd_card_status_t sd_card_enqueue_optional_snapshot(
+static sd_card_status_t sd_card_enqueue_optional_snapshot_captured_impl(
     const float values[SD_OPTIONAL_SNAPSHOT_ROWS], uint64_t timestamp_ms,
-    const daq_calibration_t *calibration)
+    const daq_calibration_t *calibration, sd_capture_t capture)
 {
   if (!values || !calibration) return SD_CARD_STATUS_IO_ERROR;
   unsigned slot = SD_OPTIONAL_SNAPSHOT_SLOTS;
@@ -1942,7 +2102,8 @@ sd_card_status_t sd_card_enqueue_optional_snapshot(
   sd_optional_snapshot_t *owner = &g_sd_optional_snapshots[slot];
   /* No formatting, heap/FileX or blocking waits in this producer path. */
   memcpy(owner->values, values, sizeof(owner->values));
-  owner->calibration = *calibration; owner->len = SD_OPTIONAL_SNAPSHOT_TAG;
+  owner->calibration = *calibration; owner->capture = capture;
+  sd_card_capture_retain(capture); owner->len = SD_OPTIONAL_SNAPSHOT_TAG;
   const uint64_t age = (uint32_t)(daq_log_monotonic_ms() - timestamp_ms);
   const uint64_t now = board_uptime_ticks();
   owner->uptime = now >= age ? now - age : 0U;
@@ -1960,6 +2121,7 @@ sd_card_status_t sd_card_enqueue_optional_snapshot(
     g_sd_optional_scalar_records_enqueued += SD_OPTIONAL_SNAPSHOT_ROWS;
     g_sd_optional_scalar_records_coalesced += SD_OPTIONAL_SNAPSHOT_ROWS - 1U;
   } else {
+    sd_card_capture_release(capture);
     g_sd_optional_snapshot_used &= ~(1UL << slot);
     --g_sd_optional_snapshot_slots_used;
     g_sd_optional_telemetry_dropped += SD_OPTIONAL_SNAPSHOT_ROWS;
@@ -1970,9 +2132,9 @@ sd_card_status_t sd_card_enqueue_optional_snapshot(
   return result == TX_SUCCESS ? SD_CARD_STATUS_OK : SD_CARD_STATUS_BACKPRESSURE;
 }
 
-sd_card_status_t sd_card_enqueue_raw_adc_samples(const sd_raw_adc_record_t *samples,
+static sd_card_status_t sd_card_enqueue_raw_adc_samples_captured_impl(const sd_raw_adc_record_t *samples,
                                                  uint16_t count,
-                                                 const daq_calibration_t *calibration)
+                                                 const daq_calibration_t *calibration, sd_capture_t capture)
 {
   if ((g_sd_services_initialized == 0U) || !samples || !calibration || count == 0U || count > SD_RAW_BATCH_MAX) {
     if (samples && count && count <= SD_RAW_BATCH_MAX) sd_raw_count_dropped(samples, count, 0U);
@@ -1991,7 +2153,7 @@ sd_card_status_t sd_card_enqueue_raw_adc_samples(const sd_raw_adc_record_t *samp
   const uint64_t session = sd_run_snapshot();
   const uint32_t epoch = g_sd_route_epoch;
   sd_raw_slot_t *tail = g_sd_raw_append_tail;
-  if (tail && tail->session == session && tail->route_epoch == epoch &&
+  if (tail && tail->session == session && tail->route_epoch == epoch && tail->capture == capture &&
       memcmp(&tail->calibration, calibration, sizeof(*calibration)) == 0) {
     while (index < count && tail->count < tail->capacity) {
       if (optional || sd_raw_is_essential(&samples[index])) {
@@ -2020,6 +2182,7 @@ sd_card_status_t sd_card_enqueue_raw_adc_samples(const sd_raw_adc_record_t *samp
   }
   slot->uptime_reference = uptime;
   slot->calibration = *calibration;
+  slot->capture = capture; sd_card_capture_retain(capture);
   slot->session = session; slot->route_epoch = epoch; slot->count = 0U;
   for (; index < count; ++index)
     if (optional || sd_raw_is_essential(&samples[index])) slot->samples[slot->count++] = samples[index];
@@ -2034,7 +2197,7 @@ sd_card_status_t sd_card_enqueue_raw_adc_samples(const sd_raw_adc_record_t *samp
   if (result != TX_SUCCESS) {
     ++g_sd_raw_batch_drop_count;
     sd_raw_count_dropped(slot->samples, slot->count, 0U);
-    sd_free_raw_slot(slot);
+    sd_card_capture_release(capture); sd_free_raw_slot(slot);
     return SD_CARD_STATUS_BACKPRESSURE;
   }
   return retained == count ? SD_CARD_STATUS_OK : SD_CARD_STATUS_BACKPRESSURE;
@@ -2127,4 +2290,54 @@ void sd_card_set_calibration(const daq_calibration_t *calibration)
   if (changed) { g_sd_calibration = *calibration; ++g_sd_calibration_generation; }
   __set_PRIMASK(saved);
   if (changed && finished) sd_card_set_launch_clock(0U, 0U);
+}
+
+/* Refusal belongs to the producer owner, not to callers remembering an
+ * extra notification. A failed old-cohort handoff cannot become a successful
+ * drain merely because its final reservation was correctly retired. */
+sd_card_status_t sd_card_enqueue_csv_row_captured(const char *name, uint64_t timestamp,
+    float value, const daq_calibration_t *calibration, sd_capture_t capture)
+{
+  const sd_card_status_t result = sd_card_enqueue_csv_row_captured_impl(name, timestamp, value, calibration, capture);
+  if (result != SD_CARD_STATUS_OK) sd_card_capture_fault(capture);
+  return result;
+}
+sd_card_status_t sd_card_enqueue_raw_adc_samples_captured(const sd_raw_adc_record_t *samples,
+    uint16_t count, const daq_calibration_t *calibration, sd_capture_t capture)
+{
+  const sd_card_status_t result = sd_card_enqueue_raw_adc_samples_captured_impl(samples, count, calibration, capture);
+  if (result != SD_CARD_STATUS_OK) sd_card_capture_fault(capture);
+  return result;
+}
+sd_card_status_t sd_card_enqueue_optional_snapshot_captured(const float values[SD_OPTIONAL_SNAPSHOT_ROWS],
+    uint64_t timestamp, const daq_calibration_t *calibration, sd_capture_t capture)
+{
+  const sd_card_status_t result = sd_card_enqueue_optional_snapshot_captured_impl(values, timestamp, calibration, capture);
+  if (result != SD_CARD_STATUS_OK) sd_card_capture_fault(capture);
+  return result;
+}
+/* Compatibility entrypoints acquire a lease before formatting/allocation. */
+sd_card_status_t sd_card_enqueue_csv_row(const char *name, uint64_t timestamp, float value,
+                                        const daq_calibration_t *provided)
+{
+  daq_calibration_t calibration;
+  const sd_capture_t capture = sd_card_capture_begin(provided, &calibration);
+  const sd_card_status_t result = sd_card_enqueue_csv_row_captured(name, timestamp, value, &calibration, capture);
+  sd_card_capture_release(capture); return result;
+}
+sd_card_status_t sd_card_enqueue_raw_adc_samples(const sd_raw_adc_record_t *samples, uint16_t count,
+                                                 const daq_calibration_t *provided)
+{
+  daq_calibration_t calibration;
+  const sd_capture_t capture = sd_card_capture_begin(provided, &calibration);
+  const sd_card_status_t result = sd_card_enqueue_raw_adc_samples_captured(samples, count, &calibration, capture);
+  sd_card_capture_release(capture); return result;
+}
+sd_card_status_t sd_card_enqueue_optional_snapshot(const float values[SD_OPTIONAL_SNAPSHOT_ROWS], uint64_t timestamp,
+                                                   const daq_calibration_t *provided)
+{
+  daq_calibration_t calibration;
+  const sd_capture_t capture = sd_card_capture_begin(provided, &calibration);
+  const sd_card_status_t result = sd_card_enqueue_optional_snapshot_captured(values, timestamp, &calibration, capture);
+  sd_card_capture_release(capture); return result;
 }

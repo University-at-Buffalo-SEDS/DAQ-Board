@@ -5,6 +5,7 @@
 extern "C" {
 #endif
 
+#include <stdbool.h>
 #include "sedsnet_config.h"
 #include "tx_api.h"
 #include "daq_calibration.h"
@@ -18,6 +19,21 @@ typedef enum
   SD_CARD_STATUS_IO_ERROR = 3
 } sd_card_status_t;
 
+/* A retained calibration capture reference. Internal producers transfer/clone
+ * it into existing work/SD owners; it is not a timestamp or network identity. */
+sd_capture_t sd_card_capture_begin(const daq_calibration_t *provided, daq_calibration_t *captured);
+void sd_card_capture_retain(sd_capture_t capture);
+void sd_card_capture_release(sd_capture_t capture);
+void sd_card_capture_fault(sd_capture_t capture);
+/* Sole writer/control adapter only; callers hold the short RAM gate. */
+bool sd_card_thermal_seal(const float old_tuple[4]);
+/* RAM publication only; requires the existing short owner gate and a sealed
+ * cohort. This low-level operation is not permission to activate a request. */
+bool sd_card_thermal_publish_metadata(const float expected[4], const float desired[4]);
+bool sd_card_thermal_old_drained(void);
+bool sd_card_thermal_flush_old(void);
+void sd_card_thermal_finish(void);
+void sd_card_thermal_cohort_snapshot(uint32_t words[4]);
 typedef struct
 {
   uint64_t network_unix_ms;
@@ -51,6 +67,15 @@ sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,
 sd_card_status_t sd_card_enqueue_optional_snapshot(
     const float values[SD_OPTIONAL_SNAPSHOT_ROWS], uint64_t timestamp_ms,
     const daq_calibration_t *calibration);
+sd_card_status_t sd_card_enqueue_raw_adc_samples_captured(
+    const sd_raw_adc_record_t *samples, uint16_t count,
+    const daq_calibration_t *calibration, sd_capture_t capture);
+sd_card_status_t sd_card_enqueue_csv_row_captured(
+    const char *sensor_name, uint64_t timestamp_ms, float value,
+    const daq_calibration_t *calibration, sd_capture_t capture);
+sd_card_status_t sd_card_enqueue_optional_snapshot_captured(
+    const float values[SD_OPTIONAL_SNAPSHOT_ROWS], uint64_t timestamp_ms,
+    const daq_calibration_t *calibration, sd_capture_t capture);
 sd_card_status_t sd_card_enqueue_raw_adc_samples(
     const sd_raw_adc_record_t *samples, uint16_t count,
     const daq_calibration_t *calibration);

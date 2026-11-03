@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from sd_fixed_pool_mock import TYPES, FUNCTIONS
+from router_lifecycle_fixture import function
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -16,8 +17,7 @@ class CompactPoolTest(unittest.TestCase):
         types = source[source.index('typedef struct'):source.index('static TX_QUEUE')]
         record = (ROOT / 'Core/Inc/sd_card.h').read_text().split('typedef struct', 1)[1].split('sd_raw_adc_record_t;', 1)[0]
         record_definition = 'typedef struct' + record + 'sd_raw_adc_record_t;\n'
-        helpers = source[source.index('static void *sd_pool_allocate'):
-                         source.index('/* Every queued batch/row')]
+        helpers = '\n'.join(function(source,n) for n in ('sd_pool_allocate','sd_pool_release','sd_alloc_slot','sd_free_slot','sd_alloc_raw_slot','sd_free_raw_slot'))
         code = r'''
 #include <assert.h>
 #include <stdint.h>

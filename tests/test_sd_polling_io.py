@@ -3,6 +3,7 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
+from sd_cohort_fixture import pressure_cohort
 from test_sd_raw_queue import function
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -11,7 +12,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 class SdPollingTests(unittest.TestCase):
     def test_csv_queue_accepts_mount_pending_but_remains_bounded(self):
         source = (ROOT / "Core/Src/sd_card.c").read_text()
-        adapter = function(source, 'sd_card_enqueue_csv_row')
+        adapter = pressure_cohort(source)+function(source,'sd_card_capture_retain')+'\ndaq_calibration_t daq_calibration_current(void){daq_calibration_t c;sd_calibration_snapshot(&c);return c;}\n'+function(source,'sd_card_capture_begin')+'\n'+'\n'.join(function(source,n) for n in ('sd_card_enqueue_csv_row_captured_impl','sd_card_enqueue_csv_row_captured','sd_card_enqueue_csv_row'))
         required=source[source.index("static uint8_t sd_required_sensor_name("):source.index("static uint64_t sd_row_sequence;")]
         code = r'''
 #include <assert.h>
@@ -23,8 +24,13 @@ class SdPollingTests(unittest.TestCase):
 #include "sd_record_format.h"
 typedef int sd_card_status_t;
 #define SD_LINE_MAX 384U
+typedef uint32_t sd_capture_t;
+static uint32_t g_sd_route_epoch;
+static uint32_t __get_PRIMASK(void){return 0;}
+static void __disable_irq(void){}
+static void __set_PRIMASK(uint32_t m){(void)m;}
 typedef struct { float slope; } daq_calibration_t;
-typedef struct { daq_calibration_t calibration; char line[384]; uint16_t len; uint64_t session; } sd_line_slot_t;
+typedef struct { daq_calibration_t calibration;sd_capture_t capture; char line[384]; uint16_t len; uint64_t session; } sd_line_slot_t;
 enum { SD_CARD_STATUS_OK, SD_CARD_STATUS_BUSY, SD_CARD_STATUS_BACKPRESSURE, SD_CARD_STATUS_IO_ERROR };
 static unsigned g_sd_services_initialized, g_sd_line_drop_count, g_sd_optional_telemetry_dropped, g_sd_essential_telemetry_dropped;
 static unsigned optional_allowed=1;
@@ -41,7 +47,7 @@ static uint64_t daq_log_unix_ms(void) { return network_ms; }
 static uint64_t daq_log_monotonic_ms(void) { return 30; }
 static int sd_enqueue_line(sd_line_slot_t *s) { assert(s->len); enqueued++; return SD_CARD_STATUS_OK; }
 static int sd_scalar_sensor_index(const char *name){(void)name;return -1;}
-static int sd_enqueue_scalar(uint8_t s,uint64_t n,uint64_t u,float v,const daq_calibration_t *c){(void)s;(void)n;(void)u;(void)v;(void)c;assert(0);return -1;}
+static int sd_enqueue_scalar(uint8_t s,uint64_t n,uint64_t u,float v,const daq_calibration_t *c,sd_capture_t capture){(void)capture;(void)s;(void)n;(void)u;(void)v;(void)c;assert(0);return -1;}
 ''' + required + adapter + r'''
 int main(void) {
   assert(sd_card_enqueue_csv_row("kg1000_network", 20, 0.25f, NULL)==SD_CARD_STATUS_BUSY);

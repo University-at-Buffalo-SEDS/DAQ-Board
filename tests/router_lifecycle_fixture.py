@@ -19,6 +19,10 @@ int persistent_store_set(uint32_t,const void*,size_t);
 }
 
 
+# Keep the actual cache API declarations synchronized with the focused owner fixture.
+from test_cache_reset_owner import HEADERS as CURRENT_CACHE_HEADERS
+MOCK_HEADERS.update({key: CURRENT_CACHE_HEADERS[key] for key in ("main.h", "persistent_store.h")})
+
 def masked(source):
     return re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
                   lambda m: ''.join('\n' if c == '\n' else ' ' for c in m[0]),

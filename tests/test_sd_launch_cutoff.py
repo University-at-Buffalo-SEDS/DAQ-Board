@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from sd_cohort_fixture import route_epoch_support, pressure_cohort
 from test_pressure_sd_handoff import function
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,7 +34,7 @@ static void __disable_irq(void){mask=1;}
 static void __set_PRIMASK(uint32_t m){mask=m;}
 static uint64_t daq_log_unix_ms(void){assert(!mask);return utc;}
 static uint64_t daq_log_monotonic_ms(void){return board_uptime_extend(&uptime,raw);}
-"""+body+r"""
+"""+body+route_epoch_support(source)+r"""
 int main(void){
  const uint64_t start=utc;
  sd_card_set_launch_clock(10,start+20000);
@@ -93,7 +94,7 @@ static uint32_t HAL_GetTick(void){return (uint32_t)local;}
 static int seds_router_enable_network_variable(SedsRouter *r,unsigned ty,bool read,bool write){(void)r;(void)ty;(void)read;(void)write;return 0;}
 static int seds_router_on_network_variable_update(SedsRouter *r,unsigned ty,SedsResult (*cb)(const SedsPacketView*,void*),void *u){(void)r;(void)ty;(void)cb;(void)u;return 0;}
 static int seds_router_request_managed_variable(SedsRouter *r,unsigned ty){(void)r;(void)ty;return 0;}
-"""+lifecycle+receiver+r"""
+"""+lifecycle+route_epoch_support(source)+receiver+r"""
 static void publish(uint64_t session,uint64_t deadline,uint64_t stamp){
  uint8_t data[16];for(unsigned i=0;i<8;++i){data[i]=(uint8_t)(session>>(i*8));data[8+i]=(uint8_t)(deadline>>(i*8));}
  SedsPacketView packet={.ty=139,.payload=data,.payload_len=16,.timestamp=stamp};
@@ -183,6 +184,7 @@ int main(void){
         declarations=declarations.replace('static ULONG g_sd_pressure_queue_storage[SD_PRESSURE_QUEUE_BATCHES * SD_PRESSURE_MESSAGE_WORDS];','')
         code=r"""
 #include "pressure_sd_wire.h"
+#include "daq_calibration.h"
 #include <assert.h>
 #include <stdint.h>
 #define sd_media_flush() fx_media_flush(&g_sd_media)
@@ -191,7 +193,7 @@ int main(void){
 #include <string.h>
 typedef uintptr_t ULONG;typedef unsigned UINT;typedef unsigned char UCHAR;
 typedef struct {unsigned tx_queue_enqueued;ULONG *tx_queue_read;} TX_QUEUE;
-typedef struct {uint16_t len;uint32_t route_epoch;unsigned calibration;uint64_t session;char line[384];} sd_line_slot_t;
+typedef struct {uint16_t len;uint32_t route_epoch;daq_calibration_t calibration;sd_capture_t capture;uint64_t session;char line[384];} sd_line_slot_t;
 #define TX_SUCCESS 0U
 #define TX_NO_WAIT 0U
 #define FX_SUCCESS 0U
@@ -206,7 +208,7 @@ static uint8_t g_sd_pressure_raw_retry;
 static uint8_t sd_pressure_raw_epoch_ready(uint32_t epoch){(void)epoch;return 1;}
 static uint64_t file_session=UINT64_MAX;
 static unsigned writes,opens,closes;
-static unsigned sd_calibration_snapshot(unsigned *c){*c=7;return 1;}
+static unsigned sd_calibration_snapshot(daq_calibration_t *c){*c=(daq_calibration_t){.kg1000_slope=7};return 1;}
 static void sd_format_float(char *s,float f){snprintf(s,24,"%.1f",(double)f);}
 static int sd_format_csv_sensor_record(char *s,size_t n,uint64_t u,uint64_t t,const char *name,const char *raw,const char *converted,uint32_t seq){
  (void)u;(void)t;(void)name;(void)raw;(void)converted;return snprintf(s,n,"p%u",seq);
@@ -220,11 +222,11 @@ static unsigned sd_write_telemetry_row(const sd_line_slot_t *row){
  * pressure/raw epoch arbitration is exercised by test_pressure_launch. */
 static unsigned sd_write_launch_pressure_row(const sd_line_slot_t *s){return sd_write_telemetry_row(s);}
 static void sd_free_slot(sd_line_slot_t *s){(void)s;++freed;}
-"""+declarations+r"""
+"""+declarations+pressure_cohort(source)+function(source,'sd_card_capture_retain')+r"""
 static ULONG csv[16],pressure[16][SD_PRESSURE_MESSAGE_WORDS];
-static void push_csv(sd_line_slot_t *s){csv[g_sd_queue.tx_queue_enqueued++]=(ULONG)(uintptr_t)s;g_sd_queue.tx_queue_read=csv;}
+static void push_csv(sd_line_slot_t *s){sd_card_capture_retain(s->capture);csv[g_sd_queue.tx_queue_enqueued++]=(ULONG)(uintptr_t)s;g_sd_queue.tx_queue_read=csv;}
 static void push_pressure(uint32_t epoch,uint64_t session){
- sd_pressure_message_t p={0};p.route_epoch=epoch;p.session=session;p.capture_route=session?15U:0U;
+ sd_pressure_message_t p={0};p.route_epoch=epoch;p.session=session;sd_card_capture_retain(epoch);p.capture_route=session?15U:0U;
  memcpy(pressure[g_sd_pressure_queue.tx_queue_enqueued++],&p,sizeof(p));g_sd_pressure_queue.tx_queue_read=pressure[0];
 }
 static UINT tx_queue_receive(TX_QUEUE *q,void *data,ULONG wait){
@@ -239,7 +241,7 @@ static unsigned sd_write_telemetry_item(sd_line_slot_t *s,uint16_t *i,uint8_t *d
 static unsigned g_sd_optional_snapshots_completed;
 static uint16_t sd_telemetry_tag(const sd_line_slot_t *s){return s->len;}
 static uint8_t sd_optional_snapshot_guard(sd_line_slot_t*s,uint16_t i){(void)s;(void)i;assert(0);return 0;}
-static void sd_release_telemetry_owner(sd_line_slot_t*s){sd_free_slot(s);}
+static void sd_release_telemetry_owner(sd_line_slot_t*s){sd_card_capture_release(s->capture);sd_free_slot(s);}
 
 """+function(source,'sd_telemetry_epoch_ready')+'\n'+function(source,'sd_service_telemetry_rows')+'\n'+function(source,'sd_service_pressure_rows')+r"""
 int main(void){

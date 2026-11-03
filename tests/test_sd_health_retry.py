@@ -4,6 +4,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+import os
 from test_sd_raw_queue import function
 from checked_router_fixture import checked_hooks
 from router_lifecycle_fixture import function as actual_function
@@ -127,7 +128,11 @@ int main(void){
             self.assertIn(f'#define SEDS_DT_{name} ((uint32_t){value}U)',header)
 
     def test_existing_gateway_can_boundary_preserves_new_unknown_type_bytes(self):
-        gateway = ROOT.parent/'gateway-board/Core/Src/telemetry.c'
+        explicit = os.environ.get('DAQ_TEST_GATEWAY_SOURCE')
+        gateway_root = Path(explicit) if explicit else ROOT.parent/'gateway-board'
+        gateway = gateway_root/'Core/Src/telemetry.c'
+        if explicit:
+            self.assertTrue(gateway.is_file(), 'Explicit Gateway source is missing: ' + str(gateway))
         if not gateway.is_file():
             self.skipTest('Workspace-level check requires the gateway peer checkout')
         source = gateway.read_text()
@@ -153,7 +158,7 @@ static int seds_router_rx_packed_packet_to_queue_from_side(void *r,uint32_t side
  assert(r&&side==3&&locked&&n==expected_length&&!memcmp(p,expected,n));delivered++;return 0;
 }
 static int seds_router_rx_packed_packet_to_queue(void *r,const uint8_t *p,size_t n){(void)r;(void)p;(void)n;assert(0);return -1;}
-""" +checked_hooks(ROOT.parent/'gateway-board')+'\n'+'\n'.join(actual_function(source,n)for n in ('rx_asynchronous_locked','rx_asynchronous'))
+""" +checked_hooks(gateway_root)+'\n'+'\n'.join(actual_function(source,n)for n in ('rx_asynchronous_locked','rx_asynchronous'))
         def uleb(value):
             out=[]
             while value>=128:out.append((value&127)|128);value>>=7

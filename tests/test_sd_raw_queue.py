@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from sd_fixed_pool_mock import TYPES, FUNCTIONS
+from sd_cohort_fixture import raw_enqueue
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -71,8 +72,9 @@ static sd_raw_slot_t *g_sd_raw_append_tail;
 '''
         for name in ['sd_pool_allocate','sd_pool_release','sd_alloc_raw_slot','sd_free_raw_slot',
                      'sd_take_raw_message','sd_raw_backlog_records','sd_raw_optional_admitted','sd_raw_is_essential',
-                     'sd_raw_count_dropped','sd_card_enqueue_raw_adc_samples']:
+                     'sd_raw_count_dropped']:
             program+=function(source,name)+'\n'
+        program+=raw_enqueue(source)
         program+=r'''
 static sd_raw_slot_t *take(void){ULONG message;assert(sd_take_raw_message(&message)==0);return(sd_raw_slot_t*)(uintptr_t)message;}
 static sd_raw_adc_record_t make(uint32_t sequence,unsigned channel){

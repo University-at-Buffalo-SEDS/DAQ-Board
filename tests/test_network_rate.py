@@ -58,8 +58,21 @@ class NetworkRateTests(unittest.TestCase):
 #define SEDS_DT_DAQ_SAR_VOLTAGES 5
 #define SEDS_DT_DAQ_CURRENT_SENSE 6
 #define SEDS_DT_DAQ_POWER_MONITOR 7
+typedef uint32_t sd_capture_t;
+static void sd_card_capture_fault(sd_capture_t c){assert(c==0);}
 typedef int SedsResult;
-typedef struct {float slope, intercept;} daq_calibration_t;
+typedef struct
+{
+  float kg1000_slope;
+  float kg1000_intercept;
+  float iadc_slope;
+  float iadc_intercept;
+  /* KG50: ascending polynomial coefficients, input shift, tare offset. */
+  float kg50[7];
+  /* [KG1000 reference C, raw/C, KG50 reference C, raw/C]. */
+  float thermal[4];
+  float filter_tau_ms[2]; /* KG1000, KG50; 0 disables smoothing. */
+} daq_calibration_t;
 typedef struct {
  uint64_t monotonic_ms;
  unsigned ext_adc_sample_valid, analog_sample_fresh;
@@ -82,8 +95,9 @@ static uint32_t __get_PRIMASK(void){return irq;}
 static void __disable_irq(void){irq=1;}
 static void __set_PRIMASK(uint32_t value){irq=value;}
 static float mcp3564r_connector_voltage(unsigned i,float value){(void)i;return value;}
-static int sd_card_enqueue_csv_row(const char*name,uint64_t ms,float raw,const daq_calibration_t*c){
- assert(ms==expected_ms && raw==expected_value && c->slope==3 && c->intercept==-7);
+static int sd_card_enqueue_csv_row_captured(const char*name,uint64_t ms,float raw,const daq_calibration_t*c,sd_capture_t capture){
+ assert(capture==0);
+ assert(ms==expected_ms && raw==expected_value && c->kg1000_slope==3 && c->kg1000_intercept==-7);
  unsigned ty=!strcmp(name,"kg1000_network")?0:!strcmp(name,"kg50_network")?1:2;
  assert(ty!=2 || !strcmp(name,"kg50_p6_network_volts"));++sd_rows;++sd_by_type[ty];return 0;
 }
@@ -112,11 +126,11 @@ static void capture_loadcell(const daq_snapshot_t*s,const daq_calibration_t*c,co
  daq_report_t report={.monotonic_ms=s->monotonic_ms,.kg1000=s->ext_adc_loadcell_kg1000,.flags=DAQ_REPORT_KG1000};
  if(pressure){report.chamber[0]=pressure[0];report.chamber[1]=pressure[1];report.chamber_valid=1;}
  daq_offer_live_report(&report); /* acquisition owns NETWORK offers */
- daq_publish_loadcell(s,c,pressure); /* independent SD row path */
+ daq_publish_loadcell(s,c,pressure,0); /* independent SD row path */
 }
 static void capture_kg50(float value,uint8_t input,uint64_t ms,const daq_calibration_t*c){
  daq_report_t report={.monotonic_ms=ms,.kg50=value,.kg50_input=input,.flags=DAQ_REPORT_KG50};
- daq_offer_live_report(&report);daq_publish_kg50(value,input,ms,c);
+ daq_offer_live_report(&report);daq_publish_kg50(value,input,ms,c,0);
 }
 static void publish_temperature(float value,uint64_t ms){
  daq_report_t report={.monotonic_ms=ms,.temperature=value,.flags=DAQ_REPORT_TEMPERATURE};
@@ -124,7 +138,7 @@ static void publish_temperature(float value,uint64_t ms){
 }
 int main(void){
  assert(DAQ_ADC_READ_RATE_HZ==5556 && DAQ_ACQUISITION_PERIOD_MS==2 && DAQ_BROADCAST_PERIOD_MS==4);
- daq_calibration_t calibration={3,-7};daq_snapshot_t snapshot={.ext_adc_sample_valid=1};
+ daq_calibration_t calibration={.kg1000_slope=3,.kg1000_intercept=-7};daq_snapshot_t snapshot={.ext_adc_sample_valid=1};
  daq_loadcell_window_t window={.count={0,0,1}};
  const unsigned weights[7]={DAQ_NETWORK_WEIGHT_KG50,DAQ_NETWORK_WEIGHT_KG1000,DAQ_NETWORK_WEIGHT_TEMPERATURE,
    DAQ_NETWORK_WEIGHT_SDADC,DAQ_NETWORK_WEIGHT_SAR,DAQ_NETWORK_WEIGHT_CURRENT,DAQ_NETWORK_WEIGHT_POWER};
@@ -181,7 +195,7 @@ int main(void){
         code=self.harness()
         code=code.replace('type==0?DAQ_NETWORK_KG1000', '(type==0||type==141)?DAQ_NETWORK_KG1000')
         code=code.replace('const float*p=value;', 'const float*p=value; if(type==141){assert(n==3&&p[1]==500.0f&&p[2]==2.5f);}')
-        code=code.replace('daq_calibration_t calibration={3,-7};','float pressure[2]={500.0f,2.5f};daq_calibration_t calibration={3,-7};')
+        code=code.replace('daq_calibration_t calibration={.kg1000_slope=3,.kg1000_intercept=-7};','float pressure[2]={500.0f,2.5f};daq_calibration_t calibration={.kg1000_slope=3,.kg1000_intercept=-7};')
         code=code.replace('if(actual_ms%4==0){','if(actual_ms%4==0){pressure[0]=actual_ms<5000?500.0f:NAN;')
         code=code.replace('capture_loadcell(&snapshot,&calibration,NULL);','capture_loadcell(&snapshot,&calibration,pressure);')
         self.compile(code)

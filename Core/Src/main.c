@@ -1,3 +1,6 @@
+#include "board_commissioning.h"
+#include "board_recovery_floor.h"
+#include "persistent_store.h"
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
@@ -145,8 +148,11 @@ int main(void)
 
   /* USER CODE END 2 */
 
+  (void)persistent_store_boot_begin();
   /* Establish recovery identity before cached state restore and control tasks. */
   (void)board_recovery_boot_generation();
+  (void)board_recovery_floor_prime_boot(); /* Cached failure stays queryable/inhibited. */
+  board_commissioning_probe_boot();
   flight_state_cache_restore();
   board_watchdog_start();
   MX_ThreadX_Init();

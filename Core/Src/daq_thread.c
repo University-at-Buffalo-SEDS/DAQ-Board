@@ -165,7 +165,7 @@ volatile uint32_t g_daq_sd_snapshot_row_drop_count;
 
 static void daq_store_snapshot_csv(const daq_snapshot_t *snapshot,
                                    const daq_calibration_t *calibration,
-                                   const daq_loadcell_window_t *window)
+                                   const daq_loadcell_window_t *window, sd_capture_t capture)
 {
 #if (DISABLE_SD_CARD == 0U)
   if (!snapshot->analog_sample_fresh) return;
@@ -185,10 +185,10 @@ static void daq_store_snapshot_csv(const daq_snapshot_t *snapshot,
   values[21] = snapshot->ext_adc_sample_valid ? snapshot->ext_adc_loadcell_kg1000 : NAN;
   values[22] = snapshot->ext_adc_temp_c;
   values[23] = window->count[1] ? window->voltage_sum[1] / window->count[1] : NAN;
-  if (sd_card_enqueue_optional_snapshot(values, snapshot->monotonic_ms, calibration) != SD_CARD_STATUS_OK)
-    g_daq_sd_snapshot_row_drop_count += SD_OPTIONAL_SNAPSHOT_ROWS;
+  if (sd_card_enqueue_optional_snapshot_captured(values, snapshot->monotonic_ms, calibration, capture) != SD_CARD_STATUS_OK)
+    { sd_card_capture_fault(capture); g_daq_sd_snapshot_row_drop_count += SD_OPTIONAL_SNAPSHOT_ROWS; }
 #else
-  (void)snapshot; (void)calibration; (void)window;
+  (void)snapshot; (void)calibration; (void)window; (void)capture;
 #endif
 }
 
@@ -325,7 +325,7 @@ static void daq_publish_analog(const daq_snapshot_t *snapshot, const daq_loadcel
 }
 
 static void daq_publish_loadcell(const daq_snapshot_t *snapshot, const daq_calibration_t *calibration,
-                                  const float *chamber)
+                                  const float *chamber, sd_capture_t capture)
 {
   float loadcell_kg1000;
 
@@ -340,33 +340,32 @@ static void daq_publish_loadcell(const daq_snapshot_t *snapshot, const daq_calib
   loadcell_kg1000 = snapshot->ext_adc_loadcell_kg1000;
 
 #if (DISABLE_SD_CARD == 0U)
-  if (sd_card_enqueue_csv_row("kg1000_network",
+  if (sd_card_enqueue_csv_row_captured("kg1000_network",
                               snapshot->monotonic_ms,
-                              loadcell_kg1000, calibration) == SD_CARD_STATUS_OK)
+                              loadcell_kg1000, calibration, capture) == SD_CARD_STATUS_OK)
   {
     g_daq_sd_network_row_ok_count++;
   }
   else
   {
-    g_daq_sd_network_row_fail_count++;
+    sd_card_capture_fault(capture); g_daq_sd_network_row_fail_count++;
   }
 #endif
 
-  (void)chamber;
+  (void)chamber; (void)capture;
 
 }
 
 static void daq_publish_kg50(float raw, uint8_t input, uint64_t monotonic_ms,
-                             const daq_calibration_t *calibration)
+                             const daq_calibration_t *calibration, sd_capture_t capture)
 {
 #if (DISABLE_SD_CARD == 0U)
-  if (sd_card_enqueue_csv_row(input ? "kg50_p6_network_volts" : "kg50_network", monotonic_ms, raw, calibration) == SD_CARD_STATUS_OK)
+  if (sd_card_enqueue_csv_row_captured(input ? "kg50_p6_network_volts" : "kg50_network", monotonic_ms, raw, calibration, capture) == SD_CARD_STATUS_OK)
     g_daq_sd_network_row_ok_count++;
-  else
-    g_daq_sd_network_row_fail_count++;
+  else { sd_card_capture_fault(capture); g_daq_sd_network_row_fail_count++; }
 #else
   (void)monotonic_ms;
-  (void)calibration;
+  (void)calibration; (void)capture;
 #endif
 }
 
@@ -385,8 +384,10 @@ typedef struct {
   float chamber[2];
   uint8_t chamber_valid;
   uint32_t flags;
+  sd_capture_t capture;
   uint8_t kg50_input;
 } daq_report_t;
+_Static_assert(sizeof(daq_report_t) == 112U, "Capture token must not grow the report pool");
 static TX_THREAD g_report_thread;
 static TX_QUEUE g_report_queue;
 static TX_BLOCK_POOL g_report_pool;
@@ -431,12 +432,21 @@ static void daq_enqueue_report(const daq_report_t *report)
   if (!report->flags) return;
   daq_report_t *work;
   if (tx_block_allocate(&g_report_pool, (VOID **)&work, TX_NO_WAIT) != TX_SUCCESS) {
+#if (DISABLE_SD_CARD == 0U)
+    sd_card_capture_fault(report->capture);
+#endif
     g_daq_report_drop_count++;
     return;
   }
   *work = *report;
+#if (DISABLE_SD_CARD == 0U)
+  sd_card_capture_retain(work->capture);
+#endif
   ULONG message = (ULONG)(uintptr_t)work;
   if (tx_queue_send(&g_report_queue, &message, TX_NO_WAIT) != TX_SUCCESS) {
+#if (DISABLE_SD_CARD == 0U)
+    sd_card_capture_fault(work->capture); sd_card_capture_release(work->capture);
+#endif
     (void)tx_block_release(work);
     g_daq_report_drop_count++;
   } else g_daq_report_enqueued_count++;
@@ -457,11 +467,14 @@ static void daq_report_thread_entry(ULONG argument)
       snapshot.ext_adc_sample_valid = 1U;
       snapshot.ext_adc_loadcell_kg1000 = work->kg1000;
       snapshot.monotonic_ms = work->monotonic_ms;
-      daq_publish_loadcell(&snapshot, &work->calibration, work->chamber_valid ? work->chamber : NULL);
+      daq_publish_loadcell(&snapshot, &work->calibration, work->chamber_valid ? work->chamber : NULL, work->capture);
     }
     if (work->flags & DAQ_REPORT_KG50)
-      daq_publish_kg50(work->kg50, work->kg50_input, work->monotonic_ms, &work->calibration);
+      daq_publish_kg50(work->kg50, work->kg50_input, work->monotonic_ms, &work->calibration, work->capture);
     g_daq_report_completed_count++;
+#if (DISABLE_SD_CARD == 0U)
+    sd_card_capture_release(work->capture);
+#endif
     (void)tx_block_release(work);
   }
 }
@@ -480,7 +493,7 @@ static void daq_publish_dummy_can_telemetry(void)
 
 static void daq_enqueue_analog(const daq_snapshot_t *snapshot,
                                const daq_calibration_t *calibration,
-                               const daq_loadcell_window_t *window);
+                               const daq_loadcell_window_t *window, sd_capture_t capture);
 
 void daq_thread_entry(ULONG initial_input)
 {
@@ -535,7 +548,13 @@ void daq_thread_entry(ULONG initial_input)
 
     stage_started = daq_profile_stage(0U, stage_started);
     g_daq_sample_ok_count++;
-    const daq_calibration_t calibration = daq_calibration_current();
+    daq_calibration_t calibration;
+#if (DISABLE_SD_CARD == 0U)
+    const sd_capture_t capture = sd_card_capture_begin(NULL, &calibration);
+#else
+    const sd_capture_t capture = 0U;
+    calibration = daq_calibration_current();
+#endif
     daq_loadcell_window_t window;
 
 #if (DISABLE_SD_CARD == 0U)
@@ -548,7 +567,7 @@ void daq_thread_entry(ULONG initial_input)
 
     stage_started = daq_profile_stage(1U, stage_started);
     daq_report_t report = {.monotonic_ms = snapshot.monotonic_ms,
-                           .calibration = calibration};
+                           .calibration = calibration, .capture = capture};
     const uint32_t report_ms = (uint32_t)snapshot.monotonic_ms;
     if ((uint32_t)(report_ms - last_temperature_report_ms) >= DAQ_TEMPERATURE_REPORT_PERIOD_MS)
     {
@@ -603,11 +622,14 @@ void daq_thread_entry(ULONG initial_input)
     daq_offer_live_report(&report);
 #if (DISABLE_SD_CARD == 0U)
     if ((raw_count != 0U) &&
-        sd_card_enqueue_raw_adc_samples(raw_records, raw_count, &calibration) != SD_CARD_STATUS_OK)
-      ++g_daq_sd_raw_batch_drop_count;
+        sd_card_enqueue_raw_adc_samples_captured(raw_records, raw_count, &calibration, capture) != SD_CARD_STATUS_OK)
+      { sd_card_capture_fault(capture); ++g_daq_sd_raw_batch_drop_count; }
 #endif
     daq_enqueue_report(&report);
-    daq_enqueue_analog(&snapshot, &calibration, &window);
+    daq_enqueue_analog(&snapshot, &calibration, &window, capture);
+#if (DISABLE_SD_CARD == 0U)
+    sd_card_capture_release(capture);
+#endif
 
     stage_started = daq_profile_stage(2U, stage_started);
     (void)daq_board_ext_adc_start_dma();
@@ -660,8 +682,10 @@ void daq_thread_entry(ULONG initial_input)
 typedef struct {
   daq_snapshot_t snapshot;
   daq_calibration_t calibration;
+  sd_capture_t capture;
   daq_loadcell_window_t window;
 } daq_analog_work_t;
+_Static_assert(sizeof(daq_analog_work_t) == 384U, "Capture token must not grow the analog pool");
 static TX_THREAD g_analog_thread;
 static TX_QUEUE g_analog_queue;
 static TX_BLOCK_POOL g_analog_pool;
@@ -672,7 +696,7 @@ volatile uint32_t g_daq_analog_work_drop_count;
 
 static void daq_enqueue_analog(const daq_snapshot_t *snapshot,
                                const daq_calibration_t *calibration,
-                               const daq_loadcell_window_t *window)
+                               const daq_loadcell_window_t *window, sd_capture_t capture)
 {
   static daq_loadcell_window_t accumulated;
   for (unsigned i = 2U; i < 8U; ++i) {
@@ -683,16 +707,27 @@ static void daq_enqueue_analog(const daq_snapshot_t *snapshot,
   daq_analog_work_t *work;
   if (tx_block_allocate(&g_analog_pool, (VOID **)&work, TX_NO_WAIT) == TX_SUCCESS) {
     work->snapshot = *snapshot;
-    work->calibration = *calibration;
+    work->calibration = *calibration; work->capture = capture;
+#if (DISABLE_SD_CARD == 0U)
+    sd_card_capture_retain(capture);
+#endif
     work->window = accumulated;
     work->window.count[1] = window->count[1];
     work->window.voltage_sum[1] = window->voltage_sum[1];
     const ULONG message = (ULONG)(uintptr_t)work;
     if (tx_queue_send(&g_analog_queue, (VOID *)&message, TX_NO_WAIT) != TX_SUCCESS) {
+#if (DISABLE_SD_CARD == 0U)
+      sd_card_capture_fault(work->capture); sd_card_capture_release(work->capture);
+#endif
       (void)tx_block_release(work);
       g_daq_analog_work_drop_count++;
     }
-  } else g_daq_analog_work_drop_count++;
+  } else {
+#if (DISABLE_SD_CARD == 0U)
+    sd_card_capture_fault(capture);
+#endif
+    g_daq_analog_work_drop_count++;
+  }
   memset(&accumulated, 0, sizeof(accumulated));
 }
 
@@ -705,7 +740,10 @@ static void daq_analog_thread_entry(ULONG argument)
     daq_analog_work_t *work = (daq_analog_work_t *)(uintptr_t)message;
     daq_publish_analog(&work->snapshot, &work->window);
     /* One nonblocking SD handoff; network publication above is never retried. */
-    daq_store_snapshot_csv(&work->snapshot, &work->calibration, &work->window);
+    daq_store_snapshot_csv(&work->snapshot, &work->calibration, &work->window, work->capture);
+#if (DISABLE_SD_CARD == 0U)
+    sd_card_capture_release(work->capture);
+#endif
     (void)tx_block_release(work);
   }
 }

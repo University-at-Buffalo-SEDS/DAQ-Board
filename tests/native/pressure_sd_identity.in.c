@@ -2,6 +2,7 @@
 #include "sedsnet.h"
 #include "sedsnet_config.h"
 #include "pressure_sd_wire.h"
+#include "daq_calibration.h"
 #include "sd_calendar.h"
 #include <assert.h>
 #include <stdio.h>
@@ -34,6 +35,7 @@ static TX_QUEUE g_sd_pressure_queue;
 static ULONG messages[200][SD_PRESSURE_MESSAGE_WORDS];static unsigned handoffs;
 static UINT tx_queue_send(TX_QUEUE*q,void*p,ULONG wait){assert(irq&&q==&g_sd_pressure_queue&&wait==TX_NO_WAIT);if(handoffs==200)return 1;memcpy(messages[handoffs++],p,sizeof(messages[0]));return 0;}
 /* SOURCE_FUNCTION:sd_pressure_capture_route */
+/* SOURCE_FUNCTION:sd_cohort */
 /* SOURCE_FUNCTION:sd_card_log_pressure_batch */
 /* SOURCE_FUNCTION:pressure_sd_receive */
 static FILE*discovery;

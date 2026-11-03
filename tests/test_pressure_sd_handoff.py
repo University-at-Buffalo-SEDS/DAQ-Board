@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from sd_cohort_fixture import pressure_cohort
 ROOT = Path(__file__).resolve().parents[1]
 
 def function(source, name):
@@ -24,6 +25,7 @@ class PressureSdHandoffTests(unittest.TestCase):
         declarations = declarations.replace('static ULONG g_sd_pressure_queue_storage[SD_PRESSURE_QUEUE_BATCHES * SD_PRESSURE_MESSAGE_WORDS];', '')
         prefix = r'''
 #include "pressure_sd_wire.h"
+#include "daq_calibration.h"
 #include "sd_calendar.h"
 #include <assert.h>
 #include <stdio.h>
@@ -42,7 +44,7 @@ static void __set_PRIMASK(uint32_t value){(void)value;}
 #define FX_SUCCESS 0U
 #define SD_LINE_MAX 384U
 typedef enum { SD_CARD_STATUS_OK, SD_CARD_STATUS_IO_ERROR, SD_CARD_STATUS_BUSY, SD_CARD_STATUS_BACKPRESSURE } sd_card_status_t;
-typedef struct { uint16_t len; unsigned calibration; uint64_t session; uint32_t route_epoch; char line[]; } sd_line_slot_t;
+typedef struct { uint16_t len; daq_calibration_t calibration; uint64_t session; uint32_t route_epoch; sd_capture_t capture; char line[]; } sd_line_slot_t;
 static unsigned g_sd_services_initialized=1, g_sd_launch_closed;
 static unsigned g_sd_write_error_count,g_sd_csv_rows_written_count;
 static uint64_t sd_run_snapshot(void){return g_sd_launch_closed ? 0 : 42;}
@@ -56,14 +58,14 @@ static void sd_format_float(char *out,float v){++formatting;snprintf(out,24,"%.2
 static int sd_format_csv_sensor_record(char *out,size_t n,uint64_t utc,uint64_t uptime,const char *sensor,const char *raw,const char *converted,uint32_t sequence){
  ++formatting;return snprintf(out,n,"%llu,%llu,%s,%s,%s,%u",(unsigned long long)utc,(unsigned long long)uptime,sensor,raw,converted,sequence);
 }
-static unsigned sd_calibration_snapshot(unsigned *value){*value=7;return 1;}
+static unsigned sd_calibration_snapshot(daq_calibration_t *value){memset(value,0,sizeof(*value));value->kg1000_slope=7;return 1;}
 static unsigned sd_write_telemetry_row(const sd_line_slot_t *slot){
- ++writing;assert(slot->session==0U && slot->calibration==7); /* These old handoff inputs have no valid UTC mapping; routing is exercised separately. */
+ ++writing;assert(slot->session==0U && slot->calibration.kg1000_slope==7); /* These old handoff inputs have no valid UTC mapping; routing is exercised separately. */
  if(fail_write){fail_write=0;return 1;}
  assert(accepted<12);memcpy(written[accepted++],slot->line,slot->len+1);return 0;
 }
 '''
-        prefix += "\n" + function(source,'sd_pressure_capture_route') + "\n"
+        prefix += "\n" + pressure_cohort(source) + function(source,'sd_pressure_capture_route') + "\n"
         prefix += "static unsigned sd_write_launch_pressure_row(const sd_line_slot_t *slot){return sd_write_telemetry_row(slot); }\n"
         queues = r'''
 static ULONG messages[2][SD_PRESSURE_MESSAGE_WORDS];static unsigned count;
@@ -110,6 +112,7 @@ int main(void){
         declarations=source[source.index('typedef struct {\n  pressure_sd_batch_t batch;'):source.index('static uint8_t g_sd_pressure_pending;')]
         code=r'''
 #include "pressure_sd_wire.h"
+#include "daq_calibration.h"
 #include "sd_calendar.h"
 #include <assert.h>
 #include <stdint.h>
@@ -133,7 +136,7 @@ static UINT tx_queue_send(TX_QUEUE *queue,void *message,ULONG wait){
  memcpy(queue->storage+queue->tail*SD_PRESSURE_MESSAGE_WORDS,message,SD_PRESSURE_MESSAGE_WORDS*sizeof(ULONG));
  queue->tail=(queue->tail+1)%queue->capacity;queue->count++;return 0;
 }
-'''+function(source,'sd_pressure_capture_route')+'\n'+function(source,'sd_card_log_pressure_batch')+r'''
+'''+pressure_cohort(source)+function(source,'sd_pressure_capture_route')+'\n'+function(source,'sd_card_log_pressure_batch')+r'''
 int main(void){
  g_sd_pressure_queue.storage=g_sd_pressure_queue_storage;
  g_sd_pressure_queue.capacity=sizeof(g_sd_pressure_queue_storage)/(SD_PRESSURE_MESSAGE_WORDS*sizeof(ULONG));

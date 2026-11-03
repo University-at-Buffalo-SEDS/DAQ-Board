@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from test_sd_raw_queue import function
 from sd_fixed_pool_mock import TYPES, FUNCTIONS
+from sd_cohort_fixture import pressure_cohort
+from router_lifecycle_fixture import function as actual_function
 ROOT=Path(__file__).resolve().parents[1]
 
 class ScalarQueueTests(unittest.TestCase):
@@ -70,6 +72,7 @@ static UINT sd_write_telemetry_row(const sd_line_slot_t *slot){
         code += r'''
 static UINT sd_write_optional_snapshot_item(const sd_line_slot_t*s,uint16_t*i,uint8_t*c){(void)s;(void)i;(void)c;assert(0);return FX_IO_ERROR;}
 '''
+        code+=pressure_cohort(source)+actual_function(source,'sd_card_capture_retain')+'\n'
         for name in ['sd_pool_allocate','sd_pool_release','sd_alloc_slot','sd_free_slot','sd_take_line_message',
                      'sd_next_row_sequence','sd_enqueue_scalar','sd_write_telemetry_item']:
             code+=function(source,name)+'\n'
@@ -82,7 +85,7 @@ static void enqueue(unsigned i,daq_calibration_t *cal){
  char text[24];sd_format_float(text,value);
  sd_format_csv_record(expected[row_count],384,network,clock_now,g_sd_scalar_sensors[sensor],text,i+1);
  expected_sessions[row_count]=session;expected_epochs[row_count]=g_sd_route_epoch;expected_cal[row_count]=cal->kg1000_slope;row_count++;
- assert(sd_enqueue_scalar(sensor,network,clock_now,value,cal)==0);
+ assert(sd_enqueue_scalar(sensor,network,clock_now,value,cal,g_sd_route_epoch)==0);
 }
 int main(void){
  mock_pool_init(&g_sd_line_pool,line_pool_storage,62U*1024U,SD_LINE_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE);
@@ -115,8 +118,8 @@ int main(void){
  assert(!g_sd_line_drop_count&&!g_sd_essential_telemetry_dropped&&g_sd_scalar_records_coalesced>0);
  assert(!g_sd_scalar_append_tail&&g_sd_line_pool.tx_block_pool_available==g_sd_line_pool.tx_block_pool_total);
  /* Allocation and send failures are explicit, bounded losses, never leaks. */
- mock_force_full=1;assert(sd_enqueue_scalar(0,0,clock_now,1,&calibration)==SD_CARD_STATUS_BACKPRESSURE);mock_force_full=0;
- force_send=1;assert(sd_enqueue_scalar(0,0,clock_now,1,&calibration)==SD_CARD_STATUS_BACKPRESSURE);force_send=0;
+ mock_force_full=1;assert(sd_enqueue_scalar(0,0,clock_now,1,&calibration,g_sd_route_epoch)==SD_CARD_STATUS_BACKPRESSURE);mock_force_full=0;
+ force_send=1;assert(sd_enqueue_scalar(0,0,clock_now,1,&calibration,g_sd_route_epoch)==SD_CARD_STATUS_BACKPRESSURE);force_send=0;
  assert(g_sd_essential_telemetry_dropped==2&&!g_sd_scalar_append_tail);
  assert(g_sd_line_pool.tx_block_pool_available==g_sd_line_pool.tx_block_pool_total);
  printf("compact scalar:13000rows saved; peak%u/%zu bytes;3s stalls; exactCSV/clocks/epochs/retries verified\n",peak,g_sd_line_pool.budget);

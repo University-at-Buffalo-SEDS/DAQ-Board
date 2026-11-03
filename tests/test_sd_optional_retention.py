@@ -4,6 +4,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+from sd_cohort_fixture import ordinary_owner_fixture
 ROOT = Path(__file__).resolve().parents[1]
 def production_function(source, name):
     pos = 0
@@ -34,7 +35,7 @@ class OptionalRetentionTests(unittest.TestCase):
             subprocess.run([str(exe)],check=True)
     def owner_fixture(self):
         source=(ROOT/'Core/Src/sd_card.c').read_text()
-        code=(ROOT/'tests/sd_optional_retention_fixture.c.in').read_text()
+        code=ordinary_owner_fixture((ROOT/'tests/sd_optional_retention_fixture.c.in').read_text(),source)
         for name in re.findall(r'/\* SOURCE_FUNCTION:(\w+) \*/',code):
             code=code.replace('/* SOURCE_FUNCTION:'+name+' */',production_function(source,name))
         ranges={
@@ -85,7 +86,10 @@ static unsigned tx_queue_receive(unsigned*q,void*p,unsigned wait){
 static void daq_publish_analog(const daq_snapshot_t*s,const daq_loadcell_window_t*w){
  assert(s==&work_items[published].snapshot&&w==&work_items[published].window);published++;
 }
-static unsigned sd_card_enqueue_optional_snapshot(const float *v,uint64_t captured,const daq_calibration_t*c){
+static void sd_card_capture_fault(sd_capture_t c){assert(c==0);}
+static void sd_card_capture_release(sd_capture_t c){assert(c==0);}
+static unsigned sd_card_enqueue_optional_snapshot_captured(const float *v,uint64_t captured,const daq_calibration_t*c,sd_capture_t capture){
+ assert(capture==0);
  assert(published==offered+1 && captured==22+100*offered && c->kg1000_slope==42+offered);
  assert(v[10]==8+offered&&v[23]==3+offered);offered++;
  if(retained==3)return 2;

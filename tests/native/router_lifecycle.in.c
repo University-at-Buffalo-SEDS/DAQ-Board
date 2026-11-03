@@ -50,6 +50,14 @@ static void topology(char *buffer,size_t capacity){
  memset(buffer,0,capacity);assert(seds_router_export_topology(router,buffer,capacity)==SEDS_OK);
 }
 uint32_t HAL_GetTick(void){return(uint32_t)clock_ms;}
+static uint32_t cache_irq;
+uint32_t __get_PRIMASK(void){return cache_irq;}
+void __disable_irq(void){cache_irq=1;}
+void __set_PRIMASK(uint32_t m){cache_irq=m;}
+persistent_store_owner_t persistent_store_try_enter(void){assert(!cache_irq);return PERSISTENT_STORE_OWNER_ACQUIRED;}
+bool persistent_store_leave(void){assert(!cache_irq);return true;}
+bool persistent_store_recovery_ready(void){return true;}
+void persistent_store_note_failure(void){assert(0);}
 int persistent_store_init(void){return 0;}
 int persistent_store_get(uint32_t key,void *p,size_t*n){assert(key==0x46535445U&&*n==1);*(uint8_t*)p=stored;return 0;}
 int persistent_store_set(uint32_t key,const void *p,size_t n){assert(key==0x46535445U&&n==1);writes++;if(fail_write)return 2;stored=*(const uint8_t*)p;return 0;}

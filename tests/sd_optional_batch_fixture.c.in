@@ -152,7 +152,7 @@ static unsigned g_sd_optional_snapshots_completed;
 static uint16_t sd_telemetry_tag(const sd_line_slot_t *s){uint16_t t;memcpy(&t,s,sizeof t);return t;}
 static UINT sd_write_optional_snapshot_item(const sd_line_slot_t*s,uint16_t*i,uint8_t*c){(void)s;(void)i;(void)c;assert(0);return FX_IO_ERROR;}
 static uint8_t sd_optional_snapshot_guard(sd_line_slot_t*s,uint16_t i){(void)s;(void)i;assert(0);return 0;}
-static void sd_release_telemetry_owner(sd_line_slot_t*s){sd_free_slot(s);}
+static void sd_release_telemetry_owner(sd_line_slot_t*s){sd_card_capture_release(s->capture);sd_free_slot(s);}
 /* SOURCE_FUNCTION:sd_pool_allocate */
 /* SOURCE_FUNCTION:sd_pool_release */
 /* SOURCE_FUNCTION:sd_alloc_slot */

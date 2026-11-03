@@ -1,5 +1,6 @@
 """Reproduce loadcell starvation using the production SEDSnet bounded queue."""
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -18,7 +19,11 @@ class LoadcellQueuePriorityTests(unittest.TestCase):
 
     def test_p6_saturation_cannot_refuse_kg1000_but_commands_stay_protected(self):
         # Use SDK source from the workspace or the build's fetched dependency.
-        paths = [ROOT.parent / 'SEDSnet/src/queue.rs']
+        explicit = os.environ.get('SEDSNET_TEST_SOURCE')
+        if explicit:
+            selected = pathlib.Path(explicit) / 'src/queue.rs'
+            self.assertTrue(selected.is_file(), 'Explicit SDK queue source is missing: ' + str(selected))
+        paths = ([selected] if explicit else []) + [ROOT.parent / 'SEDSnet/src/queue.rs']
         paths += list((ROOT / 'build').glob('*/_deps/sedsnet-*/**/src/queue.rs'))
         sdk = next((p for p in paths if p.is_file()), None)
         if not sdk or not shutil.which('rustc'):

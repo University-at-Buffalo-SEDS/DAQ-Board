@@ -43,11 +43,27 @@ class ReportTests(unittest.TestCase):
 #include <setjmp.h>
 #include "daq_rates.h"
 #include "daq_network_schedule.h"
+typedef uint32_t sd_capture_t;
+/* Detached collaborator: reference accounting is tested using actual cohort owners separately. */
+static void sd_card_capture_retain(sd_capture_t c){assert(c==0);}
+static void sd_card_capture_release(sd_capture_t c){assert(c==0);}
+static void sd_card_capture_fault(sd_capture_t c){assert(c==0);}
 typedef unsigned UINT;
 typedef uintptr_t ULONG;
 typedef void VOID;
 typedef int TX_THREAD; typedef int TX_QUEUE; typedef int TX_BLOCK_POOL;
-typedef struct {float slope;} daq_calibration_t;
+typedef struct
+{
+  float kg1000_slope;
+  float kg1000_intercept;
+  float iadc_slope;
+  float iadc_intercept;
+  /* KG50: ascending polynomial coefficients, input shift, tare offset. */
+  float kg50[7];
+  /* [KG1000 reference C, raw/C, KG50 reference C, raw/C]. */
+  float thermal[4];
+  float filter_tau_ms[2]; /* KG1000, KG50; 0 disables smoothing. */
+} daq_calibration_t;
 typedef struct {unsigned ext_adc_sample_valid;float ext_adc_loadcell_kg1000;uint64_t monotonic_ms;} daq_snapshot_t;
 #define TX_NO_WAIT 0
 #define TX_WAIT_FOREVER 99
@@ -63,16 +79,16 @@ static UINT tx_block_release(VOID*p){free(p);released++;return 0;}
 static UINT tx_queue_send(TX_QUEUE*q,VOID*p,unsigned wait){(void)q;assert(wait==TX_NO_WAIT);if(fail_send)return 1;assert(!queued);message=*(ULONG*)p;queued=1;return 0;}
 static UINT tx_queue_receive(TX_QUEUE*q,VOID*p,unsigned wait){(void)q;assert(wait==TX_WAIT_FOREVER);if(!queued)longjmp(finished,1);*(ULONG*)p=message;queued=0;return 0;}
 static uint64_t daq_log_monotonic_ms(void){return 12350;}
-static void daq_publish_loadcell(const daq_snapshot_t*s,const daq_calibration_t*c,const float*pressure){assert(pressure==NULL);assert(s->monotonic_ms==12300 && s->ext_adc_loadcell_kg1000==1.25f && c->slope==2);published++;}
-static void daq_publish_kg50(float value,uint8_t input,uint64_t time,const daq_calibration_t*c){assert(input==1 && value==2.5f && time==12300 && c->slope==2);published++;}
+static void daq_publish_loadcell(const daq_snapshot_t*s,const daq_calibration_t*c,const float*pressure,sd_capture_t capture){assert(capture==0);assert(pressure==NULL);assert(s->monotonic_ms==12300 && s->ext_adc_loadcell_kg1000==1.25f && c->kg1000_slope==2);published++;}
+static void daq_publish_kg50(float value,uint8_t input,uint64_t time,const daq_calibration_t*c,sd_capture_t capture){assert(capture==0);assert(input==1 && value==2.5f && time==12300 && c->kg1000_slope==2);published++;}
 ''' + definitions + sd_worker + r'''
 int main(void){
  assert(DAQ_BROADCAST_RATE_HZ==250 && DAQ_BROADCAST_PERIOD_MS==4);
- daq_report_t report={.monotonic_ms=12300,.calibration={2},.kg1000=1.25,.kg50=2.5,.temperature=30,.flags=7,.kg50_input=1};
+ daq_report_t report={.monotonic_ms=12300,.calibration={.kg1000_slope=2},.kg1000=1.25,.kg50=2.5,.temperature=30,.flags=7,.kg50_input=1};
  fail_alloc=1;daq_enqueue_report(&report);assert(g_daq_report_drop_count==1 && !published);
  fail_alloc=0;fail_send=1;daq_enqueue_report(&report);assert(g_daq_report_drop_count==2 && released==1);
  fail_send=0;daq_enqueue_report(&report);assert(!published && g_daq_report_enqueued_count==1);
- report.kg50_input=0;report.monotonic_ms=999;report.kg1000=999;report.calibration.slope=999;
+ report.kg50_input=0;report.monotonic_ms=999;report.kg1000=999;report.calibration.kg1000_slope=999;
  if(!setjmp(finished))daq_report_thread_entry(0);
  assert(published==2 && released==2 && g_daq_report_completed_count==1 && g_daq_report_max_age_ms==50);
 }

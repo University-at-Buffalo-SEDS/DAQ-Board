@@ -2,6 +2,8 @@
 #define DAQ_CALIBRATION_H
 
 #include <stdint.h>
+/* Internal retained SD capture lease; carried in existing alignment padding. */
+typedef uint32_t sd_capture_t;
 #ifdef TELEMETRY_ENABLED
 #include "sedsnet.h"
 #endif

@@ -40,6 +40,10 @@ HEADERS = {'sedsnet.h': '#pragma once\n'
                        'int persistent_store_init(void);\n'
                        'int persistent_store_get(uint32_t,void*,size_t*);\n'
                        'int persistent_store_set(uint32_t,const void*,size_t);\n'}
+# Reuse the matching narrow store/IRQ declarations; registration assertions stay unchanged.
+from test_cache_reset_owner import HEADERS as CURRENT_CACHE_HEADERS
+HEADERS.update({key: CURRENT_CACHE_HEADERS[key] for key in ('main.h', 'persistent_store.h')})
+HEADERS['sedsnet.h'] += '\n#define SEDS_IO -14\n'
 HARNESS = r'''
 #include "flight_state_cache.h"
 #include "persistent_store.h"
@@ -51,6 +55,14 @@ volatile uint32_t g_telemetry_discovery_seen;
 static unsigned writes,invalidations,enables,registrations;
 static int fail_enable,fail_callback;
 static uint8_t stored=5;
+static uint32_t irq_mask;
+uint32_t __get_PRIMASK(void){return irq_mask;}
+void __disable_irq(void){irq_mask=1;}
+void __set_PRIMASK(uint32_t m){irq_mask=m;}
+persistent_store_owner_t persistent_store_try_enter(void){assert(!irq_mask);return PERSISTENT_STORE_OWNER_ACQUIRED;}
+bool persistent_store_leave(void){assert(!irq_mask);return true;}
+bool persistent_store_recovery_ready(void){return true;}
+void persistent_store_note_failure(void){assert(0);}
 uint32_t HAL_GetTick(void){return 1000;}
 int persistent_store_init(void){return 0;}
 int persistent_store_get(uint32_t key,void*p,size_t*n){assert(key==0x46535445U&&*n==1);*(uint8_t*)p=stored;return 0;}

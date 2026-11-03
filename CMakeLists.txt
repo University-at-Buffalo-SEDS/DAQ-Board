@@ -102,6 +102,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "$<$<BOOL:${ENABLE_TELEMETRY}>:${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry.c>"
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/flight_state_cache.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/persistent_store.c
+    Core/Src/board_commissioning.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_calibration.c
     "$<$<BOOL:${ENABLE_TELEMETRY}>:${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_log_clock.c>"
     "$<$<BOOL:${ENABLE_TELEMETRY}>:${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry_hooks.c>"

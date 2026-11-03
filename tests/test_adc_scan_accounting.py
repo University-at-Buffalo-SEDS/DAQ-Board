@@ -9,6 +9,7 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
+from sd_cohort_fixture import raw_enqueue
 
 from test_mcp3564r_driver import HAL, HARNESS, ROOT
 from test_sd_raw_queue import function
@@ -27,13 +28,14 @@ typedef int sd_card_status_t;
 #define SD_CARD_STATUS_BACKPRESSURE 2
 #define SD_RAW_BATCH_MAX DAQ_RAW_BATCH_CAPACITY
 static void __set_PRIMASK(uint32_t n) {(void)n;}
+typedef uint32_t sd_capture_t;
 typedef struct {float slope,coefficients[16];} daq_calibration_t;
 typedef struct {uint64_t network_unix_ms; uint32_t monotonic_ms, record_sequence;
  int32_t raw_adc_code; float raw_value,calibrated_value,adc_temperature_c;
  int32_t adc_temperature_code; uint8_t channel;} sd_raw_adc_record_t;
 #define SD_RAW_SLOT_CAPACITY 32U
 #define RAW_POOL_BLOCKS 244U
- typedef struct {uint16_t count,capacity; uint32_t route_epoch; uint64_t uptime_reference;
+ typedef struct {uint16_t count,capacity; uint32_t route_epoch; sd_capture_t capture; uint64_t uptime_reference;
  daq_calibration_t calibration; uint64_t session; sd_raw_adc_record_t samples[SD_RAW_SLOT_CAPACITY];} sd_raw_slot_t;
 static sd_raw_slot_t slots[RAW_POOL_BLOCKS];
 static unsigned head,tail,queued,slot_taken,stored,per_channel[16],last_sequence,last_raw;
@@ -157,7 +159,7 @@ int main(int argc,char **argv) {
 
 class ScanAccountingTests(unittest.TestCase):
     def test_fresh_density_owned_sd_and_explicit_stall_losses(self):
-        enqueue = function((ROOT/'Core/Src/sd_card.c').read_text(), 'sd_card_enqueue_raw_adc_samples')
+        enqueue = raw_enqueue((ROOT/'Core/Src/sd_card.c').read_text())
         with tempfile.TemporaryDirectory() as tmp:
             p=pathlib.Path(tmp)
             (p/'stm32u5xx_hal.h').write_text(HAL)

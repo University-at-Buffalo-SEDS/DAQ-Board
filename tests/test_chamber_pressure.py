@@ -216,7 +216,7 @@ int main(void) { daq_network_schedule_t s={0}; unsigned counts[DAQ_NETWORK_STREA
 
     def test_raw_sd_path_precedes_network_and_keeps_both_clocks_and_raw_code(self):
         source=(ROOT/'Core/Src/daq_thread.c').read_text()
-        self.assertLess(source.index('sd_card_enqueue_raw_adc_samples(raw_records'),source.index('daq_enqueue_report(&report)'))
+        self.assertLess(source.index('sd_card_enqueue_raw_adc_samples_captured(raw_records'),source.index('daq_enqueue_report(&report)'))
         self.assertIn('records[count].raw_adc_code = sample.code',source)
         self.assertIn('records[count].network_unix_ms',source)
         self.assertIn('records[count].monotonic_ms',source)

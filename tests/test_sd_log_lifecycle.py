@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from sd_cohort_fixture import route_epoch_support, pressure_cohort
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -23,7 +24,9 @@ class SdLifecycleTests(unittest.TestCase):
 #include <string.h>
 #include <assert.h>
 typedef uintptr_t ULONG;
-typedef struct { uint32_t route_epoch; } sd_line_slot_t;
+typedef uint32_t sd_capture_t;
+typedef struct { uint32_t route_epoch;sd_capture_t capture; } sd_line_slot_t;
+static void sd_card_capture_fault(sd_capture_t capture){assert(capture==0);}
 static unsigned g_sd_line_pending;
 static uint32_t g_sd_line_pending_epoch;
 static unsigned sd_telemetry_epoch_ready(uint32_t epoch,unsigned pressure){(void)epoch;(void)pressure;return 1;}
@@ -137,7 +140,7 @@ static void __disable_irq(void) {}
 static void __set_PRIMASK(uint32_t value) {(void)value;}
 static uint64_t daq_log_unix_ms(void) { ++utc_reads; return utc; }
 static uint64_t daq_log_monotonic_ms(void) { return local; }
-''' + lifecycle + r'''
+''' + lifecycle + route_epoch_support(source) + r'''
 int main(void) {
   const uint64_t start=utc;
   for (unsigned i=0;i<10000;i++) assert(!sd_launch_finished());

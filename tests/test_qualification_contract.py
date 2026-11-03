@@ -1,4 +1,7 @@
 import json
+import os
+import hashlib
+import tempfile
 import shutil
 import subprocess
 import unittest
@@ -73,6 +76,35 @@ class QualificationContractTests(unittest.TestCase):
 
     def test_hooks_build_retains_every_configured_memory_probe(self):
         root = Path(build.__file__).resolve().parent
+        explicit = os.environ.get("DAQ_QUALIFICATION_ARTIFACT_DIR")
+        if explicit:
+            directory = Path(explicit)
+            manifest_path = directory / "MANIFEST.json"
+            expected = os.environ.get("DAQ_QUALIFICATION_ARTIFACT_MANIFEST_SHA256")
+            self.assertIsNotNone(expected, "Explicit observer artifacts require a pinned manifest SHA256")
+            self.assertTrue(manifest_path.is_file())
+            self.assertEqual(hashlib.sha256(manifest_path.read_bytes()).hexdigest(), expected)
+            manifest = json.loads(manifest_path.read_text())
+            self.assertEqual(manifest["observer"], "SEDS_FIRMWARE_SIM_TEST=ON")
+            for name in ("DAQ-Board.elf", "CMakeCache.txt"):
+                path = directory / name
+                self.assertTrue(path.is_file(), str(path))
+                self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), manifest["artifacts"][name])
+            self.assertIn("SEDS_FIRMWARE_SIM_TEST:BOOL=ON", (directory / "CMakeCache.txt").read_text())
+            from sim.run_full import load_layout_for_build
+            original = json.loads((root / "sim/board.json").read_text())
+            count = len(original["execution"]["memory_probes"])
+            self.assertGreater(count, 0)
+            original["artifacts"]["elf"] = str((directory / "DAQ-Board.elf").resolve())
+            # Only metadata is temporary. The real pinned ELF/cache stay in
+            # their immutable directory; no target copies or symlinks.
+            with tempfile.TemporaryDirectory(prefix="daq-probe-layout-") as temporary:
+                metadata_root = Path(temporary)
+                (metadata_root / "sim").mkdir()
+                (metadata_root / "sim/board.json").write_text(json.dumps(original))
+                layout = load_layout_for_build(metadata_root, None)
+            self.assertEqual(len(layout["execution"]["memory_probes"]), count)
+            return
         cache = root / "build/Release_Script/CMakeCache.txt"
         elf = root / "build/Release_Script/DAQ-Board.elf"
         if not cache.is_file() or not elf.is_file():
@@ -165,11 +197,11 @@ class QualificationContractTests(unittest.TestCase):
         self.assertIn("DAQ_SAMPLE_PERIOD_MS DAQ_ACQUISITION_PERIOD_MS", daq)
         self.assertIn("daq_drain_ext_adc", daq)
         self.assertIn("sd_card_enqueue_raw_adc_samples", daq)
-        self.assertIn('sd_card_enqueue_csv_row("kg1000_network"', daq)
+        self.assertIn('sd_card_enqueue_csv_row_captured("kg1000_network"', daq)
         self.assertIn("calibration->kg1000_slope * corrected", daq)
-        self.assertIn("const daq_calibration_t calibration = daq_calibration_current();", daq)
+        self.assertIn("const sd_capture_t capture = sd_card_capture_begin(NULL, &calibration);", daq)
         self.assertLess(
-            daq.index('sd_card_enqueue_csv_row("kg1000_network"'),
+            daq.index('sd_card_enqueue_csv_row_captured("kg1000_network"'),
             daq.index("daq_network_offer(DAQ_NETWORK_KG1000"),
         )
         self.assertIn("log_telemetry_captured(sample.type, sample.values,", daq)

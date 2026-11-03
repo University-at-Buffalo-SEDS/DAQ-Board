@@ -1,3 +1,4 @@
+#include "board_commissioning.h"
 
 #ifdef TELEMETRY_ENABLED
 extern int telemetry_router_enter(void);
@@ -577,6 +578,7 @@ static SedsResult telemetry_poll_discovery_locked(void) {
       }
     }
   }
+  board_commissioning_service();
   (void)flight_state_cache_poll(g_router.r);
   (void)daq_calibration_poll(g_router.r);
   (void)daq_log_clock_poll(g_router.r);

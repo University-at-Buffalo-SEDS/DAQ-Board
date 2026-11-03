@@ -49,7 +49,7 @@ class SdLiveIsolationTests(unittest.TestCase):
         self.assertTrue('daq_offer_live_report(&report)' in body,
                         'fresh network offers must not depend on the SD/report consumer')
         offer = body.index('daq_offer_live_report(&report)')
-        self.assertLess(offer, body.index('sd_card_enqueue_raw_adc_samples('))
+        self.assertLess(offer, body.index('sd_card_enqueue_raw_adc_samples_captured('))
         self.assertLess(offer, body.index('daq_enqueue_report(&report)'))
         seam = function(source, 'static void daq_offer_live_report(')
         self.assertNotIn('sd_card_', seam)
@@ -97,8 +97,23 @@ typedef void VOID;
 typedef int TX_THREAD;
 typedef int TX_BLOCK_POOL;
 typedef struct {ULONG messages[16];unsigned count,read,write;} TX_QUEUE;
-typedef struct {float slope,intercept;} daq_calibration_t;
+typedef struct
+{
+  float kg1000_slope;
+  float kg1000_intercept;
+  float iadc_slope;
+  float iadc_intercept;
+  /* KG50: ascending polynomial coefficients, input shift, tare offset. */
+  float kg50[7];
+  /* [KG1000 reference C, raw/C, KG50 reference C, raw/C]. */
+  float thermal[4];
+  float filter_tau_ms[2]; /* KG1000, KG50; 0 disables smoothing. */
+} daq_calibration_t;
 typedef struct {unsigned ext_adc_sample_valid;float ext_adc_loadcell_kg1000;uint64_t monotonic_ms;} daq_snapshot_t;
+typedef uint32_t sd_capture_t;
+static void sd_card_capture_fault(sd_capture_t c){assert(c==0);}
+static void sd_card_capture_retain(sd_capture_t c){assert(c==0);}
+static void sd_card_capture_release(sd_capture_t c){assert(c==0);}
 typedef int SedsResult;
 static daq_network_schedule_t g_daq_network;
 static uint32_t g_daq_network_offered[7],g_daq_network_coalesced[7],g_daq_network_sent[7],g_daq_network_failed[7],g_daq_network_invalid;
@@ -117,7 +132,8 @@ static uint32_t __get_PRIMASK(void){return irq;}
 static void __disable_irq(void){irq=1;}
 static void __set_PRIMASK(uint32_t value){irq=value;}
 static uint64_t daq_log_monotonic_ms(void){return now_ms;}
-static int sd_card_enqueue_csv_row(const char*n,uint64_t t,float v,const daq_calibration_t*c){
+static int sd_card_enqueue_csv_row_captured(const char*n,uint64_t t,float v,const daq_calibration_t*c,sd_capture_t capture){
+ assert(capture==0);
  (void)n;(void)t;(void)v;(void)c;++sd_rows;return 1; /* full storage: explicit backpressure */
 }
 static int log_telemetry_captured(unsigned type,const void*data,size_t count,size_t width,uint64_t capture){

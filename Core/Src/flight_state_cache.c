@@ -25,9 +25,10 @@ volatile uint32_t g_flight_state_cache_errors __attribute__((used, externally_vi
 static bool g_restore_attempted;
 static bool g_persist_ready;
 static bool g_has_value;
+static bool g_persist_pending;
+static uint8_t g_persisted_state = UINT8_MAX;
 #ifdef TELEMETRY_ENABLED
 static bool g_network_value_seen;
-static uint8_t g_persisted_state = UINT8_MAX;
 static uint32_t g_last_refresh_ms;
 static SedsRouter *g_cache_router;
 static SedsResult persist_update(const SedsPacketView *packet, void *user);
@@ -77,9 +78,7 @@ void flight_state_cache_restore(void)
 
     g_has_value = true;
     g_flight_state_cache_value = state;
-    #ifdef TELEMETRY_ENABLED
     g_persisted_state = state;
-#endif
     g_flight_state_cache_restores++;
 }
 
@@ -93,33 +92,68 @@ uint8_t flight_state_cache_value(void)
     return (uint8_t)g_flight_state_cache_value;
 }
 
+bool flight_state_cache_is_durable(void)
+{
+    const uint32_t mask = __get_PRIMASK(); __disable_irq();
+    const bool durable = persistent_store_recovery_ready() && g_has_value && !g_persist_pending &&
+        g_persisted_state != UINT8_MAX && g_persisted_state == g_flight_state_cache_value;
+    __set_PRIMASK(mask); return durable;
+}
+
+/* Existing SDK/cache owner only. The physical owner remains held through
+ * write/readback and persisted-byte bookkeeping. No delayed work reapplies a
+ * state or changes its packet origin. Busy never probes/writes storage. */
+static int32_t persist_state_nowait(uint8_t value, bool retry_initialization)
+{
+    const persistent_store_owner_t owner = persistent_store_try_enter();
+    if (owner == PERSISTENT_STORE_OWNER_BUSY) return -14;
+    if (owner != PERSISTENT_STORE_OWNER_ACQUIRED) return -9;
+    /* A different checked metadata failure may have arrived between admission
+     * and acquisition. Explicit existing requalification must win first. */
+    if (!persistent_store_recovery_ready()) {
+        (void)persistent_store_leave(); return -9;
+    }
+    uint32_t mask = __get_PRIMASK(); __disable_irq();
+    g_persisted_state = UINT8_MAX; /* An uncertain physical mutation is not OLD. */
+    __set_PRIMASK(mask);
+    uint8_t verified = UINT8_MAX; size_t size = sizeof(verified);
+    const bool valid = (!retry_initialization || persistent_store_init() == LAUNCHCORE_PERSIST_OK) &&
+        persistent_store_set(FLIGHT_STATE_PERSIST_KEY, &value, sizeof(value)) == LAUNCHCORE_PERSIST_OK &&
+        persistent_store_get(FLIGHT_STATE_PERSIST_KEY, &verified, &size) == LAUNCHCORE_PERSIST_OK &&
+        size == sizeof(verified) && verified == value;
+    mask = __get_PRIMASK(); __disable_irq();
+    if (valid) g_persisted_state = value;
+    __set_PRIMASK(mask);
+    const bool released = persistent_store_leave();
+    if (!valid || !released) {
+        if (!valid) persistent_store_note_failure();
+        mask = __get_PRIMASK(); __disable_irq(); g_persisted_state = UINT8_MAX; __set_PRIMASK(mask);
+        return -9;
+    }
+    return 0;
+}
+
 int32_t flight_state_cache_reset_startup(void)
 {
     const uint8_t startup = 0U;
-    uint8_t verified = UINT8_MAX;
-    size_t size = sizeof(verified);
-    /* A failed boot-time storage initialization may be explicitly retried by
-     * this manual operation. No background wear/retry loop is introduced. */
-    if (persistent_store_init() != LAUNCHCORE_PERSIST_OK ||
-        persistent_store_set(FLIGHT_STATE_PERSIST_KEY, &startup, sizeof(startup)) != LAUNCHCORE_PERSIST_OK ||
-        persistent_store_get(FLIGHT_STATE_PERSIST_KEY, &verified, &size) != LAUNCHCORE_PERSIST_OK ||
-        size != sizeof(verified) || verified != startup) {
-        ++g_flight_state_cache_errors;
-        return -9;
-    }
-    g_persist_ready = true;
-    ++g_flight_state_cache_writes;
+    uint32_t mask = __get_PRIMASK(); __disable_irq(); g_persist_pending = true; __set_PRIMASK(mask);
+    /* An explicit manual retry may inspect storage; it must first win the
+     * same owner without waiting. Do not convert normal contention to IO. */
+    const int32_t stored = persist_state_nowait(startup, true);
+    if (stored == -14) return -14;
+    if (stored != 0) { ++g_flight_state_cache_errors; return -9; }
+    g_persist_ready = true; ++g_flight_state_cache_writes;
 #ifdef TELEMETRY_ENABLED
     if (clear_managed_cache() != SEDS_OK) {
-        ++g_flight_state_cache_errors;
-        return -9;
+        mask = __get_PRIMASK(); __disable_irq(); g_persisted_state = UINT8_MAX; __set_PRIMASK(mask);
+        ++g_flight_state_cache_errors; return -9;
     }
-    g_persisted_state = startup;
     g_network_value_seen = false;
     g_last_refresh_ms = HAL_GetTick();
 #endif
-    g_flight_state_cache_value = startup;
-    g_has_value = true;
+    mask = __get_PRIMASK(); __disable_irq();
+    g_flight_state_cache_value = startup; g_has_value = true; g_persist_pending = false;
+    __set_PRIMASK(mask);
     return 0;
 }
 
@@ -151,27 +185,27 @@ static SedsResult persist_update(const SedsPacketView *packet, void *user)
         g_flight_state_cache_errors++;
         return apply_result;
     }
-    const bool changed = state != g_persisted_state;
-    g_has_value = true;
-    g_network_value_seen = true;
+    const uint32_t mask = __get_PRIMASK(); __disable_irq();
+    const bool changed = g_persist_pending || state != g_persisted_state;
+    g_has_value = true; g_network_value_seen = true;
     g_flight_state_cache_value = state;
+    if (changed) g_persist_pending = true;
+    __set_PRIMASK(mask);
     g_flight_state_cache_updates++;
     if (!changed) return SEDS_OK;
 
-    if (!g_persist_ready ||
-        persistent_store_set(FLIGHT_STATE_PERSIST_KEY, &state,
-                             sizeof(state)) != LAUNCHCORE_PERSIST_OK)
-    {
-        /* Preserve the existing volatile apply-before-persist policy, but
-         * retire the SDK cache so an identical reliable retry re-enters this
-         * callback instead of being accepted without retrying durability.
-         * g_network_value_seen is unchanged: no extra polling traffic. */
+    const int32_t stored = g_persist_ready ? persist_state_nowait(state, false) : -9;
+    if (stored != 0) {
+        /* Only this observation is retired. Natural reliable retry retains
+         * its original packet identity/time; normal Busy is not flash damage. */
         (void)clear_managed_cache();
-        g_flight_state_cache_errors++;
-        return SEDS_HANDLER_ERROR;
+        if (stored != -14) ++g_flight_state_cache_errors;
+        return stored == -14 ? SEDS_IO : SEDS_HANDLER_ERROR;
     }
-    g_persisted_state = state;
-    g_flight_state_cache_writes++;
+    ++g_flight_state_cache_writes;
+    const uint32_t completed_mask = __get_PRIMASK(); __disable_irq();
+    g_persist_pending = false;
+    __set_PRIMASK(completed_mask);
     return SEDS_OK;
 }
 

@@ -1,5 +1,6 @@
 """Run FileX's actual FAT mirror routine with the board's configuration."""
 import pathlib
+import os
 import subprocess
 import tempfile
 import unittest
@@ -9,7 +10,11 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 class FatMirroringTest(unittest.TestCase):
     def test_large_card_mirrors_only_changed_sectors_and_retries_errors(self):
-        candidates = list((ROOT / 'build').glob(
+        explicit = os.environ.get('SDK_FREE_FILEX_SOURCE')
+        if explicit:
+            selected = pathlib.Path(explicit) / 'common/src/fx_utility_FAT_map_flush.c'
+            self.assertTrue(selected.is_file(), 'Explicit FileX source is missing: ' + str(selected))
+        candidates = ([selected] if explicit else []) + list((ROOT / 'build').glob(
             '*/_deps/filex-src/common/src/fx_utility_FAT_map_flush.c'))
         if not candidates:
             self.skipTest('Configure a firmware build to fetch the pinned FileX source')

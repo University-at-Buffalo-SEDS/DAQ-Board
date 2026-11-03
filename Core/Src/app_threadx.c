@@ -1,3 +1,4 @@
+#include "persistent_store.h"
 /* USER CODE BEGIN Header */
 /**
  ******************************************************************************
@@ -85,6 +86,7 @@ UINT App_ThreadX_Init(VOID *memory_ptr)
 #else
   daq_calibration_restore();
 #endif
+  (void)persistent_store_runtime_start();
 #if (DISABLE_SD_CARD == 0U)
   ret = sd_card_init(byte_pool);
   if (ret == TX_SUCCESS)
