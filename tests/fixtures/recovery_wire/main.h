@@ -15,6 +15,8 @@ uint32_t HAL_GetTick(void);
 
 #define __get_IPSR() 0U
 
-static inline uint32_t __get_PRIMASK(void){return 0;}
-static inline void __disable_irq(void){}
-static inline void __set_PRIMASK(uint32_t mask){(void)mask;}
+
+
+
+
+uint32_t __get_PRIMASK(void);void __disable_irq(void);void __set_PRIMASK(uint32_t);void NVIC_SystemReset(void);

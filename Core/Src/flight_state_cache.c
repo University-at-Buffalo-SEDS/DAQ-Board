@@ -3,6 +3,7 @@
 #include "sedsnet_config.h"
 #ifdef TELEMETRY_ENABLED
 #include "board_recovery_transport.h"
+#include "ota_stream.h"
 #endif
 
 #include "persistent_store.h"
@@ -79,6 +80,11 @@ void flight_state_cache_restore(void)
     g_has_value = true;
     g_flight_state_cache_value = state;
     g_persisted_state = state;
+#ifdef TELEMETRY_ENABLED
+    /* A restored unsafe phase is evidence against automatic OTA, not proof
+     * that this board physically launched or owns any outputs. */
+    if (ota_stream_state_begin(state)) ota_stream_state_end();
+#endif
     g_flight_state_cache_restores++;
 }
 
@@ -179,8 +185,14 @@ static SedsResult persist_update(const SedsPacketView *packet, void *user)
         return SEDS_HANDLER_ERROR;
     }
     const uint8_t state = packet->payload[0];
+    if (!ota_stream_state_begin(state)) {
+        (void)clear_managed_cache();
+        ++g_flight_state_cache_errors;
+        return SEDS_HANDLER_ERROR;
+    }
     const SedsResult apply_result = flight_state_cache_apply_network_update(packet);
     if (apply_result != SEDS_OK) {
+        ota_stream_state_end();
         (void)clear_managed_cache();
         g_flight_state_cache_errors++;
         return apply_result;
@@ -192,7 +204,7 @@ static SedsResult persist_update(const SedsPacketView *packet, void *user)
     if (changed) g_persist_pending = true;
     __set_PRIMASK(mask);
     g_flight_state_cache_updates++;
-    if (!changed) return SEDS_OK;
+    if (!changed) { ota_stream_state_end(); return SEDS_OK; }
 
     const int32_t stored = g_persist_ready ? persist_state_nowait(state, false) : -9;
     if (stored != 0) {
@@ -200,12 +212,14 @@ static SedsResult persist_update(const SedsPacketView *packet, void *user)
          * its original packet identity/time; normal Busy is not flash damage. */
         (void)clear_managed_cache();
         if (stored != -14) ++g_flight_state_cache_errors;
+        ota_stream_state_end();
         return stored == -14 ? SEDS_IO : SEDS_HANDLER_ERROR;
     }
     ++g_flight_state_cache_writes;
     const uint32_t completed_mask = __get_PRIMASK(); __disable_irq();
     g_persist_pending = false;
     __set_PRIMASK(completed_mask);
+    ota_stream_state_end();
     return SEDS_OK;
 }
 
