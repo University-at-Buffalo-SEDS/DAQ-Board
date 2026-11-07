@@ -46,15 +46,19 @@ static void __disable_irq(void) {}
 static void __enable_irq(void) {}
 static uint32_t HAL_GetTick(void) { return ticks; }
 static unsigned persistent_store_init(void) { return 0; }
+static unsigned char persisted_input; static size_t persisted_input_len; static unsigned input_writes;
 static unsigned persistent_store_get(unsigned key, void *value, size_t *size) {
-  (void)key;
+  if (key==0x4441494Eu) {
+    if (!persisted_input_len) return LAUNCHCORE_PERSIST_NOT_FOUND;
+    memcpy(value,&persisted_input,1); *size=persisted_input_len; return 0;
+  }
   if (!persisted_len) return LAUNCHCORE_PERSIST_NOT_FOUND;
   assert(*size >= persisted_len);
   memcpy(value,persisted,persisted_len); *size=persisted_len; return 0;
 }
 static unsigned persistent_store_set(unsigned key, const void *value, size_t size) {
-  (void)key;
   if(fail_persist) return 2;
+  if (key==0x4441494Eu) { assert(size==1); memcpy(&persisted_input,value,1); persisted_input_len=1; input_writes++; return 0; }
   assert(size <= sizeof(persisted));
   memcpy(persisted,value,size); persisted_len=size; return 0;
 }
@@ -77,12 +81,31 @@ int main(void) {
   SedsRouter router=0;
   assert(daq_calibration_init(&router)==SEDS_OK);
   assert(g_daq_calibration_restores==1 && g_calibration.kg1000_slope==2);
+  assert(requested_input==0 && g_daq_kg50_input_restores==0); /* Blank board stays on AMP2. */
   assert(g_calibration.kg50[1]==1 && daq_calibration_apply_kg50(&g_calibration,5)==5);
   ticks=500; assert(daq_calibration_poll(&router)==0);
   assert(requests[10]==1);
   uint8_t input=1;
   SedsPacketView source_packet={147,&input,1};
   assert(apply_kg50_input(&source_packet,NULL)==SEDS_OK && requested_input==1);
+  assert(persisted_input==1 && input_writes==1);
+  /* Repeating the same selection must not spend a flash write. */
+  assert(apply_kg50_input(&source_packet,NULL)==SEDS_OK && input_writes==1);
+  /* Reboot: the selection comes back from flash before any network value. */
+  requested_input=0; g_kg50_input_stored=0; g_restore_attempted=false;
+  daq_calibration_restore();
+  assert(requested_input==1 && g_kg50_input_stored==1 && g_daq_kg50_input_restores==1);
+  /* A storage fault still applies the selection and is retried next time. */
+  input=0; fail_persist=1;
+  assert(apply_kg50_input(&source_packet,NULL)==SEDS_OK && requested_input==0 && persisted_input==1);
+  unsigned errors=g_daq_calibration_errors; assert(errors>0);
+  fail_persist=0; assert(apply_kg50_input(&source_packet,NULL)==SEDS_OK && persisted_input==0 && input_writes==2);
+  /* A corrupt record is ignored rather than selecting an unknown input. */
+  persisted_input=7; requested_input=1; g_restore_attempted=false;
+  daq_calibration_restore();
+  assert(requested_input==1 && g_daq_calibration_errors==errors+1);
+  persisted_input=0;
+  input=1; assert(apply_kg50_input(&source_packet,NULL)==SEDS_OK);
   input=2; assert(apply_kg50_input(&source_packet,NULL)==SEDS_HANDLER_ERROR && requested_input==1);
   source_packet.payload_len=0; assert(apply_kg50_input(&source_packet,NULL)==SEDS_HANDLER_ERROR);
   source_packet.payload_len=1; input=0;

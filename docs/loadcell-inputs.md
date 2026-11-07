@@ -52,6 +52,17 @@ require separate zero offsets and leave different amounts of room before
 the amplifier reaches its lower output limit. Copying the working cell's
 calibration coefficients onto the 50 kg cell would not be appropriate.
 
+## Selecting the 50 kg input
+
+GroundStation owns the selection (Settings, Ground Station, Loadcells) and sends
+it as the read-only `DAQ_KG50_INPUT` variable. The DAQ keeps a flash copy, so a
+reboot without GroundStation resumes the same input instead of falling back to
+AMP2. GroundStation's value overrides that copy as soon as it arrives: its file
+holds the operator's selection and the calibration bound to that input.
+
+GroundStation learns the input in use from the report stream, `KG50` for AMP2
+and tagged `DAQ_KG50_SELECTED` for P6, and re-sends its selection while they differ.
+
 ## Connector wiring
 
 P7 and P8 share this pinout. Use the connector's physical pin numbers and the

@@ -14,12 +14,14 @@
 extern volatile uint32_t g_telemetry_discovery_seen;
 
 #define DAQ_CALIBRATION_PERSIST_KEY 0x44414341u
+#define DAQ_KG50_INPUT_PERSIST_KEY 0x4441494Eu
 #define DAQ_CALIBRATION_RETRY_MS 500U
 
 static daq_calibration_t g_calibration = {1.0f, 0.0f, 1.0f, 0.0f, {0.0f, 1.0f}, {0}, {0}};
 static bool g_restore_attempted;
 static bool g_persist_ready;
 #ifdef TELEMETRY_ENABLED
+static uint8_t g_kg50_input_stored;
 static bool g_network_value_seen;
 static bool g_kg50_network_value_seen;
 static bool g_thermal_network_value_seen;
@@ -32,6 +34,8 @@ volatile uint32_t g_daq_calibration_updates __attribute__((used, externally_visi
 volatile uint32_t g_daq_calibration_restores __attribute__((used, externally_visible));
 volatile uint32_t g_daq_calibration_persist_writes __attribute__((used, externally_visible));
 volatile uint32_t g_daq_calibration_errors __attribute__((used, externally_visible));
+volatile uint32_t g_daq_kg50_input_restores __attribute__((used, externally_visible));
+volatile uint32_t g_daq_kg50_input_persist_writes __attribute__((used, externally_visible));
 
 static bool calibration_valid(const daq_calibration_t *value)
 {
@@ -49,6 +53,28 @@ static bool calibration_valid(const daq_calibration_t *value)
          isfinite(value->iadc_intercept);
 }
 
+/* Local copy of the GroundStation's selection, so a reboot without the network
+ * keeps scanning the same physical input. GroundStation's value still wins as
+ * soon as it arrives; this board never publishes the variable. */
+static void kg50_input_restore(void)
+{
+#ifdef TELEMETRY_ENABLED
+  uint8_t stored = 0U;
+  size_t size = sizeof(stored);
+  const launchcore_persist_status_t status = persistent_store_get(
+      DAQ_KG50_INPUT_PERSIST_KEY, &stored, &size);
+  if (status == LAUNCHCORE_PERSIST_NOT_FOUND) return;
+  if (status != LAUNCHCORE_PERSIST_OK || size != sizeof(stored) || stored > 1U)
+  {
+    g_daq_calibration_errors++;
+    return;
+  }
+  g_kg50_input_stored = stored;
+  mcp3564r_request_kg50_input(stored);
+  g_daq_kg50_input_restores++;
+#endif
+}
+
 void daq_calibration_restore(void)
 {
   if (g_restore_attempted) return;
@@ -59,6 +85,7 @@ void daq_calibration_restore(void)
     return;
   }
   g_persist_ready = true;
+  kg50_input_restore();
   daq_calibration_t stored = g_calibration;
   size_t size = sizeof(stored);
   const launchcore_persist_status_t status = persistent_store_get(
@@ -124,7 +151,23 @@ static SedsResult apply_kg50_input(const SedsPacketView *packet, void *user)
   (void)user;
   if (packet == NULL || packet->payload == NULL || packet->payload_len != 1U || ((const uint8_t *)packet->payload)[0] > 1U)
     return SEDS_HANDLER_ERROR;
-  mcp3564r_request_kg50_input(((const uint8_t *)packet->payload)[0]);
+  const uint8_t input = ((const uint8_t *)packet->payload)[0];
+  /* A failed write must not hold back the selection: only the next reboot
+   * without GroundStation would see the older value. */
+  if (input != g_kg50_input_stored)
+  {
+    if (g_persist_ready &&
+        persistent_store_set(DAQ_KG50_INPUT_PERSIST_KEY, &input, sizeof(input)) == LAUNCHCORE_PERSIST_OK)
+    {
+      g_kg50_input_stored = input;
+      g_daq_kg50_input_persist_writes++;
+    }
+    else
+    {
+      g_daq_calibration_errors++;
+    }
+  }
+  mcp3564r_request_kg50_input(input);
   g_input_network_value_seen = true;
   return SEDS_OK;
 }
