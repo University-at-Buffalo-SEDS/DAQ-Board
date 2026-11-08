@@ -16,6 +16,11 @@ def function(source, name):
     return source[start:end]
 
 class RawQueueTest(unittest.TestCase):
+    def test_optional_rows_survive_worst_case_sd_busy_time(self):
+        source=(ROOT/'Core/Src/sd_card.c').read_text()
+        self.assertIn('#define SD_OPTIONAL_STALL_MS 500U', source)
+        self.assertIn('sd_raw_backlog_records() <= SD_OPTIONAL_RAW_ADMIT_LIMIT &&', function(source,'sd_raw_optional_admitted'))
+
     def test_coalescing_ownership_epochs_wrap_pressure_and_backpressure(self):
         source=(ROOT/'Core/Src/sd_card.c').read_text()
         types=source[source.index('typedef struct'):source.index('static TX_QUEUE')]
@@ -47,6 +52,7 @@ static unsigned g_sd_services_initialized=1,g_sd_route_epoch;
 static unsigned g_sd_raw_records_dropped_count,g_sd_raw_records_enqueued_count;
 static unsigned g_sd_raw_records_written_count,g_sd_raw_records_io_lost_count;
 #define SD_OPTIONAL_RAW_BACKLOG_LIMIT 256U
+#define SD_OPTIONAL_RAW_ADMIT_LIMIT 256U /* production: 500 ms at the ADC rate; guard behavior tested at this bound */
 static unsigned g_sd_raw_essential_records_dropped,g_sd_raw_optional_records_dropped,g_sd_raw_records_coalesced;
 static unsigned g_sd_raw_batch_drop_count,g_sd_raw_slots_used,g_sd_raw_slots_peak;
 static TX_QUEUE g_sd_raw_queue;

@@ -21,6 +21,7 @@ enum{TX_SUCCESS=0,TX_NO_WAIT=0,FX_SUCCESS=0,FX_IO_ERROR=2,SD_CARD_STATUS_OK=0,SD
 #define SD_RAW_BATCH_MAX DAQ_RAW_BATCH_CAPACITY
 #define SD_LINE_MAX 384U
 #define SD_OPTIONAL_RAW_BACKLOG_LIMIT 256U
+#define SD_OPTIONAL_RAW_ADMIT_LIMIT 256U /* production: 500 ms at the ADC rate; guard behavior tested at this bound */
 
 typedef struct {
  size_t tx_block_pool_block_size,tx_block_pool_total,tx_block_pool_available,budget;

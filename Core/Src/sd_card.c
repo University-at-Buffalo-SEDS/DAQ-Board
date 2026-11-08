@@ -657,6 +657,13 @@ static VOID sd_filex_driver(FX_MEDIA *media)
 #define SD_FILE_RESERVE_BYTES (2UL * 1024UL * 1024UL)
 #define SD_FILE_RESERVE_LOW_WATER (256UL * 1024UL)
 #define SD_OPTIONAL_RAW_BACKLOG_LIMIT 256U
+/* Optional rows are shed only after the writer has been stalled for the SD
+ * specification's worst-case busy time (500 ms write timeout for SDXC; 250 ms
+ * for SDSC/SDHC) at the full ADC rate. File creation, preallocation, close and
+ * FAT updates therefore never shed a row; the pool guard still reserves a
+ * quarter of the raw pool for essential channels. */
+#define SD_OPTIONAL_STALL_MS 500U
+#define SD_OPTIONAL_RAW_ADMIT_LIMIT ((DAQ_ADC_READ_RATE_HZ * SD_OPTIONAL_STALL_MS + 999U) / 1000U)
 #if DAQ_SD_PREALLOCATE_ENABLE && (defined(FX_UPDATE_FILE_SIZE_ON_ALLOCATE) || defined(FX_ENABLE_FAULT_TOLERANT))
 #error "Review SD preallocation: this FileX mode extends logical file size on allocate"
 #endif
@@ -1717,6 +1724,9 @@ void sd_card_writer_thread_entry(ULONG initial_input)
   }
 }
 
+_Static_assert(SD_OPTIONAL_RAW_ADMIT_LIMIT * sizeof(sd_raw_adc_record_t) <= sizeof(g_sd_raw_pool_storage) / 2U,
+               "A 500 ms optional stall budget must leave half the raw pool for essential rows");
+
 UINT sd_card_init(TX_BYTE_POOL *byte_pool)
 {
   (void)byte_pool;
@@ -1806,7 +1816,7 @@ static void sd_raw_count_dropped(const sd_raw_adc_record_t *samples, uint16_t co
  * authorization. Required loadcells and pressure do not use this gate. */
 static uint8_t sd_raw_optional_admitted(void)
 {
-  return sd_raw_backlog_records() <= SD_OPTIONAL_RAW_BACKLOG_LIMIT &&
+  return sd_raw_backlog_records() <= SD_OPTIONAL_RAW_ADMIT_LIMIT &&
       g_sd_raw_pool.tx_block_pool_available >= (g_sd_raw_pool.tx_block_pool_total + 3U) / 4U;
 }
 
