@@ -108,6 +108,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "$<$<BOOL:${ENABLE_TELEMETRY}>:${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/telemetry_hooks.c>"
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/sd_card.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/sd_storage_io.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/sd_file_stream.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_adc1.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_adc4.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_board.c

@@ -8,6 +8,7 @@
 #include "tx_api.h"
 #include "telemetry.h"
 #include "ota_stream.h"
+#include "sd_file_stream.h"
 #ifdef TELEMETRY_CAN_BUS
 #include "can_bus.h"
 #endif
@@ -143,6 +144,7 @@ void telemetry_thread_entry(ULONG initial_input)
 #endif
         (void)telemetry_poll_timesync();
         ota_stream_poll();
+        sd_file_stream_poll();
         sample_router_diagnostics();
 
         /* The DAQ tick is 20 us, not 1 ms. Bound this higher-priority

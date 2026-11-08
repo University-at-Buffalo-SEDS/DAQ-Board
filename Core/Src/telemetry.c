@@ -16,6 +16,7 @@ extern int telemetry_router_leave(void);
 #include "sim_network_probe.h"
 #include "board_can_priority.h"
 #include "ota_stream.h"
+#include "sd_file_stream.h"
 #include "sedsnet_hardware_crypto.h"
 
 #include "app_threadx.h"
@@ -842,6 +843,11 @@ static SedsResult init_telemetry_router_locked(void) {
     g_router.r = NULL;
     g_router.created = 0U;
     return result;
+  }
+  /* Optional low-priority SD download service; a bind failure never takes
+   * down telemetry, OTA or logging. */
+  if (sd_file_stream_init(r) != SEDS_OK) {
+    printf("Warning: SD download stream unavailable\r\n");
   }
 
   /* The normal poll loop sends the initial schema after link startup. */

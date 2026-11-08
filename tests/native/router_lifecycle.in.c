@@ -213,6 +213,9 @@ static SedsResult telemetry_configure_timesync_locked(SedsRouter*r){assert(r);re
 static __attribute__((unused)) SedsResult av_bay_underglow_init(SedsRouter*r){assert(r);return SEDS_OK;}
 static __attribute__((unused)) SedsResult flight_buzzer_init(SedsRouter*r){assert(r);return SEDS_OK;}
 static SedsResult ota_stream_init(SedsRouter*r){assert(r);return fail_stage==3?SEDS_ERR:SEDS_OK;}
+/* The optional SD download service may fail to bind without failing init. */
+static unsigned sd_stream_binds;static bool sd_stream_bind_fail;
+static SedsResult sd_file_stream_init(SedsRouter*r){assert(r);sd_stream_binds++;return sd_stream_bind_fail?SEDS_ERR:SEDS_OK;}
 void board_recovery_transport_set_router(SedsRouter*r){assert(r);}
 #define telemetry_radio_rx inert_radio_rx
 static __attribute__((unused)) void inert_radio_rx(const uint8_t*p,size_t n,void*u){(void)p;(void)n;(void)u;}
@@ -294,7 +297,8 @@ int main(int argc,char**argv){
   unsigned count=allocations,freed=frees,w=writes;assert(freed==count&&w==0);
   for(unsigned i=0;i<20;i++)assert(init_telemetry_router()==SEDS_IO&&allocations==count&&frees==freed&&writes==w);
   clock_ms+=499;assert(init_telemetry_router()==SEDS_IO&&allocations==count);
-  fail_stage=0;fail_enable=fail_callback=false;clock_ms++;assert(init_telemetry_router()==SEDS_OK&&g_router.created==1&&g_cache_router==g_router.r);
+  fail_stage=0;fail_enable=fail_callback=false;clock_ms++;sd_stream_bind_fail=true;unsigned binds=sd_stream_binds;assert(init_telemetry_router()==SEDS_OK&&g_router.created==1&&g_cache_router==g_router.r);
+  assert(sd_stream_binds==binds+1);sd_stream_bind_fail=false;
   assert(allocations==count+1&&frees==freed&&g_router_retry_after_ms==0&&g_telemetry_init_error_code==TELEMETRY_INIT_OK);
  }
  for(unsigned i=0;i<allocations;i++)if(allocations_list[i]==g_router.r)__real_seds_router_free(allocations_list[i]);
