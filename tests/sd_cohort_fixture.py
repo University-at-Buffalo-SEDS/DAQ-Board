@@ -16,8 +16,8 @@ def raw_enqueue(source):
     # Existing raw-queue cases always supply their immutable calibration. This
     # collaborator only supplies the unused current snapshot when no seal exists;
     # actual capture/retirement/cutover behavior is exercised in the producer suite.
-    return pressure_cohort(source)+"\ndaq_calibration_t daq_calibration_current(void){return (daq_calibration_t){0};}\n"+'\n'.join(function(source,n) for n in (
-        'sd_card_capture_retain','sd_card_capture_begin',
+    return pressure_cohort(source)+"\ndaq_calibration_t daq_calibration_current(void){return (daq_calibration_t){0};}\nstatic uint64_t g_sd_raw_key_floor;\n"+'\n'.join(function(source,n) for n in (
+        'sd_card_capture_retain','sd_card_capture_begin','sd_raw_key_locked',
         'sd_card_enqueue_raw_adc_samples_captured_impl',
         'sd_card_enqueue_raw_adc_samples_captured','sd_card_enqueue_raw_adc_samples'))+'\n'
 

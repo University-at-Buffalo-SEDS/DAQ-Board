@@ -55,6 +55,8 @@ static uint64_t daq_log_monotonic_ms(void){return now;}
 /* SOURCE_FUNCTION:sd_route_session_locked */
 /* SOURCE_FUNCTION:sd_run_snapshot */
 static uint64_t sd_capture_key_locked(uint64_t route,uint64_t capture){(void)capture;return route;} /* capture-time routing: test_pressure_launch/test_sd_launch_cutoff */
+static uint64_t g_sd_raw_key_floor;
+/* SOURCE_FUNCTION:sd_raw_key_locked */
 
 static uint64_t daq_log_unix_ms(void){return 1700000000000ULL+now;}
 static unsigned sd_calibration_snapshot(daq_calibration_t *c){memset(c,0,sizeof(*c));c->kg1000_slope=1;return 1;}

@@ -49,6 +49,8 @@ uint64_t board_uptime_ticks(void){return now;}
 #define g_sd_session session
 static uint64_t sd_run_snapshot(void){return session;}
 static uint64_t sd_capture_key_locked(uint64_t route,uint64_t capture){(void)capture;return route;} /* capture-time routing: test_pressure_launch/test_sd_launch_cutoff */
+static uint64_t g_sd_raw_key_floor;
+/* SOURCE_FUNCTION:sd_raw_key_locked */
 static uint64_t daq_log_monotonic_ms(void){return now;}
 static uint64_t daq_log_unix_ms(void){return 1700000000000ULL+now;}
 static unsigned sd_calibration_snapshot(daq_calibration_t *c){memset(c,0,sizeof(*c));c->kg1000_slope=1;return 1;}

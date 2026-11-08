@@ -107,7 +107,7 @@ static void basic(void){
  ++g_sd_route_epoch;assert(sd_card_enqueue_raw_adc_samples(samples,2,&calibration)==0&&g_sd_raw_append_tail!=tail);
  tail=g_sd_raw_append_tail;calibration.kg1000_slope=3;
  assert(sd_card_enqueue_raw_adc_samples(samples,2,&calibration)==0&&g_sd_raw_append_tail!=tail);
- tail=g_sd_raw_append_tail;session=0;
+ tail=g_sd_raw_append_tail;session=124; /* route keys only grow */
  assert(sd_card_enqueue_raw_adc_samples(samples,2,&calibration)==0&&g_sd_raw_append_tail!=tail);
  while(g_sd_raw_queue.count)sd_free_raw_slot(take());
  assert(g_sd_raw_pool.tx_block_pool_available==g_sd_raw_pool.tx_block_pool_total);
@@ -143,7 +143,7 @@ static void stress(unsigned all_protected,unsigned stall_ms){
  for(unsigned ms=0;ms<20000;ms++){
   now=4294966000ULL+ms;
   if(ms==4000){session=1234;g_sd_route_epoch++;}
-  if(ms==5000){session=0;g_sd_route_epoch++;}
+  if(ms==5000){session=1235;g_sd_route_epoch++;} /* route keys only grow */
   if(ms==8000){calibration.kg1000_slope=3;g_sd_route_epoch++;}
   if(!(ms%2)){
    sd_raw_adc_record_t samples[5];const unsigned channels[]={0,6,9,2,3};
@@ -196,10 +196,30 @@ static void boundary(void){
  sd_free_raw_slot(before);sd_free_raw_slot(after);
  assert(sd_card_enqueue_raw_adc_samples(samples,1,&calibration)==0&&g_sd_raw_queue.count==1);
 }
-int main(int argc,char**argv){mock_pool_init(&g_sd_raw_pool,raw_pool_storage,332U*1024U,SD_RAW_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE);assert(argc==2);if(!strcmp(argv[1],"basic"))basic();else if(!strcmp(argv[1],"boundary"))boundary();else stress(!strcmp(argv[1],"protected")||!strcmp(argv[1],"capacity-audit"),!strcmp(argv[1],"capacity-audit")?3000:1600);}
+/* About 0.7% of raw rows carry a capture UTC 1-2 ms earlier than the row
+ * before. Routing never returns the raw stream to an earlier key, so each
+ * file keeps one contiguous raw sequence run, within and across batches. */
+static void jitter(void){
+ daq_calibration_t calibration={.kg1000_slope=2};sd_raw_adc_record_t samples[6];
+ static const int offset[6]={100,101,103,104,102,105};
+ for(unsigned i=0;i<6;i++){samples[i]=make(100+i,i%2);samples[i].network_unix_ms=1700000000000ULL+offset[i];}
+ split_at=1700000000000ULL+103;
+ assert(sd_card_enqueue_raw_adc_samples(samples,6,&calibration)==0&&g_sd_raw_queue.count==2);
+ sd_raw_slot_t *before=take(),*after=take();
+ assert(before->session==123&&before->count==2&&before->samples[1].record_sequence==101);
+ assert(after->session==124&&after->count==4&&after->samples[0].record_sequence==102&&after->samples[3].record_sequence==105);
+ sd_free_raw_slot(before);sd_free_raw_slot(after);
+ /* The next batch starts with a jittered row: it still follows 105. */
+ for(unsigned i=0;i<2;i++){samples[i]=make(106+i,0);samples[i].network_unix_ms=1700000000000ULL+(i?106:101);}
+ assert(sd_card_enqueue_raw_adc_samples(samples,2,&calibration)==0);
+ sd_raw_slot_t *next=g_sd_raw_append_tail;assert(next&&next->session==124);
+ while(g_sd_raw_queue.count)sd_free_raw_slot(take());
+ assert(g_sd_raw_records_enqueued_count==8&&!g_sd_raw_records_dropped_count);
+}
+int main(int argc,char**argv){mock_pool_init(&g_sd_raw_pool,raw_pool_storage,332U*1024U,SD_RAW_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE);assert(argc==2);if(!strcmp(argv[1],"basic"))basic();else if(!strcmp(argv[1],"boundary"))boundary();else if(!strcmp(argv[1],"jitter"))jitter();else stress(!strcmp(argv[1],"protected")||!strcmp(argv[1],"capacity-audit"),!strcmp(argv[1],"capacity-audit")?3000:1600);}
 '''
         with tempfile.TemporaryDirectory() as tmp:
             binary=pathlib.Path(tmp)/'raw_queue'
             subprocess.run(['cc','-std=c11','-O1','-Wall','-Wextra','-Werror','-Wno-unused-function','-fsanitize=address,undefined',
                 '-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(binary)],input=program,text=True,check=True)
-            for mode in ('basic','boundary','stress','protected','capacity-audit'):subprocess.run([str(binary),mode],check=True)
+            for mode in ('basic','boundary','jitter','stress','protected','capacity-audit'):subprocess.run([str(binary),mode],check=True)

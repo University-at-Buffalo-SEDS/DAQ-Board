@@ -67,6 +67,9 @@ int main(void){
  utc=start+2000000;sd_card_set_launch_clock(14,utc+30000);
  raw+=9999;assert(sd_run_snapshot()==7);++raw;assert(sd_run_snapshot()==8);
  raw+=20000;assert(sd_run_snapshot()==9&&sd_launch_finished());
+ /* The raw-stream key floor survives replays, not a new or revised window. */
+ g_sd_raw_key_floor=99;sd_card_set_launch_clock(14,start+2030000);assert(g_sd_raw_key_floor==99);
+ sd_card_set_launch_clock(15,utc+60000);assert(g_sd_raw_key_floor==0);
  assert(!mask);
 }
 """)

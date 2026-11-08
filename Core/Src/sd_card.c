@@ -277,6 +277,8 @@ static void sd_route_epoch_advance(void);
  * at1 (boot session) and increments when a window opens (even) and when it
  * ends or is reset (odd), so each key names exactly one file. */
 static uint64_t g_sd_route_key = 1U, g_sd_route_change_local;
+/* Highest key a raw row was routed to; reset when the launch clock changes. */
+static uint64_t g_sd_raw_key_floor;
 
 /* Caller holds the short IRQ lock; only the local extended uptime is read.
  * No router/network-clock lock is acquired from a receive callback. */
@@ -356,6 +358,7 @@ void sd_card_set_launch_clock(uint64_t session, uint64_t close_unix_ms)
   const uint64_t now = session != 0U ? daq_log_unix_ms() : 0U;
   const uint64_t local = daq_log_monotonic_ms();
   const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  const uint64_t prior_session = g_sd_session, prior_close = g_sd_close_unix_ms;
   const uint64_t before = sd_route_session_locked(local);
   /* A reset or newer session ends an open window: the next rows start a new
    * regular session file. A window that never opened leaves it unchanged. */
@@ -393,6 +396,8 @@ void sd_card_set_launch_clock(uint64_t session, uint64_t close_unix_ms)
   }
   const uint64_t after = sd_route_session_locked(local);
   if (before != after) sd_route_epoch_advance();
+  /* A new, reset or revised window may legitimately route raw rows lower. */
+  if (session != prior_session || close_unix_ms != prior_close) g_sd_raw_key_floor = 0U;
   __set_PRIMASK(mask);
 }
 
@@ -2133,6 +2138,18 @@ static sd_card_status_t sd_card_enqueue_optional_snapshot_captured_impl(
   return result == TX_SUCCESS ? SD_CARD_STATUS_OK : SD_CARD_STATUS_BACKPRESSURE;
 }
 
+/* Caller holds the IRQ lock. Raw rows arrive in capture order, but about 0.7%
+ * carry a capture UTC 1-2 ms earlier than the row before. The raw stream never
+ * returns to an earlier key, so the boundary falls at one sequence number (the
+ * first row whose UTC crosses) and each file holds one contiguous raw run. */
+static uint64_t sd_raw_key_locked(uint64_t route, uint64_t capture_unix_ms, uint8_t commit)
+{
+  uint64_t key = sd_capture_key_locked(route, capture_unix_ms);
+  if (key < g_sd_raw_key_floor) key = g_sd_raw_key_floor;
+  if (commit) g_sd_raw_key_floor = key;
+  return key;
+}
+
 static sd_card_status_t sd_card_enqueue_raw_adc_samples_captured_impl(const sd_raw_adc_record_t *samples,
                                                  uint16_t count,
                                                  const daq_calibration_t *calibration, sd_capture_t capture)
@@ -2147,8 +2164,8 @@ static sd_card_status_t sd_card_enqueue_raw_adc_samples_captured_impl(const sd_r
     uint16_t split = 1U;
     const uint32_t split_mask = __get_PRIMASK(); __disable_irq();
     const uint64_t route = sd_run_snapshot();
-    const uint64_t first = sd_capture_key_locked(route, samples[0].network_unix_ms);
-    while (split < count && sd_capture_key_locked(route, samples[split].network_unix_ms) == first) ++split;
+    const uint64_t first = sd_raw_key_locked(route, samples[0].network_unix_ms, 0U);
+    while (split < count && sd_raw_key_locked(route, samples[split].network_unix_ms, 0U) <= first) ++split;
     __set_PRIMASK(split_mask);
     if (split < count) {
       const sd_card_status_t head = sd_card_enqueue_raw_adc_samples_captured_impl(samples, split, calibration, capture);
@@ -2166,7 +2183,7 @@ static sd_card_status_t sd_card_enqueue_raw_adc_samples_captured_impl(const sd_r
   uint16_t index = 0U, appended = 0U;
   const uint64_t uptime = board_uptime_ticks();
   const uint32_t mask = __get_PRIMASK(); __disable_irq();
-  const uint64_t session = sd_capture_key_locked(sd_run_snapshot(), samples[0].network_unix_ms);
+  const uint64_t session = sd_raw_key_locked(sd_run_snapshot(), samples[0].network_unix_ms, 1U);
   const uint32_t epoch = g_sd_route_epoch;
   sd_raw_slot_t *tail = g_sd_raw_append_tail;
   if (tail && tail->session == session && tail->route_epoch == epoch && tail->capture == capture &&
