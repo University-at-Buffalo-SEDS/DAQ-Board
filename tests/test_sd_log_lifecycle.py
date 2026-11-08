@@ -25,11 +25,10 @@ class SdLifecycleTests(unittest.TestCase):
 #include <assert.h>
 typedef uintptr_t ULONG;
 typedef uint32_t sd_capture_t;
-typedef struct { uint32_t route_epoch;sd_capture_t capture; } sd_line_slot_t;
+typedef struct { uint32_t route_epoch;sd_capture_t capture;uint64_t session; } sd_line_slot_t;
 static void sd_card_capture_fault(sd_capture_t capture){assert(capture==0);}
 static unsigned g_sd_line_pending;
-static uint32_t g_sd_line_pending_epoch;
-static unsigned sd_telemetry_epoch_ready(uint32_t epoch,unsigned pressure){(void)epoch;(void)pressure;return 1;}
+static uint64_t g_sd_line_pending_key;
 #define TX_NO_WAIT 0
 #define TX_SUCCESS 0
 #define FX_SUCCESS 0
@@ -84,12 +83,13 @@ int main(void) {
     def test_calendar_and_close_timestamp_failure(self):
         source = (ROOT / "Core/Src/sd_card.c").read_text()
         functions = source[source.index("static void sd_update_filesystem_clock"):
-                           source.index("static UINT sd_open_log")]
+                           source.index("static int sd_format_calibration_line")]
         self.run_c(r'''
 #include <assert.h>
 #include "sd_calendar.h"
 typedef unsigned UINT;
 typedef unsigned FX_FILE;
+typedef struct { FX_FILE file; char name[64]; unsigned char open; } sd_log_t;
 #define FX_SUCCESS 0U
 static unsigned g_sd_media, g_sd_write_error_count, closes, year, day;
 static uint64_t utc=1790035200000ULL;
@@ -116,9 +116,10 @@ int main(void) {
   assert(c.year==2000 && c.month==2 && c.day==29);
   assert(sd_calendar_from_unix_ms(4107542400000ULL,&c));
   assert(c.year==2100 && c.month==3 && c.day==1);
-  FX_FILE f=0;
-  assert(sd_close_log(&f,"DAQ.CSV")==FX_SUCCESS);
+  sd_log_t log={0,"DAQ.CSV",1};
+  assert(sd_close_file(&log)==FX_SUCCESS);
   assert(closes==1 && g_sd_write_error_count==1 && year==2026 && day==22);
+  assert(!log.open); /* A closed handle is never left marked open. */
 }
 ''')
 
@@ -145,31 +146,44 @@ int main(void) {
   const uint64_t start=utc;
   for (unsigned i=0;i<10000;i++) assert(!sd_launch_finished());
   assert(utc_reads==0); /* Idle acquisition must not contend for the router. */
+  assert(sd_run_snapshot()==1 && !sd_launch_key_locked()); /* Boot session file. */
   sd_card_set_launch_clock(100,start+30000); /* T-10 -> T+20 */
-  assert(sd_run_snapshot()==100 && !sd_launch_finished());
+  /* The countdown stays in the regular session file; the window is T0..T+20. */
+  assert(sd_run_snapshot()==1 && sd_launch_key_locked()==2 && !sd_launch_finished());
   assert(utc_reads==1); /* Active local deadline also avoids per-row queries. */
-  local+=10000; utc+=10000;
+  local+=9999; utc+=9999; assert(sd_run_snapshot()==1);
+  local+=1; utc+=1;
   sd_card_set_launch_clock(100,utc+20000); /* Pilot T0, same session. */
+  assert(sd_run_snapshot()==2 && sd_launch_key_locked()==2); /* Window opens at T0. */
+  /* Rows are classified by capture UTC: [T0, T+20) only, regardless of when
+   * their batch is enqueued; unknown UTC follows the receive-time route. */
+  assert(sd_capture_key_locked(2,start+9999)==1 && sd_capture_key_locked(2,start+10000)==2);
+  assert(sd_capture_key_locked(2,start+29999)==2 && sd_capture_key_locked(2,start+30000)==3);
+  assert(sd_capture_key_locked(2,0)==2);
   for (unsigned i=0;i<19;++i) {
     local+=1000; utc+=1000;
     sd_card_set_launch_clock(100,start+30000); /* Retained replay/reconnect. */
-    assert(!sd_launch_finished() && sd_run_snapshot()==100);
+    assert(!sd_launch_finished() && sd_run_snapshot()==2);
   }
   utc=0; local+=1000; /* Lose GS/time at T+20, still close. */
-  assert(sd_launch_finished());
+  assert(sd_launch_finished() && sd_run_snapshot()==3); /* New regular session file. */
+  assert(sd_launch_key_locked()==2);
   sd_card_set_launch_clock(100,start+30000);
-  utc=start; assert(sd_launch_finished()); /* No reopen if time goes backwards. */
+  utc=start; assert(sd_launch_finished() && sd_run_snapshot()==3); /* No reopen if time goes backwards. */
   sd_card_set_launch_clock(0,0); assert(!sd_launch_finished());
+  assert(sd_run_snapshot()==3 && !sd_launch_key_locked()); /* Reset after the window: same file. */
   sd_card_set_launch_clock(100,start+30000);
-  assert(sd_run_snapshot()==0); /* Old retained launch cannot revive a reset. */
+  assert(sd_run_snapshot()==3); /* Old retained launch cannot revive a reset. */
   sd_card_set_launch_clock(101,start+30000);
-  assert(sd_run_snapshot()==101 && !sd_launch_finished());
+  assert(sd_run_snapshot()==3 && sd_launch_key_locked()==4 && !sd_launch_finished());
+  local+=10000; assert(sd_run_snapshot()==4); /* Second launch window. */
   sd_card_set_launch_clock(100,start+30000);
-  assert(sd_run_snapshot()==101); /* Older session replay. */
+  assert(sd_run_snapshot()==4); /* Older session replay. */
   sd_card_set_launch_clock(0,0);
+  assert(sd_run_snapshot()==5); /* Abort mid-window ends the launch file once. */
   utc=start+999999;
   sd_card_set_launch_clock(102,start+30000); /* GS restarts after completed run. */
-  assert(sd_run_snapshot()==0 && sd_launch_finished());
+  assert(sd_run_snapshot()==5 && sd_launch_finished() && !sd_launch_key_locked());
 }
 ''')
 
@@ -179,7 +193,12 @@ int main(void) {
         self.assertNotIn("else if (serviced_work == 0U)", source)
         initialization = source.split("UINT sd_card_init", 1)[1]
         self.assertNotIn("sd_open_timestamped_log(NULL)", initialization)
-        self.assertIn("g_sd_raw_queue.tx_queue_enqueued == 0U", source)
+        # A superseded file closes only after every queue, including raw, has
+        # moved past its route key.
+        from test_sd_raw_queue import function
+        oldest = function(source, "sd_oldest_queued_key")
+        for queue in ("g_sd_raw_queue", "g_sd_queue", "g_sd_pressure_queue"):
+            self.assertIn(queue + ".tx_queue_enqueued != 0U", oldest)
 
 
 if __name__ == "__main__":

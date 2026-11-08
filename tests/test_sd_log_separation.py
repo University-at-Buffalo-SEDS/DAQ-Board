@@ -1,4 +1,11 @@
-"""Execute production stream-selection code against recording FileX mocks."""
+"""Execute production route-key file selection against recording FileX mocks.
+
+Every row (raw ADC, telemetry, VB pressure) carries a route key: odd keys are
+regular session files, even keys are launch-window files. Interleaved queues
+must never make the writer close and reopen files (the rotation storm that
+created hundreds of tiny files and starved raw logging), calibration changes
+must not rotate, and late rows must reach an existing file without loss.
+"""
 import pathlib
 import subprocess
 import tempfile
@@ -9,117 +16,145 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class LogSeparationTests(unittest.TestCase):
-    def test_independent_calibration_epochs_and_write_failures(self):
+    def test_route_keys_open_each_file_once_without_loss(self):
         source = (ROOT / "Core/Src/sd_card.c").read_text()
-        telemetry = "static UINT sd_write_telemetry_row" + source.split(
-            "static UINT sd_write_telemetry_row", 1)[1].split(
-            "static UINT sd_marker_exists", 1)[0]
-        raw = function(source, 'sd_select_calibration')
+        log_type = source[source.index("typedef struct {\n  FX_FILE file;"):
+                          source.index("} sd_log_t;") + len("} sd_log_t;")]
+        writer = source[source.index("static UINT sd_log_flush(sd_log_t *log)"):
+                        source.index("static UINT sd_marker_exists(void)")]
         harness = r"""
 #include <assert.h>
 #include <stdint.h>
-#define sd_media_flush() fx_media_flush(&g_sd_media)
-#include "sd_file_limit.h"
-#define SD_RAW_BATCH_MAX 32U
-static unsigned g_sd_write_buffer_len, g_sd_telemetry_write_buffer_len;
+#include <stdio.h>
 #include <string.h>
-typedef unsigned UINT;
-typedef void VOID;
-typedef struct { unsigned id; uint64_t fx_file_current_file_size; } FX_FILE;
-typedef struct { float slope, offset; } daq_calibration_t;
-typedef struct { daq_calibration_t calibration; char line[64]; unsigned len; uint64_t session; } sd_line_slot_t;
+#include "sd_file_limit.h"
+#include "daq_calibration.h"
+typedef unsigned UINT; typedef uint32_t ULONG; typedef unsigned char UCHAR; typedef void VOID;
 #define FX_SUCCESS 0U
 #define FX_IO_ERROR 1U
-static FX_FILE g_sd_file={1,0}, g_sd_telemetry_file={2,0};
-static unsigned g_sd_media, g_telemetry_file_open, g_file_open=1;
-static uint64_t g_sd_telemetry_session;
-static daq_calibration_t g_sd_telemetry_calibration, g_sd_open_calibration={1,0};
-static char g_sd_telemetry_filename[64], g_sd_filename[64];
-static unsigned raw_opens, telemetry_opens, raw_closes, telemetry_closes, writes, fail_write;
-static UINT fx_media_flush(void *m) { (void)m; return 0; }
-static UINT fx_file_close(FX_FILE *f) {
-  if (f==&g_sd_file) raw_closes++; else telemetry_closes++;
+#define FX_PTR_ERROR 2U
+typedef struct { uint64_t fx_file_current_file_size, fx_file_current_file_offset; unsigned id; } FX_FILE;
+typedef struct { daq_calibration_t calibration; char line[64]; unsigned len; uint64_t session; } sd_line_slot_t;
+""" + log_type + r"""
+static sd_log_t g_sd_regular_log, g_sd_launch_log;
+static uint64_t g_sd_regular_closed_key, g_sd_launch_done_key;
+static unsigned g_sd_launch_flush_pending, g_sd_write_error_count;
+static unsigned regular_opens, launch_opens, closes, rows, notes, fail_write, fail_close, fail_open;
+static unsigned rows_in[2][16]; /* [launch][key] */
+static unsigned next_id = 1;
+static UINT sd_media_flush(void) { return 0; }
+static UINT sd_prepare_file_space(sd_log_t *log, size_t n) { (void)log; (void)n; return 0; }
+static UINT fx_file_seek(FX_FILE *f, ULONG o) { f->fx_file_current_file_offset = o; return 0; }
+static UINT fx_file_write(FX_FILE *f, VOID *data, ULONG len) {
+  assert(data && len);
+  if (fail_write) return FX_IO_ERROR;
+  const char *text = data;
+  for (ULONG i = 0; i < len; ++i) {
+    if (text[i] == 'R') {
+      const int launch = f == &g_sd_launch_log.file;
+      const unsigned key = (unsigned)(text[i + 1] - '0');
+      ++rows_in[launch][key]; ++rows;
+    } else if (text[i] == '#') ++notes;
+  }
+  f->fx_file_current_file_offset += len;
+  f->fx_file_current_file_size = f->fx_file_current_file_offset;
   return 0;
 }
-static UINT sd_close_log(FX_FILE *f, char *name) { (void)name; return fx_file_close(f); }
-static unsigned raw_fail_flush;
-static UINT sd_flush_pending(void) { return raw_fail_flush ? FX_IO_ERROR : 0; }
-static unsigned fail_flush;
-static UINT sd_flush_telemetry_pending(void) { return fail_flush ? FX_IO_ERROR : 0; }
-static UINT sd_open_timestamped_log(const daq_calibration_t *c) {
-  raw_opens++; g_file_open=1; g_sd_file.fx_file_current_file_size=0; g_sd_open_calibration=*c; return 0;
+static UINT sd_close_file(sd_log_t *log) {
+  if (fail_close) { --fail_close; return FX_IO_ERROR; }
+  ++closes; log->open = 0; return 0;
 }
-static UINT sd_open_log(FX_FILE *f, char *n, size_t size, const char *prefix,
-                        const daq_calibration_t *c) {
-  (void)n; (void)size; (void)c;
-  assert(f==&g_sd_telemetry_file && (strcmp(prefix,"DAQ_TELEMETRY")==0 ||
-                                  strcmp(prefix,"DAQ_LAUNCH_TELEMETRY")==0));
-  telemetry_opens++; f->fx_file_current_file_size=0; return 0;
+static int sd_format_calibration_line(char *line, size_t size, const daq_calibration_t *c) {
+  return snprintf(line, size, "#cal %g\r\n", (double)c->kg1000_slope);
 }
-static UINT fx_file_write(FX_FILE *f, VOID *data, unsigned len) {
-  assert(f==&g_sd_telemetry_file && data && len);
-  writes++; return fail_write ? FX_IO_ERROR : FX_SUCCESS;
+static UINT sd_open_log(sd_log_t *log, uint64_t key, const daq_calibration_t *calibration) {
+  if (fail_open) { --fail_open; return FX_IO_ERROR; }
+  if (log == &g_sd_launch_log) { assert((key & 1U) == 0U); ++launch_opens; }
+  else { assert(key & 1U); ++regular_opens; }
+  log->file.fx_file_current_file_size = log->file.fx_file_current_file_offset = 0;
+  log->file.id = next_id++; log->len = 0; log->retry_active = 0;
+  log->open = 1; log->key = key; log->calibration = *calibration;
+  return 0;
 }
-static UINT sd_write_telemetry_bytes(const void *data, size_t len) {
-  return fx_file_write(&g_sd_telemetry_file, (void *)data, len);
+""" + writer + r"""
+static sd_line_slot_t row(uint64_t key, float slope) {
+  sd_line_slot_t s = {{slope, 0, 1, 0, {0}, {0}, {0}}, "R0\r\n", 4, key};
+  s.line[1] = (char)('0' + key);
+  return s;
 }
-""" + telemetry + raw + r"""
+static UINT put(uint64_t key) { sd_line_slot_t s = row(key, 1); return sd_write_telemetry_row(&s); }
+static void drain(void) { assert(sd_log_flush(&g_sd_regular_log) == 0 && sd_log_flush(&g_sd_launch_log) == 0); }
 int main(void) {
-  sd_line_slot_t row={{1,0},"kg1000_network",14,0};
-  assert(sd_write_telemetry_row(&row)==0);
-  assert(sd_write_telemetry_row(&row)==0 && telemetry_opens==1);
-  daq_calibration_t next={2,3};
-  assert(sd_select_calibration(&next)==0 && raw_opens==1 && raw_closes==1);
-  /* A queued old network row cannot rotate or contaminate the new raw file. */
-  assert(sd_write_telemetry_row(&row)==0 && raw_opens==1);
-  row.calibration=next;
-  fail_flush=1;
-  assert(sd_write_telemetry_row(&row)==FX_IO_ERROR && telemetry_closes==0);
-  fail_flush=0;
-  assert(sd_write_telemetry_row(&row)==0 && telemetry_opens==2 && telemetry_closes==1);
-  assert(sd_select_calibration(&next)==0 && raw_opens==1);
-  fail_write=1;
-  assert(sd_write_telemetry_row(&row)==FX_IO_ERROR);
-  assert(writes==5 && g_sd_open_calibration.slope==2);
-  fail_write=0;
-  row.session=123;
-  assert(sd_write_telemetry_row(&row)==0 && telemetry_opens==3);
-  /* Ten minutes at 500 Hz, with duplicate retained launch/calibration updates:
-   * keep appending to the same file instead of creating startup fragments. */
-  for (unsigned i=0; i<600U*500U; ++i) {
-    assert(sd_write_telemetry_row(&row)==0);
-    assert(sd_select_calibration(&next)==0);
-  }
-  assert(telemetry_opens==3 && raw_opens==1);
-  /* Include already-buffered bytes and reserve the next whole batch. */
-  g_sd_file.fx_file_current_file_size=SD_LOG_PART_LIMIT_BYTES-9000;
-  g_sd_write_buffer_len=1000;
-  raw_fail_flush=1;
-  assert(sd_select_calibration(&next)==FX_IO_ERROR && raw_opens==1 && g_file_open);
-  raw_fail_flush=0;
-  assert(sd_select_calibration(&next)==0 && raw_opens==2 && raw_closes==2);
-  g_sd_telemetry_file.fx_file_current_file_size=SD_LOG_PART_LIMIT_BYTES-20;
-  g_sd_telemetry_write_buffer_len=10;
-  assert(sd_write_telemetry_row(&row)==0 && telemetry_opens==4);
-  g_sd_telemetry_write_buffer_len=0;
-  row.session=456;
-  assert(sd_write_telemetry_row(&row)==0 && telemetry_opens==5);
+  /* Boot session: raw, telemetry and pressure rows share one regular file. */
+  for (unsigned i = 0; i < 1000; ++i) assert(put(1) == 0);
+  assert(regular_opens == 1 && launch_opens == 0);
+  /* Launch window: every launch-key row in ONE file. Pre-T0 pressure
+   * captured before the window keeps arriving interleaved (the g6 storm was
+   * exactly this alternation); it must not close or reopen either file. */
+  for (unsigned i = 0; i < 10000; ++i) { assert(put(2) == 0); assert(put(1) == 0); }
+  assert(regular_opens == 1 && launch_opens == 1 && closes == 0);
+  /* A calibration change is an in-stream note, never a new file. */
+  sd_line_slot_t changed = row(2, 7);
+  const unsigned notes_before = notes;
+  assert(sd_write_telemetry_row(&changed) == 0 && sd_write_telemetry_row(&changed) == 0);
+  drain(); assert(notes == notes_before + 1 && launch_opens == 1);
+  /* At T0+grace the writer finishes the pre-launch regular file once. */
+  assert(sd_log_finish(&g_sd_regular_log) == 0 && g_sd_regular_closed_key == 1 && closes == 1);
+  /* A very late pre-window row joins the open launch file, no reopened part. */
+  assert(put(1) == 0 && regular_opens == 1 && launch_opens == 1);
+  /* T+20: one NEW regular session file, while late window rows still reach
+   * the launch file (both handles open only for this overlap). */
+  for (unsigned i = 0; i < 1000; ++i) { assert(put(3) == 0); assert(put(2) == 0); }
+  assert(regular_opens == 2 && launch_opens == 1 && closes == 1);
+  assert(sd_log_finish(&g_sd_launch_log) == 0 && g_sd_launch_done_key == 2 && closes == 2);
+  /* A finished launch window never reopens: a later window row is kept in
+   * the current regular file instead of creating a second launch file. */
+  assert(put(2) == 0 && launch_opens == 1 && regular_opens == 2);
+  /* Write/close failures keep handles, bytes and keys; the caller retries the
+   * same row, which is then written exactly once. */
+  unsigned failed = 0;
+  fail_write = 1;
+  for (unsigned i = 0; i < 2000; ++i) if (put(3) != 0) ++failed;
+  fail_write = 0;
+  assert(failed > 0 && g_sd_regular_log.open && g_sd_write_error_count == failed);
+  while (failed--) assert(put(3) == 0);
+  /* Only the FAT32 part limit splits a key's file; a failed close retries. */
+  drain();
+  g_sd_regular_log.file.fx_file_current_file_size = SD_LOG_PART_LIMIT_BYTES - 2;
+  fail_close = 1;
+  assert(put(3) == FX_IO_ERROR && g_sd_regular_log.open && regular_opens == 2);
+  assert(put(3) == 0 && regular_opens == 3 && g_sd_regular_log.key == 3 && g_sd_regular_closed_key == 1);
+  /* A second launch: one more launch file and one more regular file. */
+  assert(put(4) == 0 && put(5) == 0 && launch_opens == 2 && regular_opens == 4);
+  drain();
+  assert(rows_in[0][1] == 11000 && rows_in[1][1] == 1);
+  assert(rows_in[1][2] == 11002 && rows_in[0][2] == 1);
+  assert(rows_in[0][3] == 3001 && rows_in[1][4] == 1 && rows_in[0][5] == 1);
+  assert(rows == 25007 && fail_open == 0);
+  return 0;
 }
 """
         with tempfile.TemporaryDirectory() as tmp:
             binary = pathlib.Path(tmp) / "log-test"
             result = subprocess.run(
-                ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-I", str(ROOT / "Core/Inc"), "-x", "c",
-                 "-", "-o", str(binary)], input=harness, text=True, capture_output=True)
+                ["cc", "-std=c11", "-O1", "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined",
+                 "-I", str(ROOT / "Core/Inc"), "-x", "c", "-", "-o", str(binary)],
+                input=harness, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             subprocess.run([str(binary)], check=True)
 
-    def test_worker_does_not_send_telemetry_to_raw_buffer(self):
+    def test_every_row_kind_uses_the_route_key_selector(self):
         source = (ROOT / "Core/Src/sd_card.c").read_text()
         self.assertIn("sd_write_telemetry_row(pending)", source)
-        # Ordinary telemetry keeps its independent file/buffer. Only explicit
-        # launch pressure is intentionally archived alongside raw acquisition.
-        from test_sd_raw_queue import function
-        self.assertNotIn("sd_write_bytes", function(source,"sd_service_telemetry_rows"))
-        self.assertNotIn("sd_write_bytes", function(source,"sd_write_telemetry_row"))
-        self.assertIn("sd_write_bytes(slot->line", function(source,"sd_write_launch_pressure_row"))
+        self.assertIn("sd_log_for_key(slot->session, &slot->calibration", function(source, "sd_write_telemetry_row"))
+        writer = function(source, "sd_card_writer_thread_entry")
+        self.assertIn("sd_log_for_key(slot->session, &slot->calibration,", writer)
+        self.assertIn("sd_write_telemetry_row(slot)", function(source, "sd_service_pressure_rows"))
+        # No calibration-driven or session-driven rotation remains.
+        self.assertNotIn("sd_select_calibration", source)
+        self.assertNotIn("DAQ_TELEMETRY", source)
+        self.assertNotIn("DAQ_LAUNCH_TELEMETRY", source)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -53,6 +53,7 @@ static uint32_t __get_PRIMASK(void){return irq_mask;}
 static void __disable_irq(void){irq_mask=1;}
 static void __set_PRIMASK(uint32_t m){irq_mask=m;}
 static uint64_t sd_run_snapshot(void){assert(irq_mask);return session;}
+static uint64_t sd_capture_key_locked(uint64_t route,uint64_t capture){(void)capture;return route;} /* capture-time routing: test_pressure_launch/test_sd_launch_cutoff */
 static unsigned force_send,fail_write;
 '''+FUNCTIONS+r'''
 static unsigned tx_queue_send(TX_QUEUE *q,void *m,unsigned w){assert(irq_mask&&!w&&q==&g_sd_queue);

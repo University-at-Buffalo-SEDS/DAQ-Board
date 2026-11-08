@@ -18,8 +18,10 @@ static unsigned mask;
 static uint32_t __get_PRIMASK(void){return mask;}
 static void __disable_irq(void){mask=1;}
 static void __set_PRIMASK(uint32_t m){mask=m;}
-static uint64_t revision, g_sd_session,g_sd_close_unix_ms,g_sd_raw_session,g_sd_telemetry_session;
-static uint8_t g_sd_services_initialized,g_sd_ready,g_sd_deadline_anchored,g_sd_launch_closed,g_file_open,g_telemetry_file_open,g_sd_launch_flush_pending;
+static uint64_t revision, g_sd_session,g_sd_close_unix_ms;
+static uint8_t g_sd_services_initialized,g_sd_ready,g_sd_deadline_anchored,g_sd_launch_closed,g_sd_launch_flush_pending;
+/* One launch-window file carries raw and telemetry rows: bits16 and32 move together. */
+static struct { uint8_t open; } g_sd_launch_log;
 #ifdef TELEMETRY_ENABLED
 static uint64_t daq_log_clock_revision(void){assert(!mask);return revision;}
 #endif
@@ -30,7 +32,7 @@ int main(void){
  g_sd_session=UINT64_C(0x12345678abcdef01);g_sd_close_unix_ms=UINT64_C(0x1111222233334444);
  revision=UINT64_C(0xfeedcafe12345678);
  g_sd_services_initialized=g_sd_ready=g_sd_deadline_anchored=1;
- g_sd_raw_session=g_sd_telemetry_session=g_sd_session;g_file_open=g_telemetry_file_open=1;
+ g_sd_launch_log.open=1;
  sd_card_launch_log_snapshot(words);
  assert(words[0]==0xabcdef01U&&words[1]==0x12345678U&&words[2]==0x33334444U&&words[3]==0x11112222U&&words[6]==55U);
 #ifdef TELEMETRY_ENABLED
@@ -41,7 +43,7 @@ int main(void){
  g_sd_launch_closed=1;g_sd_launch_flush_pending=1;sd_card_launch_log_snapshot(words);
  assert(words[6]==127U); /* closed but buffered launch handles may still drain */
  assert(g_sd_session==UINT64_C(0x12345678abcdef01)&&g_sd_close_unix_ms==UINT64_C(0x1111222233334444));
- ++g_sd_raw_session;g_telemetry_file_open=0;sd_card_launch_log_snapshot(words);assert(words[6]==79U);
+ g_sd_launch_log.open=0;sd_card_launch_log_snapshot(words);assert(words[6]==79U);
  g_sd_session=0;g_sd_close_unix_ms=0;sd_card_launch_log_snapshot(words);
  assert(!words[0]&&!words[1]&&!words[2]&&!words[3]&&!(words[6]&48U));
  assert(!mask);

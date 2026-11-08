@@ -112,7 +112,7 @@ int main(void){
 """
         self.run_c(code)
 
-    def test_static_pending_owner_blocks_early_close_and_newer_pressure_epoch(self):
+    def test_static_pending_owner_blocks_early_close_of_its_file(self):
         source=(ROOT/'Core/Src/sd_card.c').read_text()
         code=self.owner_fixture().split('int main(void){',1)[0]
         code=code.replace('unsigned head,tail,count,words;}TX_QUEUE;',
@@ -121,30 +121,23 @@ int main(void){
                           'q->count++;q->tx_queue_enqueued=q->count;q->tx_queue_read=q->messages[q->head];return 0;}')
         code=code.replace('q->count--;return 0;}',
                           'q->count--;q->tx_queue_enqueued=q->count;q->tx_queue_read=q->messages[q->head];return 0;}')
-        predicate=production_function(source,'sd_telemetry_epoch_ready').replace(
-            'sd_telemetry_epoch_ready','actual_epoch_ready',1)
-        start=source.index('    sd_close_finished_launch_files(\n')
-        end=source.index(');',start)+2
-        close_call=source[start:end].replace('sd_close_finished_launch_files','probe_close')
-        code+=predicate+r"""
-static unsigned raw_drained,telemetry_drained;
-static void probe_close(unsigned raw,unsigned telemetry){raw_drained=raw;telemetry_drained=telemetry;}
+        code+="static uint8_t g_sd_raw_pending;static uint64_t g_sd_raw_pending_key;\n"
+        code+=production_function(source,'sd_oldest_queued_key')+r"""
 int main(void){
  g_sd_queue.words=g_sd_raw_queue.words=1;g_sd_pressure_queue.words=SD_PRESSURE_MESSAGE_WORDS;
  mock_pool_init(&g_sd_line_pool,line_pool_storage,62U*1024U,SD_LINE_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE);
  mock_pool_init(&g_sd_raw_pool,raw_pool_storage,332U*1024U,SD_RAW_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE);
- daq_calibration_t cal={.kg1000_slope=2};now=22;snapshot(22,42,0,&cal);
- assert(!actual_epoch_ready(1,1)); /* queued static prefix owns older epoch */
+ (void)g_sd_session;assert(sd_oldest_queued_key()==UINT64_MAX);
+ daq_calibration_t cal={.kg1000_slope=2};now=22;snapshot(22,2,0,&cal);
+ assert(sd_oldest_queued_key()==2); /* queued static prefix owns launch key2 */
  assert(sd_service_telemetry_rows()&&consumed==5&&g_sd_line_pending);
  assert(!g_sd_line_slots_used&&!g_sd_queue.count);
- g_sd_pressure_pending=1;g_sd_pressure_pending_epoch=1;
- assert(!actual_epoch_ready(1,1)&&actual_epoch_ready(0,0));
+ /* ONLY the partly written static owner keeps its file from closing. */
+ assert(sd_oldest_queued_key()==2);
+ g_sd_pressure_pending=1;g_sd_pressure_pending_key=1;assert(sd_oldest_queued_key()==1);
  g_sd_pressure_pending=0;
-"""+close_call+r"""
- assert(raw_drained&&!telemetry_drained); /* ONLY static pending prevents close */
  drain();
-"""+close_call+r"""
- assert(raw_drained&&telemetry_drained);
+ assert(!g_sd_line_pending&&sd_oldest_queued_key()==UINT64_MAX);
 }
 """
         self.run_c(code)

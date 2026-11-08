@@ -55,6 +55,9 @@ static unsigned char raw_pool_storage[332U*1024U+8];
 static uint64_t now=456,session=123;
 uint64_t board_uptime_ticks(void){return now;}
 static uint64_t sd_run_snapshot(void){assert(irq_mask);return session;}
+/* Window boundary model: captures at/after split_at belong to the next key. */
+static uint64_t split_at;
+static uint64_t sd_capture_key_locked(uint64_t route,uint64_t capture){assert(irq_mask);return split_at&&capture>=split_at?route+1:route;}
 static unsigned force_send_failure;
 '''+FUNCTIONS+r'''
 static int tx_queue_send(TX_QUEUE *queue,void *message,unsigned wait){
@@ -171,10 +174,26 @@ static void stress(unsigned all_protected,unsigned stall_ms){
  printf("raw stress20s/2.5ksps/%ums stalls: protectedwritten%u protecteddrops%u optionaldrop%u coalesced%u peakbacklog%u slots%u allocations%u\n",
   stall_ms, essential_written,g_sd_raw_essential_records_dropped,g_sd_raw_optional_records_dropped,g_sd_raw_records_coalesced,peak_backlog,g_sd_raw_slots_peak,mock_allocations_count);
 }
-int main(int argc,char**argv){mock_pool_init(&g_sd_raw_pool,raw_pool_storage,332U*1024U,SD_RAW_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE);assert(argc==2);if(!strcmp(argv[1],"basic"))basic();else stress(!strcmp(argv[1],"protected")||!strcmp(argv[1],"capacity-audit"),!strcmp(argv[1],"capacity-audit")?3000:1600);}
+/* A batch straddling T0/T+20 splits at the first sample captured in the next
+ * window, keeping order, counts and the capture lease; nothing is dropped. */
+static void boundary(void){
+ daq_calibration_t calibration={.kg1000_slope=2};sd_raw_adc_record_t samples[6];
+ for(unsigned i=0;i<6;i++)samples[i]=make(100+i,i%2);
+ split_at=1700000000000ULL+103;
+ assert(sd_card_enqueue_raw_adc_samples(samples,6,&calibration)==0&&g_sd_raw_queue.count==2);
+ sd_raw_slot_t *before=take(),*after=take();
+ assert(before->session==123&&before->count==3&&before->samples[2].record_sequence==102);
+ assert(after->session==124&&after->count==3&&after->samples[0].record_sequence==103);
+ assert(g_sd_raw_records_enqueued_count==6&&!g_sd_raw_records_dropped_count);
+ /* A batch wholly inside one window is never split. */
+ split_at=0;session=124;samples[0]=make(106,0);
+ sd_free_raw_slot(before);sd_free_raw_slot(after);
+ assert(sd_card_enqueue_raw_adc_samples(samples,1,&calibration)==0&&g_sd_raw_queue.count==1);
+}
+int main(int argc,char**argv){mock_pool_init(&g_sd_raw_pool,raw_pool_storage,332U*1024U,SD_RAW_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE);assert(argc==2);if(!strcmp(argv[1],"basic"))basic();else if(!strcmp(argv[1],"boundary"))boundary();else stress(!strcmp(argv[1],"protected")||!strcmp(argv[1],"capacity-audit"),!strcmp(argv[1],"capacity-audit")?3000:1600);}
 '''
         with tempfile.TemporaryDirectory() as tmp:
             binary=pathlib.Path(tmp)/'raw_queue'
             subprocess.run(['cc','-std=c11','-O1','-Wall','-Wextra','-Werror','-Wno-unused-function','-fsanitize=address,undefined',
                 '-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(binary)],input=program,text=True,check=True)
-            for mode in ('basic','stress','protected','capacity-audit'):subprocess.run([str(binary),mode],check=True)
+            for mode in ('basic','boundary','stress','protected','capacity-audit'):subprocess.run([str(binary),mode],check=True)

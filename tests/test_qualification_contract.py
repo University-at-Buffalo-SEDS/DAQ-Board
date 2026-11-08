@@ -213,7 +213,7 @@ class QualificationContractTests(unittest.TestCase):
         self.assertIn("fx_media_open", sd)
         self.assertIn("fx_file_create", sd)
         self.assertIn("fx_file_write", sd)
-        self.assertIn("g_sd_write_buffer[4096U]", sd)
+        self.assertIn("UCHAR buffer[4096U];", sd)
         self.assertIn("last_flush", sd)
         self.assertIn('SD_PROVISION_MARKER "SEDSDAQ.ID"', sd)
         self.assertIn("sd_mount_or_provision", sd)
@@ -229,10 +229,10 @@ class QualificationContractTests(unittest.TestCase):
         self.assertIn("# calibration,kg1000_slope=", sd)
         self.assertIn("sd_calibration_snapshot", sd)
         drain = sd.index("if (pending_raw == NULL && sd_take_raw_message(&message)")
-        self.assertLess(sd.index("sd_select_calibration(&slot->calibration)", drain),
+        self.assertLess(sd.index("sd_log_for_key(slot->session, &slot->calibration,", drain),
                         sd.index("for (uint16_t i", drain))
         self.assertIn("slot->calibration = *calibration;", sd)
-        self.assertIn("sd_open_timestamped_log(calibration)", sd)
+        self.assertIn("sd_open_log(log, key, calibration)", sd)
         # Raw acquisition is continuous: an unbounded drain can prevent CSV
         # rows, flushes and calibration rotation from ever being serviced.
         self.assertNotIn("while (tx_queue_receive(&g_sd_raw_queue", sd)

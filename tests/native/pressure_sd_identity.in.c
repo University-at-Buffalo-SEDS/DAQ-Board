@@ -12,20 +12,26 @@ typedef unsigned UINT;typedef uint32_t ULONG;typedef struct{unsigned tx_queue_en
 typedef enum{SD_CARD_STATUS_OK,SD_CARD_STATUS_IO_ERROR,SD_CARD_STATUS_BUSY,SD_CARD_STATUS_BACKPRESSURE}sd_card_status_t;
 static uint32_t g_sd_pressure_records_enqueued,g_sd_pressure_records_dropped;
 static uint32_t g_pressure_sd_batches_received,g_pressure_sd_invalid_batches;
-static unsigned g_sd_services_initialized=1;static uint64_t g_sd_session=42,g_sd_close_unix_ms=1767225620000ULL;
-static uint32_t g_sd_route_epoch=3,g_sd_launch_route_epoch=4;
+static unsigned g_sd_services_initialized=1;static uint64_t g_sd_close_unix_ms=1767225620000ULL;
+static uint32_t g_sd_route_epoch=3;
+#define SD_LAUNCH_WINDOW_MS 20000U
 static unsigned irq;static uint32_t __get_PRIMASK(void){return irq;}static void __disable_irq(void){irq=1;}static void __set_PRIMASK(uint32_t n){irq=n;}
-static uint64_t sd_run_snapshot(void){assert(irq);return g_sd_session;}
+/* Inside the launch window: route key and launch key are both2. */
+static uint64_t sd_run_snapshot(void){assert(irq);return 2;}
+static uint64_t sd_launch_key_locked(void){assert(irq);return 2;}
 #define TX_SUCCESS 0U
 #define TX_NO_WAIT 0U
 typedef struct {
   pressure_sd_batch_t batch;
-  uint64_t session;
+  uint32_t launch_key, route_key;
   uint32_t route_epoch;
-  /* Low four bits route immutable capture rows into the main launch log.
+  /* With SD_PRESSURE_ROUTE_CLASSIFIED, bits0-3 mark rows captured inside the
+   * launch window and bits8-11 rows captured after it; other rows precede it.
    * Bit4 explicitly records an unknown capture clock; never synthesize UTC. */
   uint32_t capture_route;
 } sd_pressure_message_t;
+#define SD_PRESSURE_ROUTE_UNKNOWN_UTC 16U
+#define SD_PRESSURE_ROUTE_CLASSIFIED 32U
 #define SD_PRESSURE_MESSAGE_WORDS ((sizeof(sd_pressure_message_t) + sizeof(ULONG) - 1U) / sizeof(ULONG))
 _Static_assert(SD_PRESSURE_MESSAGE_WORDS <= 16U, "ThreadX pressure message bounds");
 static TX_QUEUE g_sd_pressure_queue;
@@ -77,7 +83,7 @@ int main(int argc,char**argv){
   puts("PASS SDK receipts only after atomic SD admission; wrong owner and full queue withhold ACK; exact packet retry succeeds after drain");seds_router_free(r);return 0;
  }
  /* Actual named callback positive, immutable atomic SD handoff. */
- assert(observe(&p,NULL)==SEDS_OK&&handoffs==1);sd_pressure_message_t*q=(void*)messages[0];assert(q->batch.first_sequence==42&&q->batch.uptime_ms==100&&q->batch.unix_ms==1767225600100ULL&&q->batch.raw[0]==0&&q->batch.psi[3]==2000&&q->session==42&&q->route_epoch==4&&q->capture_route==15);
+ assert(observe(&p,NULL)==SEDS_OK&&handoffs==1);sd_pressure_message_t*q=(void*)messages[0];assert(q->batch.first_sequence==42&&q->batch.uptime_ms==100&&q->batch.unix_ms==1767225600100ULL&&q->batch.raw[0]==0&&q->batch.psi[3]==2000&&q->launch_key==2&&q->route_key==2&&q->route_epoch==3&&q->capture_route==(SD_PRESSURE_ROUTE_CLASSIFIED|15U));
  uint8_t wire[512];int32_t n;
  if(!strncmp(argv[2],"produce",7)){seds_router_free(r);
  SedsLocalEndpointDesc vb_locals[]={{.endpoint=2001U,.packet_handler=side},{.endpoint=SEDS_EP_VALVE_BOARD,.packet_handler=side},{.endpoint=SEDS_EP_ABORT,.packet_handler=side},{.endpoint=SEDS_EP_FLIGHT_STATE,.packet_handler=side},{.endpoint=SEDS_EP_HEART_BEAT,.packet_handler=side}};

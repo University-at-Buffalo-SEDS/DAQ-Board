@@ -47,11 +47,11 @@ typedef enum { SD_CARD_STATUS_OK, SD_CARD_STATUS_IO_ERROR, SD_CARD_STATUS_BUSY, 
 typedef struct { uint16_t len; daq_calibration_t calibration; uint64_t session; uint32_t route_epoch; sd_capture_t capture; char line[]; } sd_line_slot_t;
 static unsigned g_sd_services_initialized=1, g_sd_launch_closed;
 static unsigned g_sd_write_error_count,g_sd_csv_rows_written_count;
-static uint64_t sd_run_snapshot(void){return g_sd_launch_closed ? 0 : 42;}
-static uint32_t g_sd_launch_route_epoch=77;
-static uint64_t g_sd_session=42,g_sd_close_unix_ms=20000;
-static uint8_t g_sd_pressure_raw_retry;
-static uint8_t sd_pressure_raw_epoch_ready(uint32_t epoch){(void)epoch;return 1;}
+/* Receive-time route keys: no launch window is known to these inputs. */
+static uint64_t sd_run_snapshot(void){return g_sd_launch_closed ? 3 : 1;}
+static uint64_t sd_launch_key_locked(void){return 0;}
+static uint64_t g_sd_close_unix_ms=20000;
+#define SD_LAUNCH_WINDOW_MS 20000U
 
 static unsigned formatting,writing,fail_write,accepted; static char written[12][384];
 static void sd_format_float(char *out,float v){++formatting;snprintf(out,24,"%.2f",(double)v);}
@@ -60,13 +60,12 @@ static int sd_format_csv_sensor_record(char *out,size_t n,uint64_t utc,uint64_t 
 }
 static unsigned sd_calibration_snapshot(daq_calibration_t *value){memset(value,0,sizeof(*value));value->kg1000_slope=7;return 1;}
 static unsigned sd_write_telemetry_row(const sd_line_slot_t *slot){
- ++writing;assert(slot->session==0U && slot->calibration.kg1000_slope==7); /* These old handoff inputs have no valid UTC mapping; routing is exercised separately. */
+ ++writing;assert(slot->session==(g_sd_launch_closed ? 3U : 1U) && slot->calibration.kg1000_slope==7); /* No window known: the receive-time key routes every row. */
  if(fail_write){fail_write=0;return 1;}
  assert(accepted<12);memcpy(written[accepted++],slot->line,slot->len+1);return 0;
 }
 '''
-        prefix += "\n" + pressure_cohort(source) + function(source,'sd_pressure_capture_route') + "\n"
-        prefix += "static unsigned sd_write_launch_pressure_row(const sd_line_slot_t *slot){return sd_write_telemetry_row(slot); }\n"
+        prefix += "\n" + pressure_cohort(source) + "\n"
         queues = r'''
 static ULONG messages[2][SD_PRESSURE_MESSAGE_WORDS];static unsigned count;
 static UINT tx_queue_send(TX_QUEUE *q,void *data,ULONG wait){assert(q==&g_sd_pressure_queue && wait==TX_NO_WAIT);if(count==2)return 1;memcpy(messages[count++],data,sizeof(messages[0]));return TX_SUCCESS;}
@@ -74,6 +73,7 @@ static UINT tx_queue_receive(TX_QUEUE *q,void *data,ULONG wait){assert(q==&g_sd_
 '''
         main = r'''
 int main(void){
+ (void)g_sd_line_pending;(void)g_sd_line_pending_key;(void)g_sd_queue; /* CSV queue is not exercised. */
  pressure_sd_batch_t batch={.uptime_ms=100,.unix_ms=1000,.first_sequence=UINT32_MAX-1,.raw={1,2,3,4},.psi={1,2,3,4}};
  assert(sd_card_log_pressure_batch(NULL)==SD_CARD_STATUS_IO_ERROR);
  g_sd_services_initialized=0;assert(sd_card_log_pressure_batch(&batch)==SD_CARD_STATUS_BUSY);g_sd_services_initialized=1;
@@ -101,7 +101,7 @@ int main(void){
  return 0;
 }
 '''
-        code=prefix+declarations+queues+function(source,'sd_telemetry_epoch_ready')+'\n'+function(source,'sd_service_pressure_rows')+'\n'+function(source,'sd_card_log_pressure_batch')+main
+        code=prefix+declarations+function(source,'sd_pressure_capture_route')+'\n'+queues+function(source,'sd_pressure_row_key')+'\n'+function(source,'sd_pressure_oldest_key')+'\n'+function(source,'sd_service_pressure_rows')+'\n'+function(source,'sd_card_log_pressure_batch')+main
         with tempfile.TemporaryDirectory() as directory:
             executable=Path(directory)/'handoff'
             subprocess.run(['cc','-std=c11','-O1','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(executable)],input=code,text=True,check=True)
@@ -124,10 +124,11 @@ static unsigned mask;
 static uint32_t __get_PRIMASK(void){return mask;}
 static void __disable_irq(void){mask=1;}
 static void __set_PRIMASK(uint32_t value){mask=value;}
-static uint64_t sd_run_snapshot(void){assert(mask);return 42;}
+static uint64_t sd_run_snapshot(void){assert(mask);return 43;}
+static uint64_t sd_launch_key_locked(void){assert(mask);return 44;}
 static unsigned g_sd_services_initialized=1,g_sd_route_epoch=77;
-static uint32_t g_sd_launch_route_epoch=77;
-static uint64_t g_sd_session=42,g_sd_close_unix_ms=1700000020000ULL;
+static uint64_t g_sd_close_unix_ms=1700000020000ULL;
+#define SD_LAUNCH_WINDOW_MS 20000U
 static unsigned g_sd_pressure_records_dropped,g_sd_pressure_records_enqueued;
 '''+declarations+r'''
 static UINT tx_queue_send(TX_QUEUE *queue,void *message,ULONG wait){
@@ -151,7 +152,9 @@ int main(void){
   sd_pressure_message_t message;
   memcpy(&message,g_sd_pressure_queue.storage+i*SD_PRESSURE_MESSAGE_WORDS,sizeof(message));
   assert(message.batch.uptime_ms==100+i*16&&message.batch.unix_ms==1700000000000ULL+i*16);
-  assert(message.session==42&&message.route_epoch==77&&message.batch.first_sequence==i*4);
+  /* 3.2 s of captures inside [T0,T+20): classified into launch key44. */
+  assert(message.launch_key==44&&message.route_key==43&&message.route_epoch==77&&message.batch.first_sequence==i*4);
+  assert(message.capture_route==(SD_PRESSURE_ROUTE_CLASSIFIED|15U));
   for(unsigned j=0;j<4;j++)assert(message.batch.raw[j]==i*4+j&&message.batch.psi[j]==(float)(i*4+j)/3);
  }
  pressure_sd_batch_t overflow={0};assert(sd_card_log_pressure_batch(&overflow)==SD_CARD_STATUS_BACKPRESSURE);

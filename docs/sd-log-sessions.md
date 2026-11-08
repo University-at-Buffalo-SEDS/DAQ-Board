@@ -4,12 +4,25 @@
 It describes the fill-system logger, not an SD card on Actuator. The wire name,
 numeric endpoint ID, and routing remain compatible with older boards.
 
-The writer opens files lazily when the first record arrives. Raw ADC records
-go to `DAQ_*.CSV`; network/report-rate values go to a separate
-`DAQ_TELEMETRY_*.CSV`. A calibration change rotates each stream when its first
-record with the new coefficients arrives. Duplicate calibration updates or
-network reconnects do not rotate files. Each file includes its regression
-coefficients. Files are not rotated just because a write buffer fills.
+The writer opens files lazily when the first record arrives. Every record
+carries a route key: odd keys name regular session files (`DAQ_*.CSV`, in
+`/NO_UTC/` or `/UTC/`), even keys name launch-window files (`DAQ_LAUNCH_*.CSV`
+in `/LAUNCH/`). Raw ADC, network/report-rate, snapshot, packet and VB pressure
+rows of one key share one file. The key advances when a launch window opens at
+T0 and again when it ends at T+20 s (or is reset), so a session's rows never
+alternate between files. A calibration change writes an in-stream
+`# calibration,...` line; duplicate calibration updates or network reconnects
+write nothing. Each file header includes its regression coefficients. Files
+are split only before 3 GiB, never because a write buffer fills.
+
+Before this design, raw and telemetry rows had separate handles and the
+telemetry handle was keyed on the row's launch session. Pre-T0 VB pressure
+rows of an active launch session were routed as ordinary (session 0) while
+other telemetry carried the session, so every 4-sample pressure batch closed
+and reopened the telemetry file. Each switch added a flush, truncate/close,
+directory scan, create, 2 MiB preallocation and header flush to the single
+writer; the raw queue overflowed and a simulated test fire kept 5-10 % of raw
+rows with 395 tiny files in each of `/LAUNCH/` and `/UTC/`.
 
 First-use provisioning can delay recording substantially on large cards. The
 64 GB bench card required roughly 30,000 FAT-sector writes, and the original
@@ -65,13 +78,12 @@ the fetched FileX mirroring routine, including boundary sectors and failed-write
 retry. Map precision alone did not eliminate drops on the physical card; compact
 queues are also needed to absorb the remaining stalls.
 
-Raw and telemetry streams each have a separate 4 KiB write buffer. Previously,
+The regular and launch files each have a 4 KiB write buffer. Previously,
 telemetry rows reached FileX individually, generating many partial-sector
-updates even though raw writes were batched. Both buffers now flush before the
-regular media flush; telemetry also flushes before calibration/session rotation
-and final closure. A failed pending-buffer write prevents closure/rotation and
-retains the pending bytes. CSV columns, maximum row length, stream separation,
-and acquisition-time metadata are unchanged.
+updates even though raw writes were batched. Both buffers flush before the
+regular media flush and before closure. A failed pending-buffer write prevents
+closure and retains the pending bytes at the same file offset. CSV columns,
+maximum row length and acquisition-time metadata are unchanged.
 
 **Earlier physical-board failure (2026-09-22), before compact pools:** simply
 expanding the fixed-size queues still lost data.
@@ -137,18 +149,21 @@ authoritative Pilot-open T0 revision can correct the same session in either
 direction before closure. Retained replays and UTC changes alone cannot restart
 the interval or reopen a completed session.
 
-At the deadline newly admitted raw, CSV and pressure records route to ordinary
-`DAQ_*.CSV` and `DAQ_TELEMETRY_*.CSV` files. Acquisition, ordinary SD recording
-and network telemetry continue at their configured rates. Already admitted
-launch records drain to `DAQ_LAUNCH_*.CSV`/`DAQ_LAUNCH_TELEMETRY_*.CSV` before those
-handles close. A batch is routed atomically when admitted; a batch spanning the
-boundary is kept intact in one file, and no cutoff record is discarded. CSV and
-pressure queues share generation ordering so a delayed launch batch cannot
-reopen a completed launch file after an ordinary row. Write, close and final
-media-flush failures retain their retry paths; normal files are not closed on
-every idle turn. A new launch requires a strictly newer session ID. Clock reset
-returns routing to ordinary logging and does not allow old retained sessions
-to revive. Calibration changes keep their existing file-rotation behavior.
+The countdown before T0 stays in the current regular session file. At T0
+(deadline minus 20 s) rows go to one new `DAQ_LAUNCH_*.CSV`; at the deadline
+they go to one new regular session file. When both clocks are known every row
+(raw sample, report row, snapshot, VB pressure sample) is classified by its
+capture UTC against [T0, T+20 s), and a raw batch straddling a boundary is
+split; rows with unknown UTC follow the receive-time route. Acquisition, SD
+recording and network telemetry continue at their configured rates throughout.
+The superseded file stays open for one second after each transition and until
+no queued row still carries its key, then closes once; rows queue in RAM
+meanwhile and are written in order. A row whose launch file was already
+finished goes into the current regular file; a finished launch file is never
+reopened and no session gets a second launch file. Write, close and final
+media-flush failures retain their retry paths. A new launch requires a strictly
+newer session ID. A reset during a window ends it (new regular file); a reset
+before T0 or after T+20 s changes no file. Old retained sessions cannot revive.
 
 GroundStation retains the session and absolute deadline on disk. Reconnecting
 or restarting must not restart the20-second post-T0 interval. Once DAQ obtains

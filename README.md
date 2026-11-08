@@ -41,12 +41,18 @@ is created. Later reboots see the marker and **do not reformat the card**. Do no
 insert a card containing data you want to retain unless it was already prepared
 by this firmware and contains that marker.
 
-Firmware creates a new `DAQ_<network-time>_<sequence>.CSV` raw ADC file on every boot.
-Raw ADC channels go into this file. Filtered network rows, other telemetry
-snapshots and packet diagnostics go into separate
-`DAQ_TELEMETRY_<network-time>_<sequence>.CSV` files. Each stream rotates
-independently when calibration changes or before a file reaches 3 GiB.
-Delayed telemetry cannot mix into or rotate the raw ADC log.
+Firmware writes one regular session file, `DAQ_<network-time>_<sequence>.CSV`,
+per session. A session runs from boot, or from the end of a launch window, until
+the next launch window or power-off, and its file receives every row: raw ADC
+channels, filtered network rows, telemetry snapshots, packet diagnostics and VB
+OX-tank pressure. Each launch window, T0 through T+20 s (T0 = the Ground Station
+deadline minus 20 s), goes to exactly one `DAQ_LAUNCH_<network-time>_<sequence>.CSV`
+file with all channels; when the window ends a new regular session file opens.
+Rows are assigned by capture time when UTC is known, so neither transition loses
+or duplicates a row. A calibration change writes an in-stream
+`# calibration,...` line instead of starting a file. A file is split only before
+it reaches 3 GiB (headroom below FAT32's 4 GiB file limit); the session
+continues in the next part with uptime and sequences unbroken.
 
 DAQ and FC share the [SD CSV format](docs/sd-record-format.md). Records include
 network/local time, independent 64-bit boot uptime ticks, the nominal clock
@@ -426,12 +432,13 @@ at **file creation**. Captured row timestamps, source clocks, sequences, calibra
 raw ADC samples and remote valve pressure are retained unchanged. Valid zeros are
 retained. No historical files are moved or removed.
 
-An open file keeps its creation category through clock corrections; existing
-calibration/session/size rotations create the next file in the current category.
-This avoids relabelling queued old samples as UTC or adding clock-triggered
-filesystem work to an acquisition turn. The existing launch-stop policy remains
-20 seconds after T0. Both raw and telemetry logs keep their original basenames and
-CSV schema. Directory, collision and media errors retain the existing owner/retry
+A regular session file goes to `/UTC/` when UTC is known as it is created, or
+`/NO_UTC/` otherwise, and stays there for its whole session even after network
+time arrives (a boot session therefore usually lives in `/NO_UTC/`; the session
+after a launch is in `/UTC/`). Launch-window files always go to `/LAUNCH/`. This
+avoids relabelling queued old samples as UTC or adding clock-triggered
+filesystem work to an acquisition turn. The launch file stops 20 seconds after
+T0. Files keep the existing basenames and 13-column CSV schema. Directory, collision and media errors retain the existing owner/retry
 behavior rather than discarding samples. FileX operations remain writer-thread only.
 
 `FirmwareSimulator/scripts/inspect-sd-records.py` reads legacy root CSV files and
@@ -448,19 +455,20 @@ units, capture period and source-sequence domain. This is not DAQ chamber PT
 and does not use Ground Station pressure recalibration.
 
 When the VB capture UTC is known, each of the four 4ms samples is routed by
-its capture time: T0 inclusive through T+20s exclusive goes into the main
-`DAQ_LAUNCH` raw file; other samples go into ordinary telemetry. A crossing
-batch is split without duplicating rows. Missing UTC remains explicitly local
-in the existing `time_source` column and ordinary telemetry; no receipt-time UTC
-is substituted for a remote capture. Raw, psi, both source clocks and sequence
+its capture time: T0 inclusive through T+20s exclusive goes into the
+`DAQ_LAUNCH` file; earlier samples go into the regular session file before the
+launch and later ones into the new session file after it. A crossing batch is
+split without duplicating rows. Missing UTC remains explicitly local in the
+existing `time_source` column and follows the receive-time route; no
+receipt-time UTC is substituted for a remote capture. Raw, psi, both source clocks and sequence
 remain available in the same 13-column format. The mask is frozen at atomic
 queue admission in existing message padding; pressure queue storage stays64B
 per batch and its existing200-batch capacity.
 
-Raw and pressure owners serialize their shared main-file generation and failed
-write cursor. Queued pre-cutoff pressure delays launch close until drained.
-A genuinely late packet received after an already committed close creates a
-launch continuation part, rather than reopening/overwriting the closed file
-or pretending its capture was ordinary. Clock corrections do not restamp queued
-rows. Existing part/calibration rotations still apply, so consumers should read
-all matching parts recursively instead of assuming one file per session.
+The superseded file at each transition stays open for one second plus until no
+queued row still belongs to it, so late VB batches and queued rows reach it; the
+writer buffers through every close/open. A packet that arrives after the launch
+file was finished is kept in the following regular session file rather than
+reopening the launch file or creating a second one. Clock corrections do not
+restamp queued rows. Consumers should still read all parts recursively in case
+a session reached the 3 GiB split.

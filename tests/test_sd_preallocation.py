@@ -9,6 +9,7 @@ class SdPreallocationTests(unittest.TestCase):
     def test_reserve_preserves_logical_csv_size_and_fragmented_media_fallback(self):
         source=(ROOT/'Core/Src/sd_card.c').read_text()
         helpers=source[source.index('#define SD_FILE_RESERVE_BYTES'):source.index('static UINT sd_media_flush')]
+        log_type=source[source.index('typedef struct {\n  FX_FILE file;'):source.index('} sd_log_t;')+len('} sd_log_t;')]
         code=r'''
 #include <stdint.h>
 #include <stddef.h>
@@ -19,9 +20,16 @@ typedef unsigned UINT;typedef uint32_t ULONG;
 #define FX_SUCCESS 0U
 #define FX_NO_MORE_SPACE 1U
 #define FX_IO_ERROR 2U
+#include "daq_calibration.h"
+typedef unsigned char UCHAR;
 typedef struct {uint64_t fx_file_current_available_size,fx_file_current_file_offset,fx_file_current_file_size;} FX_FILE;
-static FX_FILE g_sd_file,g_sd_telemetry_file;
-static uint8_t g_sd_raw_reserve_disabled,g_sd_telemetry_reserve_disabled;
+'''+log_type+r'''
+/* The regular session log and the launch-window log reserve independently. */
+static sd_log_t g_reg={.open=1},g_launch={.open=1};
+#define g_sd_file g_reg.file
+#define g_sd_telemetry_file g_launch.file
+#define g_sd_raw_reserve_disabled g_reg.reserve_disabled
+#define g_sd_telemetry_reserve_disabled g_launch.reserve_disabled
 static unsigned g_sd_preallocation_attempts,g_sd_preallocation_fallbacks,g_sd_preallocation_errors,g_sd_max_preallocate_ms;
 static unsigned g_sd_raw_records_enqueued_count,g_sd_raw_records_written_count,g_sd_raw_records_io_lost_count;
 static unsigned tick,allocation_status,release_status,allocate_calls,release_calls;static ULONG allocation_request;
@@ -39,29 +47,29 @@ static UINT fx_file_truncate_release(FX_FILE *file,ULONG bytes){
 }
 '''+helpers+r'''
 int main(void){
- assert(sd_prepare_file_space(&g_sd_file,160)==FX_SUCCESS);
+ assert(sd_prepare_file_space(&g_reg,160)==FX_SUCCESS);
  assert(allocate_calls==1&&allocation_request==2U*1024*1024);
  assert(!g_sd_file.fx_file_current_file_size&&!g_sd_file.fx_file_current_file_offset);
  assert(g_sd_max_preallocate_ms==11&&g_sd_preallocation_attempts==1);
  g_sd_file.fx_file_current_file_offset=1000;g_sd_file.fx_file_current_file_size=1000;
- assert(sd_prepare_file_space(&g_sd_file,4000)==FX_SUCCESS&&allocate_calls==1);
+ assert(sd_prepare_file_space(&g_reg,4000)==FX_SUCCESS&&allocate_calls==1);
  g_sd_file.fx_file_current_file_offset=2U*1024*1024-128U*1024;g_sd_file.fx_file_current_file_size=g_sd_file.fx_file_current_file_offset;
  g_sd_raw_records_enqueued_count=300; /* Do not add FAT writes while raw backlog is pressured. */
- assert(sd_prepare_file_space(&g_sd_file,4000)==FX_SUCCESS&&allocate_calls==1);
+ assert(sd_prepare_file_space(&g_reg,4000)==FX_SUCCESS&&allocate_calls==1);
  g_sd_raw_records_written_count=100;
  uint64_t before=g_sd_file.fx_file_current_file_size,offset=g_sd_file.fx_file_current_file_offset;
- assert(sd_prepare_file_space(&g_sd_file,4000)==FX_SUCCESS&&allocate_calls==2);
+ assert(sd_prepare_file_space(&g_reg,4000)==FX_SUCCESS&&allocate_calls==2);
  assert(g_sd_file.fx_file_current_file_size==before&&g_sd_file.fx_file_current_file_offset==offset);
  allocation_status=FX_NO_MORE_SPACE;
- assert(sd_prepare_file_space(&g_sd_telemetry_file,4000)==FX_SUCCESS);
+ assert(sd_prepare_file_space(&g_launch,4000)==FX_SUCCESS);
  assert(g_sd_telemetry_reserve_disabled&&!g_sd_raw_reserve_disabled&&g_sd_preallocation_fallbacks==1);
  unsigned calls=allocate_calls;
- for(unsigned i=0;i<1000;i++)assert(sd_prepare_file_space(&g_sd_telemetry_file,4000)==FX_SUCCESS);
+ for(unsigned i=0;i<1000;i++)assert(sd_prepare_file_space(&g_launch,4000)==FX_SUCCESS);
  assert(allocate_calls==calls); /* Fragmentation fallback is once/file, never once/row. */
  g_sd_telemetry_reserve_disabled=0;allocation_status=FX_IO_ERROR;
- assert(sd_prepare_file_space(&g_sd_telemetry_file,4000)==FX_IO_ERROR&&g_sd_preallocation_errors==1);
+ assert(sd_prepare_file_space(&g_launch,4000)==FX_IO_ERROR&&g_sd_preallocation_errors==1);
  assert(!g_sd_telemetry_reserve_disabled&&!g_sd_telemetry_file.fx_file_current_available_size);
- allocation_status=0;assert(sd_prepare_file_space(&g_sd_telemetry_file,4000)==FX_SUCCESS);
+ allocation_status=0;assert(sd_prepare_file_space(&g_launch,4000)==FX_SUCCESS);
  g_sd_telemetry_file.fx_file_current_file_size=1000;g_sd_telemetry_file.fx_file_current_file_offset=1000;
  release_status=FX_IO_ERROR;assert(sd_release_file_space(&g_sd_telemetry_file)==FX_IO_ERROR);
  assert(g_sd_telemetry_file.fx_file_current_available_size==2U*1024*1024);
@@ -71,8 +79,8 @@ int main(void){
  g_sd_file.fx_file_current_available_size=SD_LOG_PART_LIMIT_BYTES-65536;
  g_sd_file.fx_file_current_file_offset=SD_LOG_PART_LIMIT_BYTES-1024;
  g_sd_file.fx_file_current_file_size=g_sd_file.fx_file_current_file_offset;
- assert(sd_prepare_file_space(&g_sd_file,512)==FX_SUCCESS&&allocation_request==65536);
- calls=allocate_calls;assert(sd_prepare_file_space(&g_sd_file,512)==FX_SUCCESS&&allocate_calls==calls);
+ assert(sd_prepare_file_space(&g_reg,512)==FX_SUCCESS&&allocation_request==65536);
+ calls=allocate_calls;assert(sd_prepare_file_space(&g_reg,512)==FX_SUCCESS&&allocate_calls==calls);
 }
 '''
         with tempfile.TemporaryDirectory() as tmp:
@@ -84,20 +92,19 @@ int main(void){
 #include <string.h>
 typedef void VOID;
 static unsigned g_sd_write_error_count;
-static unsigned char g_sd_write_buffer[4096],saved[32];
-static size_t g_sd_write_buffer_len;
+static unsigned char saved[32];
 static UINT fx_file_write(FX_FILE *file,VOID *bytes,ULONG length){
  assert(length<=sizeof(saved));memcpy(saved,bytes,length);
  file->fx_file_current_file_offset+=length;file->fx_file_current_file_size=file->fx_file_current_file_offset;return FX_SUCCESS;
 }
-""" + function(source, 'sd_flush_pending') + r"""
+""" + function(source, 'sd_log_flush') + r"""
 int main(void){
  assert(DAQ_SD_PREALLOCATE_ENABLE==0);
- assert(sd_prepare_file_space(&g_sd_telemetry_file,123)==FX_SUCCESS);
- memcpy(g_sd_write_buffer,"ordinary CSV\r\n",14);g_sd_write_buffer_len=14;
- assert(sd_flush_pending()==FX_SUCCESS);
+ assert(sd_prepare_file_space(&g_launch,123)==FX_SUCCESS);
+ memcpy(g_reg.buffer,"ordinary CSV\r\n",14);g_reg.len=14;
+ assert(sd_log_flush(&g_reg)==FX_SUCCESS);
  assert(!memcmp(saved,"ordinary CSV\r\n",14)&&g_sd_file.fx_file_current_file_size==14);
- assert(!g_sd_write_buffer_len&&!allocate_calls&&!g_sd_preallocation_attempts&&!g_sd_write_error_count);
+ assert(!g_reg.len&&!allocate_calls&&!g_sd_preallocation_attempts&&!g_sd_write_error_count);
  assert(sd_release_file_space(&g_sd_file)==FX_SUCCESS&&!release_calls);
 }
 """

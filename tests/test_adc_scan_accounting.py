@@ -50,6 +50,7 @@ static void sd_raw_count_dropped(const sd_raw_adc_record_t *s,unsigned n,unsigne
 
 static uint64_t board_uptime_ticks(void) {return tick;}
 static uint64_t sd_run_snapshot(void) {return 123;}
+static uint64_t sd_capture_key_locked(uint64_t route,uint64_t capture){(void)capture;return route;} /* capture-time routing: test_pressure_launch/test_sd_launch_cutoff */
 static sd_raw_slot_t *sd_alloc_raw_slot(uint16_t n) {
  assert(n<=SD_RAW_SLOT_CAPACITY); if(queued==RAW_POOL_BLOCKS)return NULL;
  assert(!slot_taken);slot_taken=1;slots[head].capacity=n;return &slots[head];

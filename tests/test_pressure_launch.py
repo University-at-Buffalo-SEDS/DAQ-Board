@@ -1,31 +1,204 @@
-"""Production ingress/writer launch PT regression with inert FileX/RTOS boundaries."""
+"""Production VB pressure ingress -> route classification -> file selection.
+
+The real receive callback, enqueue, launch routing state, pressure writer and
+route-key file selector run against inert FileX/RTOS boundaries. OX tank PT
+rows captured in [T0, T+20 s) land in the single launch file; rows before and
+after land in the regular session files, each exactly once.
+"""
 from pathlib import Path
 import csv, io, subprocess, tempfile, unittest
 from test_pressure_sd_handoff import function
-from sd_cohort_fixture import pressure_cohort
+from sd_cohort_fixture import pressure_cohort, route_epoch_support
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = '\n#include "pressure_sd_wire.h"\n#include "daq_calibration.h"\n#include <assert.h>\n/* Named-only SDK boundary stub; actual compact/assigned discovery and\n * collision behavior is exercised by test_pressure_sd_identity with real SDK. */\nstatic struct { void *r; } g_router = {(void *)1};\nstatic int seds_router_sender_matches_hostname(void *router,const char *sender,size_t n,\n                                               const char *expected,size_t expected_n)\n{\n assert(router == g_router.r);\n return router != NULL && sender != NULL && n == expected_n && memcmp(sender,expected,n)==0;\n}\n#include <stdio.h>\n#include <stdlib.h>\n#include <stddef.h>\n#include <string.h>\ntypedef uint32_t ULONG; typedef unsigned UINT; typedef unsigned char UCHAR;\ntypedef struct { unsigned tx_queue_enqueued; ULONG *tx_queue_read; } TX_QUEUE;\nstatic TX_QUEUE g_sd_queue;\nstatic uint32_t g_sd_route_epoch,g_sd_launch_route_epoch;\nstatic uint32_t __get_PRIMASK(void){return 0;}\nstatic void __disable_irq(void){}\nstatic void __set_PRIMASK(uint32_t value){(void)value;}\n#define TX_SUCCESS 0U\n#define TX_NO_WAIT 0U\n#define FX_SUCCESS 0U\n#define SD_LINE_MAX 384U\ntypedef enum { SD_CARD_STATUS_OK, SD_CARD_STATUS_IO_ERROR, SD_CARD_STATUS_BUSY, SD_CARD_STATUS_BACKPRESSURE } sd_card_status_t;\ntypedef struct { uint16_t len; daq_calibration_t calibration; uint64_t session; uint32_t route_epoch; sd_capture_t capture; char line[]; } sd_line_slot_t;\nstatic unsigned g_sd_services_initialized=1, g_sd_launch_closed;\nstatic unsigned g_sd_write_error_count,g_sd_csv_rows_written_count;\nstatic uint64_t sd_run_snapshot(void){return g_sd_launch_closed ? 0 : 42;}\nstatic unsigned accepted; static char written[64][384];\nstatic unsigned sd_calibration_snapshot(daq_calibration_t *value){memset(value,0,sizeof(*value));value->kg1000_slope=7;return 1;}\n\n#include "sd_file_limit.h"\n#include "sd_record_format.h"\ntypedef void VOID;\ntypedef struct {unsigned id;uint64_t fx_file_current_file_size;} FX_FILE;\n#define FX_IO_ERROR 99U\nstatic FX_FILE g_sd_telemetry_file={2,0};\nstatic unsigned g_telemetry_file_open,g_sd_telemetry_write_buffer_len;\nstatic uint64_t g_sd_telemetry_session;\nstatic daq_calibration_t g_sd_telemetry_calibration;\nstatic char g_sd_telemetry_filename[64],opened_prefix[64];\nstatic unsigned raw_writes,telemetry_writes;\nstatic UINT sd_flush_telemetry_pending(void){return 0;}\nstatic UINT sd_media_flush(void){return 0;}\nstatic unsigned fail_close,fail_flush;static UINT sd_close_log(FX_FILE*f,char*n){(void)f;(void)n;return fail_close ? --fail_close+1 : 0;}\nstatic UINT sd_open_log(FX_FILE*f,char*n,size_t z,const char*prefix,const daq_calibration_t*cal){(void)f;(void)cal;snprintf(n,z,"%s.CSV",prefix);strcpy(opened_prefix,prefix);return 0;}\nstatic UINT sd_write_telemetry_bytes(const void*data,size_t len){\n assert(g_sd_telemetry_file.id==2);telemetry_writes++;assert(accepted<64);memcpy(written[accepted],data,len);written[accepted++][len]=0;return 0;\n}\n@sd_write_telemetry_row@\n\n#include "sd_calendar.h"\nstatic uint64_t g_sd_session=42,g_sd_close_unix_ms=1767225620000ULL;\nstatic uint32_t g_sd_raw_pending_epoch;\nstatic uint8_t g_sd_raw_pending,g_sd_raw_retry,g_sd_pressure_raw_retry;\ntypedef struct {uint32_t route_epoch;} sd_raw_slot_t;\nstatic TX_QUEUE g_sd_raw_queue;\nstatic FX_FILE g_sd_file={1,0};\nstatic unsigned g_file_open,fail_raw;\nstatic uint64_t g_sd_raw_session;\nstatic char g_sd_filename[64];\nstatic UINT sd_flush_pending(void){if(fail_flush){--fail_flush;return FX_IO_ERROR;}return 0;}\nstatic UINT sd_select_calibration(const daq_calibration_t *cal){assert(cal->kg1000_slope==7);if(!g_file_open){sd_open_log(&g_sd_file,g_sd_filename,sizeof g_sd_filename,g_sd_raw_session?"DAQ_LAUNCH":"DAQ",cal);g_file_open=1;}return 0;}\nstatic UINT sd_write_bytes(const void*data,size_t len){\n if(fail_raw){--fail_raw;return FX_IO_ERROR;}raw_writes++;\n assert(accepted<64);memcpy(written[accepted],data,len);written[accepted++][len]=0;return 0;\n}\n@declarations@\nstatic ULONG messages[4][SD_PRESSURE_MESSAGE_WORDS];static unsigned count;\nstatic UINT tx_queue_send(TX_QUEUE*q,void*data,ULONG wait){assert(q==&g_sd_pressure_queue&&wait==0);if(count==4)return 1;memcpy(messages[count++],data,sizeof messages[0]);q->tx_queue_enqueued=count;q->tx_queue_read=messages[0];return 0;}\nstatic UINT tx_queue_receive(TX_QUEUE*q,void*data,ULONG wait){assert(q==&g_sd_pressure_queue&&wait==0);if(!count)return 1;memcpy(data,messages[0],sizeof messages[0]);memmove(messages[0],messages[1],(--count)*sizeof messages[0]);q->tx_queue_enqueued=count;return 0;}\n@sd_pressure_capture_route@\n@sd_telemetry_epoch_ready@\n@sd_raw_epoch_ready@\n@sd_pressure_raw_epoch_ready@\n@sd_write_launch_pressure_row@\n@sd_service_pressure_rows@\n@sd_card_log_pressure_batch@\n\ntypedef int SedsResult;\n#define SEDS_OK 0\n#define SEDS_IO -14\n#define SEDS_HANDLER_ERROR -7\n#define SEDS_DT_VALVE_PRESSURE_SD_V1 157797238U\nstatic unsigned g_pressure_sd_batches_received,g_pressure_sd_invalid_batches;\ntypedef struct {uint32_t ty;const uint8_t*payload;size_t payload_len;const char*sender;size_t sender_len;}SedsPacketView;\n@pressure_sd_receive@\nstatic void receive(pressure_sd_batch_t *batch){\n uint8_t wire[44];assert(pressure_sd_encode(wire,sizeof wire,batch)==44);\n SedsPacketView p={SEDS_DT_VALVE_PRESSURE_SD_V1,wire,sizeof wire,"VB",2};\n assert(pressure_sd_receive(&p,0)==SEDS_OK);memset(wire,0xa5,sizeof wire);\n}\nint main(void){\n _Static_assert(sizeof(sd_pressure_message_t)==64,"ARM-sized message cannot grow");\n pressure_sd_batch_t b={.uptime_ms=100,.unix_ms=1767225600100ULL,.first_sequence=42,.raw={0,1000,2000,3103},.psi={0,644.5,1289,2000}};\n receive(&b);assert(sd_service_pressure_rows());assert(raw_writes==4&&telemetry_writes==0);\n assert(!strcmp(opened_prefix,"DAQ_LAUNCH"));assert(strstr(written[0],"valve_pressure_psi,\\"0\\",\\"0\\",\\"0\\",\\"0\\",network"));\n // Crossing T+20: route each immutable capture exactly once, not by receipt.\n b.unix_ms=g_sd_close_unix_ms-4;b.first_sequence=46;receive(&b);g_sd_launch_closed=1;\n assert(sd_service_pressure_rows());assert(raw_writes==5&&telemetry_writes==3&&accepted==8);\n // A received-after-cutoff but captured-before-cutoff batch remains launch.\n b.unix_ms=g_sd_close_unix_ms-16;b.first_sequence=50;receive(&b);\n fail_raw=1;assert(sd_service_pressure_rows());assert(g_sd_pressure_raw_retry&&accepted==8);\n assert(!sd_raw_epoch_ready(g_sd_route_epoch));\n // Another raw owner cannot consume/rotate the retained failed pressure cursor.\n assert(sd_service_pressure_rows());assert(!g_sd_pressure_raw_retry&&raw_writes==9&&accepted==12);\n // A pre-T0 sample is regular, and never substitutes chamber pressure.\n b.unix_ms=g_sd_close_unix_ms-20004;b.first_sequence=54;receive(&b);assert(sd_service_pressure_rows());\n assert(raw_writes==12&&telemetry_writes==4&&accepted==16);\n // Unknown UTC remains explicit local time, ordinary; never fabricated UTC.\n b.unix_ms=0;b.first_sequence=58;receive(&b);assert(messages[0][0]||count);assert(sd_service_pressure_rows());\n assert(raw_writes==12&&telemetry_writes==8&&strstr(written[16],",local,"));\n // Older raw queue epoch drains before pressure can rotate its file.\n b.unix_ms=g_sd_close_unix_ms-16;b.first_sequence=62;g_sd_route_epoch=3;g_sd_launch_route_epoch=3;receive(&b);\n g_sd_raw_pending=1;g_sd_raw_pending_epoch=2;\n assert(!sd_service_pressure_rows()&&accepted==20);g_sd_raw_pending=0;\n g_sd_raw_retry=1;assert(!sd_service_pressure_rows());assert(sd_raw_epoch_ready(99));g_sd_raw_retry=0;\n assert(sd_service_pressure_rows()&&accepted==24);\n // New raw epoch waits for an old pressure owner, including before dequeue.\n g_sd_route_epoch=4;g_sd_launch_route_epoch=4;b.first_sequence=66;receive(&b);assert(!sd_raw_epoch_ready(5));assert(sd_raw_epoch_ready(4));\n assert(sd_service_pressure_rows()&&accepted==28);assert(sd_raw_epoch_ready(5));\n // Closed handle -> a late launch continuation, never ordinary mislabelling.\n g_sd_raw_session=0;g_file_open=1;g_sd_route_epoch=5;g_sd_launch_route_epoch=5;b.first_sequence=70;receive(&b);fail_close=1;\n assert(sd_service_pressure_rows()&&accepted==28&&g_sd_pressure_raw_retry);\n assert(sd_service_pressure_rows()&&accepted==32&&g_sd_raw_session==42);\n // Foreign sender is rejected before handoff; zeros remain valid VB data.\n uint8_t wire[44];pressure_sd_encode(wire,sizeof wire,&b);\n SedsPacketView p={SEDS_DT_VALVE_PRESSURE_SD_V1,wire,sizeof wire,"DAQ",3};\n assert(pressure_sd_receive(&p,0)==SEDS_HANDLER_ERROR&&!count);\n assert(g_sd_pressure_records_enqueued==32&&g_sd_pressure_records_written==32);\n for(unsigned i=0;i<accepted;i++)printf("%s",written[i]);\n fprintf(stderr,"PASS actual ingress/main launch route: 32 rows, immutable clocks/sequence, crossing/late/unknown, failed cursor/epochs, no duplicates\\n");\n}\n'
+
+FIXTURE = r'''
+#include "pressure_sd_wire.h"
+#include "daq_calibration.h"
+#include "sd_file_limit.h"
+#include "sd_calendar.h"
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stddef.h>
+#include <string.h>
+/* Named-only SDK boundary stub; actual compact/assigned discovery and
+ * collision behavior is exercised by test_pressure_sd_identity with real SDK. */
+static struct { void *r; } g_router = {(void *)1};
+static int seds_router_sender_matches_hostname(void *router,const char *sender,size_t n,
+                                               const char *expected,size_t expected_n)
+{
+ assert(router == g_router.r);
+ return router != NULL && sender != NULL && n == expected_n && memcmp(sender,expected,n)==0;
+}
+typedef uint32_t ULONG; typedef unsigned UINT; typedef unsigned char UCHAR; typedef void VOID;
+typedef struct { unsigned tx_queue_enqueued; ULONG *tx_queue_read; } TX_QUEUE;
+static uint32_t mask;
+static uint32_t __get_PRIMASK(void){return mask;}
+static void __disable_irq(void){mask=1;}
+static void __set_PRIMASK(uint32_t value){mask=value;}
+#define TX_SUCCESS 0U
+#define TX_NO_WAIT 0U
+#define FX_SUCCESS 0U
+#define FX_IO_ERROR 99U
+#define FX_PTR_ERROR 98U
+#define SD_LINE_MAX 384U
+typedef enum { SD_CARD_STATUS_OK, SD_CARD_STATUS_IO_ERROR, SD_CARD_STATUS_BUSY, SD_CARD_STATUS_BACKPRESSURE } sd_card_status_t;
+typedef struct { uint16_t len; daq_calibration_t calibration; uint64_t session; uint32_t route_epoch; sd_capture_t capture; char line[]; } sd_line_slot_t;
+static unsigned g_sd_services_initialized=1;
+static unsigned g_sd_write_error_count,g_sd_csv_rows_written_count;
+static uint64_t utc=1767225600000ULL, local=100000;
+static uint64_t daq_log_unix_ms(void){assert(!mask);return utc;}
+static uint64_t daq_log_monotonic_ms(void){return local;}
+static unsigned sd_calibration_snapshot(daq_calibration_t *value){memset(value,0,sizeof(*value));value->kg1000_slope=7;return 1;}
+#include "sd_record_format.h"
+@routing@
+typedef struct { uint64_t fx_file_current_file_size, fx_file_current_file_offset; } FX_FILE;
+@log_type@
+static sd_log_t g_sd_regular_log, g_sd_launch_log;
+static uint64_t g_sd_regular_closed_key, g_sd_launch_done_key;
+static unsigned regular_opens, launch_opens, fail_write;
+static char files[8][65536]; static unsigned file_of[2], next_file;
+static UINT sd_media_flush(void){return 0;}
+static UINT sd_prepare_file_space(sd_log_t *log,size_t n){(void)log;(void)n;return 0;}
+static UINT fx_file_seek(FX_FILE *f,ULONG o){f->fx_file_current_file_offset=o;return 0;}
+static UINT fx_file_write(FX_FILE *f,VOID *data,ULONG len){
+ if(fail_write){--fail_write;return FX_IO_ERROR;}
+ char *file=files[file_of[f==&g_sd_launch_log.file]];
+ assert(strlen(file)+len<sizeof files[0]);strncat(file,data,len);
+ f->fx_file_current_file_offset+=len;f->fx_file_current_file_size=f->fx_file_current_file_offset;return 0;
+}
+static UINT sd_close_file(sd_log_t *log){log->open=0;return 0;}
+static int sd_format_calibration_line(char *line,size_t size,const daq_calibration_t *c){return snprintf(line,size,"# calibration,%g\r\n",(double)c->kg1000_slope);}
+static UINT sd_open_log(sd_log_t *log,uint64_t key,const daq_calibration_t *calibration){
+ const int launch=log==&g_sd_launch_log;
+ if(launch)++launch_opens;else ++regular_opens;
+ assert(next_file<8);file_of[launch]=next_file++;
+ log->open=1;log->key=key;log->calibration=*calibration;log->len=0;return 0;
+}
+@writer@
+@declarations@
+static ULONG messages[8][SD_PRESSURE_MESSAGE_WORDS];static unsigned count;
+static UINT tx_queue_send(TX_QUEUE*q,void*data,ULONG wait){assert(q==&g_sd_pressure_queue&&wait==0&&mask);if(count==8)return 1;memcpy(messages[count++],data,sizeof messages[0]);q->tx_queue_enqueued=count;q->tx_queue_read=messages[0];return 0;}
+static UINT tx_queue_receive(TX_QUEUE*q,void*data,ULONG wait){assert(q==&g_sd_pressure_queue&&wait==0);if(!count)return 1;memcpy(data,messages[0],sizeof messages[0]);memmove(messages[0],messages[1],(--count)*sizeof messages[0]);q->tx_queue_enqueued=count;return 0;}
+@sd_pressure_capture_route@
+@sd_pressure_row_key@
+@sd_pressure_oldest_key@
+@sd_service_pressure_rows@
+@sd_card_log_pressure_batch@
+typedef int SedsResult;
+#define SEDS_OK 0
+#define SEDS_IO -14
+#define SEDS_HANDLER_ERROR -7
+#define SEDS_DT_VALVE_PRESSURE_SD_V1 157797238U
+static unsigned g_pressure_sd_batches_received,g_pressure_sd_invalid_batches;
+typedef struct {uint32_t ty;const uint8_t*payload;size_t payload_len;const char*sender;size_t sender_len;}SedsPacketView;
+@pressure_sd_receive@
+static uint32_t sequence=1000;
+static void receive_at(uint64_t captured_utc){
+ pressure_sd_batch_t b={.uptime_ms=captured_utc?captured_utc-1767225500000ULL:5,.unix_ms=captured_utc,.first_sequence=sequence,.raw={1,2,3,4},.psi={10,20,30,40}};
+ sequence+=4;uint8_t wire[44];assert(pressure_sd_encode(wire,sizeof wire,&b)==44);
+ SedsPacketView p={SEDS_DT_VALVE_PRESSURE_SD_V1,wire,sizeof wire,"VB",2};
+ assert(pressure_sd_receive(&p,0)==SEDS_OK);memset(wire,0xa5,sizeof wire);
+}
+static void drain(void){while(sd_service_pressure_rows());assert(!count&&!g_sd_pressure_pending);}
+static void advance(uint64_t ms){utc+=ms;local+=ms;}
+int main(void){
+ _Static_assert(sizeof(sd_pressure_message_t)==64,"ARM-sized message cannot grow");
+ const uint64_t T0=1767225700000ULL;
+ /* Boot session: regular file (key1). */
+ receive_at(utc-40);drain();assert(regular_opens==1&&!launch_opens);
+ /* Launch command at T-10 s with the deadline T0+20 s: the countdown stays
+  * in the same regular file; nothing opens or rotates. */
+ utc=T0-10000;local=200000;sd_card_set_launch_clock(42,T0+20000);
+ receive_at(T0-9000);advance(1000);receive_at(T0-8000);drain();
+ assert(regular_opens==1&&!launch_opens&&sd_run_snapshot()==1);
+ /* T0: a batch straddling T0 splits by VB capture time. Only the window rows
+  * open the single launch file. */
+ utc=T0;local=210000;assert(sd_run_snapshot()==2);
+ /* DAQ rows use the same capture-time classification as VB pressure. */
+ mask=1;assert(sd_capture_key_locked(2,T0-1)==1&&sd_capture_key_locked(2,T0)==2&&sd_capture_key_locked(2,T0+20000)==3);mask=0;
+ receive_at(T0-8);drain();assert(launch_opens==1&&regular_opens==1);
+ /* Pre-T0 batch delivered late, inside the window: still the regular file. */
+ receive_at(T0-1000);drain();assert(launch_opens==1&&regular_opens==1);
+ /* A failed write retains its exact row; the retry writes it once. */
+ advance(5000);receive_at(T0+5000);fail_write=1;
+ for(unsigned i=0;i<20;++i)receive_at(0),drain(); /* unknown UTC, receive-time key2 */
+ drain();
+ /* T+20: a batch crossing the deadline (received just before the local
+  * cutoff) opens ONE new regular session file for its post-window rows. */
+ utc=T0+19990;local=229990;receive_at(T0+19992);drain();
+ assert(launch_opens==1&&regular_opens==2&&sd_run_snapshot()==2);
+ utc=T0+20000;local=230000;assert(sd_run_snapshot()==3&&sd_launch_finished());
+ /* A late in-window batch still reaches the open launch file. */
+ receive_at(T0+19980);drain();assert(launch_opens==1&&regular_opens==2);
+ /* After the launch file is finished, late window rows go to the current
+  * regular file instead of a second launch file. */
+ assert(sd_log_finish(&g_sd_launch_log)==0);
+ receive_at(T0+19960);receive_at(T0+21000);drain();
+ assert(launch_opens==1&&regular_opens==2);
+ /* Foreign sender is rejected before handoff; zeros remain valid VB data. */
+ uint8_t wire[44];pressure_sd_batch_t z={0};pressure_sd_encode(wire,sizeof wire,&z);
+ SedsPacketView p={SEDS_DT_VALVE_PRESSURE_SD_V1,wire,sizeof wire,"DAQ",3};
+ assert(pressure_sd_receive(&p,0)==SEDS_HANDLER_ERROR&&!count);
+ assert(sd_log_flush(&g_sd_regular_log)==0&&g_sd_write_error_count>=1);
+ assert(g_sd_pressure_records_enqueued==g_sd_pressure_records_written&&!g_sd_pressure_records_dropped);
+ for(unsigned i=0;i<next_file;i++)printf("=== %u\n%s",i,files[i]);
+ fprintf(stderr,"PASS pressure launch routing: one launch file, crossing/late/unknown rows, retained cursor\n");
+}
+'''
+
+
 class PressureLaunchTests(unittest.TestCase):
-    def test_actual_ingress_shared_writer_cutoff_retry_and_provenance(self):
-        source=(ROOT/'Core/Src/sd_card.c').read_text()
-        telemetry=(ROOT/'Core/Src/telemetry.c').read_text()
-        code=FIXTURE
-        declarations=source[source.index('typedef struct {\n  pressure_sd_batch_t batch;'):source.index('static TX_EVENT_FLAGS_GROUP g_sd_flags;')]
-        declarations=declarations.replace('static ULONG g_sd_pressure_queue_storage[SD_PRESSURE_QUEUE_BATCHES * SD_PRESSURE_MESSAGE_WORDS];','')
-        code=code.replace('@declarations@',declarations+pressure_cohort(source))
-        for name in ('sd_write_telemetry_row','sd_pressure_capture_route','sd_telemetry_epoch_ready','sd_raw_epoch_ready','sd_pressure_raw_epoch_ready','sd_write_launch_pressure_row','sd_service_pressure_rows','sd_card_log_pressure_batch'):
-            code=code.replace('@'+name+'@',function(source,name))
-        code=code.replace('@pressure_sd_receive@',function(telemetry,'pressure_sd_receive'))
+    def test_actual_ingress_routes_launch_window_pt_into_one_file(self):
+        source = (ROOT / 'Core/Src/sd_card.c').read_text()
+        telemetry = (ROOT / 'Core/Src/telemetry.c').read_text()
+        routing = source[source.index('static uint64_t g_sd_session'):source.index('volatile uint32_t g_sd_line_drop_count')]
+        routing = routing.replace('static uint8_t g_sd_launch_flush_pending;', '')
+        code = FIXTURE.replace('@routing@', 'static uint8_t g_sd_launch_flush_pending;\n' + routing + route_epoch_support(source))
+        code = code.replace('@log_type@', source[source.index('typedef struct {\n  FX_FILE file;'):source.index('} sd_log_t;') + len('} sd_log_t;')])
+        code = code.replace('@writer@', source[source.index('static UINT sd_log_flush(sd_log_t *log)'):source.index('static UINT sd_marker_exists(void)')])
+        declarations = source[source.index('typedef struct {\n  pressure_sd_batch_t batch;'):source.index('static TX_EVENT_FLAGS_GROUP g_sd_flags;')]
+        declarations = declarations.replace('static ULONG g_sd_pressure_queue_storage[SD_PRESSURE_QUEUE_BATCHES * SD_PRESSURE_MESSAGE_WORDS];', '')
+        cohort_begin = source.index('static struct { uint32_t current, old, cutoff, flags;')
+        cohort_state = source[cohort_begin:source.index('static void sd_route_epoch_advance(', cohort_begin)]
+        code = code.replace('@declarations@', declarations + pressure_cohort(source).replace(cohort_state, ''))
+        for name in ('sd_pressure_capture_route', 'sd_pressure_row_key', 'sd_pressure_oldest_key',
+                     'sd_service_pressure_rows', 'sd_card_log_pressure_batch'):
+            code = code.replace('@' + name + '@', function(source, name))
+        code = code.replace('@pressure_sd_receive@', function(telemetry, 'pressure_sd_receive'))
         with tempfile.TemporaryDirectory() as directory:
-            executable=Path(directory)/'pressure-launch'
-            subprocess.run(['cc','-std=c11','-O1','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-I',str(ROOT/'Core/Inc'),'-x','c','-','-o',str(executable)],input=code,text=True,check=True)
-            result=subprocess.run([str(executable)],text=True,capture_output=True,check=True)
-        rows=list(csv.reader(io.StringIO(result.stdout)))
-        self.assertEqual(len(rows),32)
-        self.assertTrue(all(len(row)==13 for row in rows))
-        self.assertTrue(all(row[2]=='valve_pressure_psi' for row in rows))
-        self.assertEqual([int(row[12]) for row in rows],list(range(42,74)))
-        self.assertEqual(rows[0][3:7],['0','0','0','0'])
-        self.assertEqual(rows[0][0:2],['1767225600100','100'])
-        self.assertEqual(rows[16][7],'local')
-if __name__=='__main__': unittest.main()
+            executable = Path(directory) / 'pressure-launch'
+            build = subprocess.run(['cc', '-std=c11', '-O1', '-Wall', '-Wextra', '-Werror', '-Wno-unused-variable',
+                                    '-fsanitize=address,undefined', '-I', str(ROOT / 'Core/Inc'), '-x', 'c', '-',
+                                    '-o', str(executable)], input=code, text=True, capture_output=True)
+            self.assertEqual(build.returncode, 0, build.stderr)
+            result = subprocess.run([str(executable)], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        files, current = [], None
+        for line in result.stdout.splitlines():
+            if line.startswith('=== '):
+                current = []; files.append(current); continue
+            if line and not line.startswith('#'):
+                current.append(next(csv.reader(io.StringIO(line))))
+        self.assertEqual(len(files), 3)  # regular before, launch, regular after
+        T0 = 1767225700000
+        before, launch, after = files
+        self.assertTrue(all(r[2] == 'valve_pressure_psi' for f in files for r in f))
+        network = lambda f: [int(r[0]) for r in f if r[7] == 'network']
+        self.assertTrue(all(t < T0 for t in network(before)))
+        self.assertTrue(launch and all(T0 <= t < T0 + 20000 for t in network(launch)))
+        self.assertEqual(min(network(launch)), T0)
+        self.assertEqual(max(network(launch)), T0 + 19996)
+        # Late in-window rows after the launch file was finished are retained.
+        self.assertEqual(sorted(t for t in network(after) if t < T0 + 20000),
+                         [T0 + 19960, T0 + 19964, T0 + 19968, T0 + 19972])
+        sequences = [int(r[12]) for f in files for r in f]
+        self.assertEqual(len(sequences), len(set(sequences)))
+        self.assertEqual(sorted(sequences), list(range(1000, 1000 + len(sequences))))
+        local = [r for f in files for r in f if r[7] == 'local']
+        self.assertEqual(len(local), 80)
+        self.assertTrue(all(r in launch for r in local))  # unknown UTC: receive-time key
+
+
+if __name__ == '__main__':
+    unittest.main()
