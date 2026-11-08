@@ -11,9 +11,12 @@ static inline uint64_t board_uptime_extend(board_uptime_state *state, uint32_t r
     state->ticks += (uint32_t)(raw - (uint32_t)state->ticks);
     return state->ticks;
 }
+/* A capture taken after `now` was read (e.g. a sample drained later in the same
+ * batch) is projected forward, never treated as a 49-day-old wrapped capture. */
 static inline uint64_t board_uptime_project(uint64_t now, uint32_t captured)
 {
     const uint32_t age = (uint32_t)now - captured;
+    if (age > UINT32_C(0x80000000)) return now + (uint32_t)(captured - (uint32_t)now);
     return now >= age ? now - age : 0U;
 }
 /* Sample at least once per 32-bit wrap. No network-clock lock is acquired. */

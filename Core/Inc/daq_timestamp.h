@@ -13,7 +13,10 @@ static inline uint64_t daq_sample_network_ms(uint64_t network_now,
                                             uint64_t local_now,
                                             uint64_t sample_ms)
 {
-  const uint64_t age = local_now >= sample_ms ? local_now - sample_ms : 0U;
-  return network_now != 0U && network_now >= age ? network_now - age : 0U;
+  if (network_now == 0U) return 0U;
+  /* A sample drained after the clock pair was read is newer, not older. */
+  if (sample_ms > local_now) return network_now + (sample_ms - local_now);
+  const uint64_t age = local_now - sample_ms;
+  return network_now >= age ? network_now - age : 0U;
 }
 #endif
