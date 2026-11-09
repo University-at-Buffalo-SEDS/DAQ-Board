@@ -180,6 +180,14 @@ static SedsResult apply_kg50_input(const SedsPacketView *packet, void *user)
   }
   mcp3564r_request_kg50_input(input);
   g_input_network_value_seen = true;
+  /* The station owns this selection and re-sends it while this board reports
+   * another input. Its revision stamps are per calibration file (one per
+   * station mode) and follow the station clock, so the SDK's same-sender
+   * timestamp order would silently drop, yet acknowledge, a later selection
+   * stamped older than the cached one. Keep no cached observation: the next
+   * delivered selection always runs this callback. */
+  if (user != NULL)
+    (void)seds_router_invalidate_network_variable_cache((SedsRouter *)user, packet->ty, NULL);
   return SEDS_OK;
 }
 
