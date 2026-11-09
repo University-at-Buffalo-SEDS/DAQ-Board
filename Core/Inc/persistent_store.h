@@ -21,6 +21,7 @@ launchcore_persist_status_t persistent_store_set(uint32_t key, const void *value
 bool persistent_store_recovery_ready(void);
 bool persistent_store_commission_pending(void);
 void persistent_store_hold_commissioning(void);
+void persistent_store_release_unused_commission_hold(void);
 void persistent_store_note_failure(void);
 bool persistent_store_publish_commission_complete(void);
 bool persistent_store_verify_commissioned_locked(uint64_t generation,const uint8_t floor[16],const uint8_t marker[40]);

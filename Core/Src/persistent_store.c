@@ -116,6 +116,9 @@ bool persistent_store_controls_ready(void) { return controls_ready&&!commissioni
 bool persistent_store_recovery_ready(void){return controls_ready&&!ownership_faulted;}
 bool persistent_store_commission_pending(void){return commissioning_hold;}
 void persistent_store_hold_commissioning(void){commissioning_hold=true;}
+/* Undo a RAM hold that a refused job set without any effect; never used
+ * when the hold predates the job or a durable PENDING marker requires it. */
+void persistent_store_release_unused_commission_hold(void){commissioning_hold=false;}
 void persistent_store_note_failure(void){controls_ready=false;++g_persistent_store_errors;}
 bool persistent_store_publish_commission_complete(void){
  if(ownership_faulted||!controls_ready||!commissioning_complete)return false;

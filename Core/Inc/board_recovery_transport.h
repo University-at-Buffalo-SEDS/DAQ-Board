@@ -1,6 +1,7 @@
 #ifndef BOARD_RECOVERY_TRANSPORT_H
 #define BOARD_RECOVERY_TRANSPORT_H
 #include "sedsnet.h"
+#include <stdbool.h>
 #include "sedsnet_config.h"
 void board_recovery_transport_set_router(SedsRouter *router);
 SedsResult board_recovery_handle(SedsRouter *router,const SedsPacketView *packet,
@@ -9,4 +10,11 @@ SedsResult board_recovery_handle(SedsRouter *router,const SedsPacketView *packet
 uint8_t board_recovery_command_is_stale(const SedsPacketView *packet);
 uint8_t board_recovery_managed_update_allowed(const SedsPacketView *packet);
 uint8_t board_recovery_automatic_is_stale(const SedsPacketView *packet);
+/* Advance the station clock from an authorized GS packet's timestamp. */
+void board_recovery_observe_station_time(SedsRouter*router,const SedsPacketView*packet);
+/* Freshness clock: max(valid network time, station clock); 0 when neither. */
+uint64_t board_recovery_station_now(SedsRouter*router);
+/* Router owner only: a valid network clock more than 60 s from the station
+ * clock (which then restarts from the next GS packet). */
+bool board_recovery_network_clock_resync_needed(uint64_t network_now);
 #endif

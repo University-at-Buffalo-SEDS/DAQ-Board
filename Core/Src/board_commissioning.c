@@ -73,7 +73,7 @@ uint8_t board_commissioning_query_result(void){
 }
 
 enum {JOB_FIRST=1,JOB_SECOND=2,JOB_NORMAL=3,JOB_RECONCILE=4};
-static struct {BoardRecoveryRequest request;uint64_t source;void*context;CommissionReply reply;CommissionClock clock;uint32_t applied_epoch;uint8_t kind,phase,result;bool valid,waiting,dirty,owner_started,durable,progress_sent;}job;
+static struct {BoardRecoveryRequest request;uint64_t source;void*context;CommissionReply reply;CommissionClock clock;uint32_t applied_epoch;uint8_t kind,phase,result;bool valid,waiting,dirty,owner_started,durable,progress_sent,held_before;}job;
 static struct {uint64_t nonce,issuer,source,generation;uint32_t epoch;bool valid;}query;
 static uint64_t attempted_time;
 static bool fresh(uint64_t source,uint64_t now){return source&&source!=UINT64_MAX&&now&&now!=UINT64_MAX&&(now>=source?now-source<=15000U:source-now<=1000U);}
@@ -121,7 +121,7 @@ int32_t board_commissioning_stage(const BoardRecoveryRequest*r,uint64_t source,u
  job.request=*r;job.source=source;job.context=context;job.reply=reply;job.clock=clock;job.kind=kind;job.phase=0;job.result=BOARD_RECOVERY_RESULT_IO;job.valid=true;job.waiting=true;job.dirty=false;job.owner_started=false;job.applied_epoch=0;job.durable=false;job.progress_sent=false;attempted_time=source;
  /* Immediate RAM admission exclusion does not claim cold durability before
   * the strict PENDING commit. Concrete owner performs no flash/SDK here. */
- persistent_store_hold_commissioning();job.owner_started=true;
+ job.held_before=board_commissioning_pending();persistent_store_hold_commissioning();job.owner_started=true;
  int32_t prepared=board_recovery_commission_prepare(r->expected_abort_epoch);
  if(prepared!=0){job.waiting=false;job.result=prepared==-10?BOARD_RECOVERY_RESULT_STALE:BOARD_RECOVERY_RESULT_IO;board_recovery_commission_retain();return job.result;}
  job.phase=1;return -1;
@@ -284,7 +284,10 @@ static void finish_job(uint8_t result,bool retain){
 void board_commissioning_service(void){
  if(job.valid&&job.waiting){
   uint64_t now=job.clock(job.context);
-  if(!fresh(job.source,now)){finish_job(BOARD_RECOVERY_RESULT_STALE,true);}
+  /* A refusal before any storage or owner effect latches nothing: a reset of
+   * a running board must not leave it held, and the RAM hold this job set is
+   * released unless it predates the job (a pending marker still needs it). */
+  if(!fresh(job.source,now)){bool effect=job.phase>1||job.held_before;finish_job(BOARD_RECOVERY_RESULT_STALE,effect);if(!effect)persistent_store_release_unused_commission_hold();}
   else{
    BoardRecoverySnapshot snapshot={0};
    if(board_recovery_snapshot(&snapshot)!=0){finish_job(BOARD_RECOVERY_RESULT_IO,true);}
