@@ -648,7 +648,8 @@ static SedsResult pressure_sd_receive(const SedsPacketView *packet, void *contex
     return SEDS_HANDLER_ERROR;
   pressure_sd_batch_t batch;
   if (pressure_sd_decode(&batch, packet->payload, packet->payload_len) != 0) {
-    ++g_pressure_sd_invalid_batches; return SEDS_HANDLER_ERROR;
+    /* A malformed batch never decodes on retransmit: acknowledge, drop. */
+    ++g_pressure_sd_invalid_batches; ++g_reliable_refusal_count; return SEDS_OK;
   }
   /* The SD handoff accepts the entire batch atomically. A refused handoff
    * must not generate a successful delivery receipt; let the reliable sender
@@ -665,14 +666,23 @@ static SedsResult sd_retry_receive(const SedsPacketView *packet, void *context)
   /* SD_CARD also carries calibration/clock controls. Other handlers own those
    * types; ignoring them must not turn their accepted delivery into an error. */
   if (packet->ty != SEDS_DT_DAQ_SD_RETRY) return SEDS_OK;
-  if (!packet->sender || !((packet->sender_len == 2U && memcmp(packet->sender, "GS", 2U) == 0) ||
-      (packet->sender_len == 4U && memcmp(packet->sender, "RRLS", 4U) == 0)) ||
-      !packet->payload || packet->payload_len != 4U) return SEDS_HANDLER_ERROR;
+  /* Wire senders are compact aliases; resolve them like every other owner
+   * check instead of comparing literal names. A refused request (not the
+   * station, malformed, invalid token) is acknowledged without effect: its
+   * retransmit can never succeed. Only a busy writer asks for a retry. */
+  if (!packet->sender ||
+      !(seds_router_sender_matches_hostname(g_router.r, packet->sender, packet->sender_len, "GS", 2U) ||
+        seds_router_sender_matches_hostname(g_router.r, packet->sender, packet->sender_len, "RRLS", 4U)) ||
+      !packet->payload || packet->payload_len != 4U) {
+    ++g_reliable_refusal_count; return SEDS_OK;
+  }
   const uint8_t *p = packet->payload;
   const uint32_t token = (uint32_t)p[0] | ((uint32_t)p[1] << 8U) |
       ((uint32_t)p[2] << 16U) | ((uint32_t)p[3] << 24U);
   const sd_card_status_t status = sd_card_request_retry(token);
-  return status == SD_CARD_STATUS_OK ? SEDS_OK : status == SD_CARD_STATUS_BUSY ? SEDS_IO : SEDS_HANDLER_ERROR;
+  if (status == SD_CARD_STATUS_BUSY) return SEDS_IO;
+  if (status != SD_CARD_STATUS_OK) ++g_reliable_refusal_count;
+  return SEDS_OK;
 }
 
 static SedsResult Board_Recovery_handler(const SedsPacketView *packet, void *user)

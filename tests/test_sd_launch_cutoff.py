@@ -94,7 +94,8 @@ typedef int SedsRouter;typedef int SedsResult;
 typedef struct {unsigned ty;const uint8_t *payload;size_t payload_len;uint64_t timestamp;} SedsPacketView;
 static uint64_t utc=1800000000000ULL, local=1000;
 static unsigned mask;
-volatile uint32_t g_telemetry_discovery_seen=1;
+volatile uint32_t g_telemetry_discovery_seen=1, g_reliable_refusal_count;
+static int seds_router_invalidate_network_variable_cache(SedsRouter *r,unsigned ty,bool *out){(void)r;(void)ty;(void)out;return 0;}
 static uint32_t __get_PRIMASK(void){return mask;}
 static void __disable_irq(void){mask=1;}
 static void __set_PRIMASK(uint32_t m){mask=m;}

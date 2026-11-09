@@ -5,6 +5,9 @@
 #include "persistent_store.h"
 #include "sd_card.h"
 #include "sedsnet_config.h"
+#ifdef TELEMETRY_ENABLED
+#include "board_recovery_transport.h"
+#endif
 
 #include <math.h>
 #include <stdbool.h>
@@ -102,25 +105,31 @@ void daq_calibration_restore(void)
 }
 
 #ifdef TELEMETRY_ENABLED
+/* A value this board refuses can never succeed on retransmit. Retire the SDK's
+ * cached observation (user is the router) and acknowledge it without effect. */
+static SedsResult refuse_calibration(const SedsPacketView *packet, void *user)
+{
+  if (packet != NULL)
+    (void)seds_router_invalidate_network_variable_cache((SedsRouter *)user, packet->ty, NULL);
+  g_daq_calibration_errors++;
+  ++g_reliable_refusal_count;
+  return SEDS_OK;
+}
+
 static SedsResult apply_calibration(const SedsPacketView *packet, void *user)
 {
-  (void)user;
   const bool filter = packet != NULL && packet->ty == SEDS_DT_DAQ_FILTER_CALIBRATION;
   const bool thermal = packet != NULL && packet->ty == SEDS_DT_DAQ_THERMAL_CALIBRATION;
   const bool kg50 = packet != NULL && packet->ty == SEDS_DT_DAQ_KG50_CALIBRATION;
   if (packet == NULL || (!filter && !thermal && !kg50 && packet->ty != SEDS_DT_DAQ_LOADCELL_CALIBRATION) ||
       packet->payload == NULL || packet->payload_len != (filter ? 2U : kg50 ? 7U : 4U) * sizeof(float))
   {
-    return SEDS_HANDLER_ERROR;
+    return refuse_calibration(packet, user);
   }
   daq_calibration_t next = daq_calibration_current();
   memcpy(filter ? (void *)next.filter_tau_ms : thermal ? (void *)next.thermal : kg50 ? (void *)next.kg50 : (void *)&next,
          packet->payload, packet->payload_len);
-  if (!calibration_valid(&next))
-  {
-    g_daq_calibration_errors++;
-    return SEDS_HANDLER_ERROR;
-  }
+  if (!calibration_valid(&next)) return refuse_calibration(packet, user);
   const bool changed = memcmp(&next, &g_calibration, sizeof(next)) != 0;
   if (changed)
   {
@@ -128,6 +137,9 @@ static SedsResult apply_calibration(const SedsPacketView *packet, void *user)
         persistent_store_set(DAQ_CALIBRATION_PERSIST_KEY, &next, sizeof(next)) !=
             LAUNCHCORE_PERSIST_OK)
     {
+      /* Transient: retire the cached observation so the identical retry
+       * runs this callback again instead of being accepted unpersisted. */
+      (void)seds_router_invalidate_network_variable_cache((SedsRouter *)user, packet->ty, NULL);
       g_daq_calibration_errors++;
       return SEDS_HANDLER_ERROR;
     }
@@ -148,9 +160,8 @@ static SedsResult apply_calibration(const SedsPacketView *packet, void *user)
 
 static SedsResult apply_kg50_input(const SedsPacketView *packet, void *user)
 {
-  (void)user;
   if (packet == NULL || packet->payload == NULL || packet->payload_len != 1U || ((const uint8_t *)packet->payload)[0] > 1U)
-    return SEDS_HANDLER_ERROR;
+    return refuse_calibration(packet, user);
   const uint8_t input = ((const uint8_t *)packet->payload)[0];
   /* A failed write must not hold back the selection: only the next reboot
    * without GroundStation would see the older value. */
@@ -181,25 +192,25 @@ SedsResult daq_calibration_init(SedsRouter *router)
       router, SEDS_DT_DAQ_LOADCELL_CALIBRATION, true, false);
   if (result != SEDS_OK) return result;
   result = seds_router_on_network_variable_update(
-      router, SEDS_DT_DAQ_LOADCELL_CALIBRATION, apply_calibration, NULL);
+      router, SEDS_DT_DAQ_LOADCELL_CALIBRATION, apply_calibration, router);
   if (result != SEDS_OK) return result;
   result = seds_router_enable_network_variable(router, SEDS_DT_DAQ_KG50_CALIBRATION, true, false);
   if (result != SEDS_OK) return result;
   result = seds_router_on_network_variable_update(router, SEDS_DT_DAQ_KG50_CALIBRATION,
-                                                  apply_calibration, NULL);
+                                                  apply_calibration, router);
   if (result != SEDS_OK) return result;
   result = seds_router_enable_network_variable(router, SEDS_DT_DAQ_THERMAL_CALIBRATION, true, false);
   if (result != SEDS_OK) return result;
   result = seds_router_on_network_variable_update(router, SEDS_DT_DAQ_THERMAL_CALIBRATION,
-                                                  apply_calibration, NULL);
+                                                  apply_calibration, router);
   if (result != SEDS_OK) return result;
   result = seds_router_enable_network_variable(router, SEDS_DT_DAQ_FILTER_CALIBRATION, true, false);
   if (result != SEDS_OK) return result;
-  result = seds_router_on_network_variable_update(router, SEDS_DT_DAQ_FILTER_CALIBRATION, apply_calibration, NULL);
+  result = seds_router_on_network_variable_update(router, SEDS_DT_DAQ_FILTER_CALIBRATION, apply_calibration, router);
   if (result != SEDS_OK) return result;
   result = seds_router_enable_network_variable(router, SEDS_DT_DAQ_KG50_INPUT, true, false);
   if (result != SEDS_OK) return result;
-  result = seds_router_on_network_variable_update(router, SEDS_DT_DAQ_KG50_INPUT, apply_kg50_input, NULL);
+  result = seds_router_on_network_variable_update(router, SEDS_DT_DAQ_KG50_INPUT, apply_kg50_input, router);
   g_last_refresh_ms = HAL_GetTick();
   return result;
 }

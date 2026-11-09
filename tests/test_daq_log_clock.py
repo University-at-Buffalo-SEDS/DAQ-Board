@@ -22,8 +22,9 @@ typedef int SedsRouter;
 typedef struct { unsigned ty; const uint8_t *payload; size_t payload_len; uint64_t timestamp; } SedsPacketView;
 enum { SEDS_OK, SEDS_HANDLER_ERROR };
 #define SEDS_DT_DAQ_LOG_CLOCK 139U
-volatile uint32_t g_telemetry_discovery_seen;
-static uint32_t tick, requests, changes, mask;
+volatile uint32_t g_telemetry_discovery_seen, g_reliable_refusal_count;
+static uint32_t tick, requests, changes, mask, invalidations;
+static int seds_router_invalidate_network_variable_cache(SedsRouter *r,unsigned ty,bool *out){assert(r && ty==139 && !out); ++invalidations; return 0;}
 static uint32_t __get_PRIMASK(void){return mask;}
 static void __disable_irq(void){mask=1;}
 static void __set_PRIMASK(uint32_t m){mask=m;}
@@ -37,7 +38,7 @@ static int seds_router_enable_network_variable(SedsRouter *r,unsigned ty,bool re
 }
 static int seds_router_on_network_variable_update(SedsRouter *r,unsigned ty,
   SedsResult (*cb)(const SedsPacketView*,void*),void *context) {
-  assert(r && ty==139 && cb && !context); return 0;
+  assert(r && ty==139 && cb && context==r); return 0;
 }
 static int seds_router_request_managed_variable(SedsRouter *r,unsigned ty) {
   assert(r && ty==139); ++requests; return 0;
@@ -50,10 +51,11 @@ int main(void) {
   g_telemetry_discovery_seen=1; daq_log_clock_poll(&router); assert(requests==1);
   uint8_t payload[16]={0};
   SedsPacketView p={.ty=139,.payload=payload,.payload_len=15,.timestamp=1800000000000ULL};
-  assert(clock_update(&p,NULL)==SEDS_HANDLER_ERROR && changes==0);
+  /* Malformed values are acknowledged, never applied, and leave no cache. */
+  assert(clock_update(&p,&router)==SEDS_OK && changes==0 && invalidations==1 && g_reliable_refusal_count==1);
   p.payload_len=16;
   payload[0]=7; /* Session without a valid deadline is rejected. */
-  assert(clock_update(&p,NULL)==SEDS_HANDLER_ERROR && changes==0);
+  assert(clock_update(&p,&router)==SEDS_OK && changes==0 && invalidations==2 && g_reliable_refusal_count==2);
   const uint64_t end=1800000130000ULL;
   for (unsigned i=0;i<8;++i) payload[8+i]=(uint8_t)(end>>(8*i));
   assert(clock_update(&p,NULL)==SEDS_OK && changes==1);

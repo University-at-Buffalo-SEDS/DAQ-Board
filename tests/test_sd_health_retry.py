@@ -93,7 +93,11 @@ typedef int SedsResult;typedef int sd_card_status_t;
 enum{SEDS_OK=0,SEDS_IO=1,SEDS_HANDLER_ERROR=2,SD_CARD_STATUS_OK=0,SD_CARD_STATUS_BUSY=1};
 #define SEDS_DT_DAQ_SD_RETRY 24116261U
 typedef struct{uint32_t ty;const char *sender;size_t sender_len;const uint8_t *payload;size_t payload_len;} SedsPacketView;
-static unsigned calls;static uint32_t accepted;static int status;
+static unsigned calls,g_reliable_refusal_count;static uint32_t accepted;static int status;
+/* Named-only SDK boundary stub; real alias resolution is in test_refused_reliable_ack. */
+static struct { void *r; } g_router = {(void *)1};
+static int seds_router_sender_matches_hostname(void *r,const char *s,size_t n,const char *e,size_t en)
+{ assert(r == g_router.r); return s && n == en && memcmp(s,e,n) == 0; }
 static sd_card_status_t sd_card_request_retry(uint32_t token){calls++;accepted=token;return status;}
 '''+function(source,'sd_retry_receive')+r'''
 int main(void){
@@ -101,12 +105,14 @@ int main(void){
  assert(sd_retry_receive(&packet,0)==SEDS_OK&&calls==1&&accepted==0x12345678);
  packet.sender="RRLS";packet.sender_len=4;status=SD_CARD_STATUS_BUSY;
  assert(sd_retry_receive(&packet,0)==SEDS_IO&&calls==2);
- packet.sender="VB";packet.sender_len=2;assert(sd_retry_receive(&packet,0)==SEDS_HANDLER_ERROR&&calls==2);
- packet.sender="GSx";packet.sender_len=3;assert(sd_retry_receive(&packet,0)==SEDS_HANDLER_ERROR);
- packet.sender="GS";packet.sender_len=2;packet.payload_len=8;assert(sd_retry_receive(&packet,0)==SEDS_HANDLER_ERROR);
- packet.payload_len=3;assert(sd_retry_receive(&packet,0)==SEDS_HANDLER_ERROR);
- packet.payload_len=4;packet.ty++;assert(sd_retry_receive(&packet,0)==SEDS_OK&&calls==2);
- assert(sd_retry_receive(0,0)==SEDS_HANDLER_ERROR&&calls==2);
+ /* Refusals are acknowledged (SEDS_OK), counted and never reach the writer. */
+ packet.sender="VB";packet.sender_len=2;assert(sd_retry_receive(&packet,0)==SEDS_OK&&calls==2&&g_reliable_refusal_count==1);
+ packet.sender="GSx";packet.sender_len=3;assert(sd_retry_receive(&packet,0)==SEDS_OK&&g_reliable_refusal_count==2);
+ packet.sender="GS";packet.sender_len=2;packet.payload_len=8;assert(sd_retry_receive(&packet,0)==SEDS_OK&&g_reliable_refusal_count==3);
+ packet.payload_len=3;assert(sd_retry_receive(&packet,0)==SEDS_OK&&calls==2&&g_reliable_refusal_count==4);
+ packet.payload_len=4;status=3;assert(sd_retry_receive(&packet,0)==SEDS_OK&&calls==3&&g_reliable_refusal_count==5);status=0;
+ packet.ty++;assert(sd_retry_receive(&packet,0)==SEDS_OK&&calls==3&&g_reliable_refusal_count==5);
+ assert(sd_retry_receive(0,0)==SEDS_HANDLER_ERROR&&calls==3);
 }
 '''
         self.run_c(code)

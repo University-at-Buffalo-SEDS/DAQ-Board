@@ -15,7 +15,7 @@ typedef int SedsResult;
 #define SEDS_HANDLER_ERROR -7
 #define SEDS_DT_VALVE_PRESSURE_SD_V1 157797238
 #define SD_CARD_STATUS_OK 0
-static unsigned g_pressure_sd_batches_received,g_pressure_sd_invalid_batches,calls;
+static unsigned g_pressure_sd_batches_received,g_pressure_sd_invalid_batches,g_reliable_refusal_count,calls;
 static int status;
 /* Named-only SDK boundary stub; actual compact/assigned discovery and
  * collision behavior is exercised by test_pressure_sd_identity with real SDK. */
@@ -39,8 +39,8 @@ int main(void){
  assert(calls==1 && g_pressure_sd_batches_received==0);
  status=0;assert(pressure_sd_receive(&packet,NULL)==SEDS_OK);
  assert(calls==2 && g_pressure_sd_batches_received==1);
- packet.payload_len=43;assert(pressure_sd_receive(&packet,NULL)==SEDS_HANDLER_ERROR);
- assert(calls==2 && g_pressure_sd_invalid_batches==1);
+ packet.payload_len=43;assert(pressure_sd_receive(&packet,NULL)==SEDS_OK);
+ assert(calls==2 && g_pressure_sd_invalid_batches==1 && g_reliable_refusal_count==1);
  return 0;
 }'''
         with tempfile.TemporaryDirectory() as d:

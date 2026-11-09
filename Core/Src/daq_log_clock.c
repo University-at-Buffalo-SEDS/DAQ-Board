@@ -2,6 +2,7 @@
 #include "sd_card.h"
 #include "main.h"
 #include "sd_calendar.h"
+#include "board_recovery_transport.h"
 #include <stdbool.h>
 static bool clock_seen;
 static uint32_t last_request;
@@ -19,13 +20,17 @@ static uint64_t read_u64(const uint8_t *p)
 }
 static SedsResult clock_update(const SedsPacketView *packet, void *context)
 {
-  (void)context;
-  if (!packet || packet->ty != SEDS_DT_DAQ_LOG_CLOCK || !packet->payload || packet->payload_len != 16U)
-    return SEDS_HANDLER_ERROR;
-  const uint64_t session = read_u64(packet->payload), deadline = read_u64(packet->payload+8);
   sd_calendar_t date;
-  if ((session == 0U) != (deadline == 0U) ||
-      (deadline != 0U && !sd_calendar_from_unix_ms(deadline, &date))) return SEDS_HANDLER_ERROR;
+  /* A malformed value never succeeds on retransmit. Retire the cached
+   * observation (context is the router) and acknowledge it without effect. */
+  if (!packet || packet->ty != SEDS_DT_DAQ_LOG_CLOCK || !packet->payload || packet->payload_len != 16U ||
+      (read_u64(packet->payload) == 0U) != (read_u64(packet->payload+8) == 0U) ||
+      (read_u64(packet->payload+8) != 0U && !sd_calendar_from_unix_ms(read_u64(packet->payload+8), &date))) {
+    (void)seds_router_invalidate_network_variable_cache((SedsRouter *)context, SEDS_DT_DAQ_LOG_CLOCK, NULL);
+    ++g_reliable_refusal_count;
+    return SEDS_OK;
+  }
+  const uint64_t session = read_u64(packet->payload), deadline = read_u64(packet->payload+8);
   clock_seen = true;
   const uint64_t stamp = packet->timestamp;
   const uint64_t high_before = clock_high_water;
@@ -66,7 +71,7 @@ SedsResult daq_log_clock_init(SedsRouter *router)
   clock_seen = false;
   last_request = HAL_GetTick();
   SedsResult result = seds_router_enable_network_variable(router, SEDS_DT_DAQ_LOG_CLOCK, true, false);
-  if (result == SEDS_OK) result = seds_router_on_network_variable_update(router, SEDS_DT_DAQ_LOG_CLOCK, clock_update, NULL);
+  if (result == SEDS_OK) result = seds_router_on_network_variable_update(router, SEDS_DT_DAQ_LOG_CLOCK, clock_update, router);
   return result;
 }
 SedsResult daq_log_clock_poll(SedsRouter *router)

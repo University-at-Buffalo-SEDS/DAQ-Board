@@ -30,7 +30,8 @@ HEADERS = {
  'board_recovery_transport.h': '#pragma once\n'
                                '#include "sedsnet.h"\n'
                                'uint8_t board_recovery_managed_update_allowed(const '
-                               'SedsPacketView*);\n',
+                               'SedsPacketView*);\n'
+                               'extern volatile uint32_t g_reliable_refusal_count;\n',
  'persistent_store.h': '#pragma once\n'
                        '#include <stddef.h>\n'
                        '#include <stdint.h>\n'
@@ -53,6 +54,7 @@ HARNESS = r'''
 #include <string.h>
 #include <stdio.h>
 volatile uint32_t g_telemetry_discovery_seen;
+volatile uint32_t g_reliable_refusal_count;
 static unsigned writes,invalidations,enables,registrations;
 static int fail_enable,fail_callback;
 static uint8_t stored=5;

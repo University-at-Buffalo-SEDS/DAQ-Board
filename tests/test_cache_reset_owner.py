@@ -26,7 +26,7 @@ SedsResult seds_router_invalidate_network_variable_cache(SedsRouter*,unsigned,bo
 ''',
 "sedsnet_config.h": '#pragma once\n#define SEDS_DT_FLIGHT_STATE 444U\n',
 "main.h": '#pragma once\n#include <stdint.h>\nuint32_t HAL_GetTick(void);\nuint32_t __get_PRIMASK(void);\nvoid __disable_irq(void);\nvoid __set_PRIMASK(uint32_t);\n',
-"board_recovery_transport.h": '#pragma once\n#include "sedsnet.h"\nuint8_t board_recovery_managed_update_allowed(const SedsPacketView*);\n',
+"board_recovery_transport.h": '#pragma once\n#include "sedsnet.h"\nuint8_t board_recovery_managed_update_allowed(const SedsPacketView*);\nextern volatile uint32_t g_reliable_refusal_count;\n',
 "persistent_store.h": r'''#pragma once
 #include <stddef.h>
 #include <stdint.h>
@@ -56,6 +56,7 @@ HARNESS = r'''
 #include <string.h>
 #include <stdio.h>
 volatile uint32_t g_telemetry_discovery_seen;
+volatile uint32_t g_reliable_refusal_count;
 static SedsResult (*callback)(const SedsPacketView*,void*);
 static unsigned writes,clears,requests;
 static uint8_t stored=5,have_stored=1,allow_update=1;
@@ -137,7 +138,7 @@ int main(int argc,char **argv){
   fail_invalidate=0;assert(board_recovery_apply_safe(0,1,&out)==0&&out.actual_state==0&&out.abort_epoch==2);
  }else if(!strcmp(argv[1],"stale_retirement")){
   assert(board_recovery_apply_safe(0,1,&out)==0);unsigned w=writes,c=clears;
-  allow_update=0;assert(update(3)==-9&&flight_state_cache_value()==0&&stored==0&&writes==w&&clears==c+1&&callback);
+  allow_update=0;assert(update(3)==0&&g_reliable_refusal_count==1&&flight_state_cache_value()==0&&stored==0&&writes==w&&clears==c+1&&callback);
   allow_update=1;assert(update(1)==0&&flight_state_cache_value()==1&&stored==1);
   assert(board_recovery_apply_safe(0,1,&out)!=0&&writes==w+1);
  }else if(!strcmp(argv[1],"ordinary_retry")){
@@ -148,7 +149,7 @@ int main(int argc,char **argv){
   fail_apply=1;assert(update(3)==-14&&flight_state_cache_value()==5&&stored==5&&writes==0&&clears==1&&callback);
   fail_apply=0;assert(update(3)==0&&flight_state_cache_value()==3&&stored==3&&writes==1&&clears==1);
  }else if(!strcmp(argv[1],"malformed_retirement")){
-  assert(update(255)==-9&&flight_state_cache_value()==5&&stored==5&&writes==0&&clears==1&&callback);
+  assert(update(255)==0&&g_reliable_refusal_count==1&&flight_state_cache_value()==5&&stored==5&&writes==0&&clears==1&&callback);
  }else assert(!"unknown case");
  puts(argv[1]);return 0;
 }

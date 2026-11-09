@@ -34,6 +34,7 @@ SedsResult __real_seds_router_poll_timesync(SedsRouter*r,bool*out){return seds_r
 #define seds_router_poll_timesync __wrap_seds_router_poll_timesync
 
 volatile uint32_t g_telemetry_discovery_seen;
+volatile uint32_t g_reliable_refusal_count;
 static uint64_t clock_ms=1000;
 static unsigned writes,app_callbacks,registrations,enables,disables,invalidations,refreshes,outputs;
 static uint8_t stored=5;

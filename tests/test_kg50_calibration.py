@@ -36,8 +36,9 @@ static void mcp3564r_request_kg50_input(uint8_t input) { requested_input=input; 
 #define SEDS_HANDLER_ERROR 2
 #define LAUNCHCORE_PERSIST_OK 0
 #define LAUNCHCORE_PERSIST_NOT_FOUND 1
-volatile uint32_t g_telemetry_discovery_seen=1;
-static unsigned ticks, fail_persist, requests[11], rotations;
+volatile uint32_t g_telemetry_discovery_seen=1, g_reliable_refusal_count;
+static unsigned ticks, fail_persist, requests[11], rotations, invalidations;
+static int seds_router_invalidate_network_variable_cache(SedsRouter *r,unsigned ty,bool *out){(void)r;(void)ty;assert(!out);++invalidations;return 0;}
 static unsigned char persisted[sizeof(daq_calibration_t)];
 static size_t persisted_len;
 static daq_calibration_t sd_calibration;
@@ -68,7 +69,7 @@ static unsigned seds_router_enable_network_variable(SedsRouter *r,unsigned ty,bo
 }
 static unsigned seds_router_on_network_variable_update(SedsRouter *r,unsigned ty,
     SedsResult (*cb)(const SedsPacketView *, void *),void *user) {
-  (void)user; assert(r && ty>=137 && ty<=147 && cb); return 0;
+  assert(r && user==r && ty>=137 && ty<=147 && cb); return 0;
 }
 static unsigned seds_router_request_managed_variable(SedsRouter *r,unsigned ty) {
   assert(r && ty>=137 && ty<=147); requests[ty-137]++; return 0;
@@ -106,16 +107,19 @@ int main(void) {
   assert(requested_input==1 && g_daq_calibration_errors==errors+1);
   persisted_input=0;
   input=1; assert(apply_kg50_input(&source_packet,NULL)==SEDS_OK);
-  input=2; assert(apply_kg50_input(&source_packet,NULL)==SEDS_HANDLER_ERROR && requested_input==1);
-  source_packet.payload_len=0; assert(apply_kg50_input(&source_packet,NULL)==SEDS_HANDLER_ERROR);
+  /* Refused values are acknowledged, never applied, and leave no cache. */
+  input=2; assert(apply_kg50_input(&source_packet,&router)==SEDS_OK && requested_input==1 && invalidations==1 && g_reliable_refusal_count==1);
+  source_packet.payload_len=0; assert(apply_kg50_input(&source_packet,&router)==SEDS_OK && invalidations==2 && g_reliable_refusal_count==2);
   source_packet.payload_len=1; input=0;
   assert(apply_kg50_input(&source_packet,NULL)==SEDS_OK && requested_input==0);
 
   assert(requests[0]==1 && requests[1]==1);
   float kg50[7]={1,2,3,0,0,1,6};
   SedsPacketView packet={138,kg50,sizeof(kg50)};
-  fail_persist=1;
-  assert(apply_calibration(&packet,NULL)==SEDS_HANDLER_ERROR);
+  /* Storage failure is transient: no ACK, and the cached observation is
+   * retired so the identical retry runs this callback again. */
+  fail_persist=1; unsigned retired=invalidations;
+  assert(apply_calibration(&packet,&router)==SEDS_HANDLER_ERROR && invalidations==retired+1);
   assert(g_calibration.kg50[1]==1 && !g_kg50_network_value_seen);
   assert(sd_calibration.kg50[1]==1 && rotations==1);
   fail_persist=0;
@@ -134,19 +138,20 @@ int main(void) {
   assert(isnan(daq_calibration_temperature_raw(&g_calibration,1,12,126)));
   float tau[2]={100,200};
   packet=(SedsPacketView){142,tau,sizeof(tau)};
-  fail_persist=1; assert(apply_calibration(&packet,NULL)==SEDS_HANDLER_ERROR);
+  fail_persist=1; assert(apply_calibration(&packet,&router)==SEDS_HANDLER_ERROR);
   assert(g_calibration.filter_tau_ms[0]==0 && !g_filter_network_value_seen);
   fail_persist=0; assert(apply_calibration(&packet,NULL)==SEDS_OK);
   assert(g_calibration.filter_tau_ms[0]==100 && g_filter_network_value_seen);
-  tau[0]=-1; assert(apply_calibration(&packet,NULL)==SEDS_HANDLER_ERROR);
-  tau[0]=NAN; assert(apply_calibration(&packet,NULL)==SEDS_HANDLER_ERROR);
+  unsigned refused=g_reliable_refusal_count;
+  tau[0]=-1; assert(apply_calibration(&packet,&router)==SEDS_OK && g_calibration.filter_tau_ms[0]==100);
+  tau[0]=NAN; assert(apply_calibration(&packet,&router)==SEDS_OK && g_reliable_refusal_count==refused+2);
   legacy[0]=7; packet=(SedsPacketView){137,legacy,sizeof(legacy)};
   assert(apply_calibration(&packet,NULL)==SEDS_OK);
   assert(g_calibration.kg1000_slope==7 && g_calibration.kg50[2]==3);
   packet=(SedsPacketView){138,kg50,sizeof(kg50)-4};
-  assert(apply_calibration(&packet,NULL)==SEDS_HANDLER_ERROR);
+  assert(apply_calibration(&packet,&router)==SEDS_OK);
   kg50[0]=NAN; packet.payload_len=sizeof(kg50);
-  assert(apply_calibration(&packet,NULL)==SEDS_HANDLER_ERROR);
+  assert(apply_calibration(&packet,&router)==SEDS_OK && g_reliable_refusal_count==refused+4);
   assert(g_calibration.kg50[0]==1);
   g_restore_attempted=false; memset(&g_calibration,0,sizeof(g_calibration));
   daq_calibration_restore();

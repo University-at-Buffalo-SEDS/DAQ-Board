@@ -176,13 +176,18 @@ static SedsResult persist_update(const SedsPacketView *packet, void *user)
         if (packet != NULL && packet->ty == SEDS_DT_FLIGHT_STATE)
             (void)clear_managed_cache();
         g_flight_state_cache_errors++;
-        return SEDS_HANDLER_ERROR;
+        /* Retransmitting a malformed value cannot succeed: acknowledge it. */
+        ++g_reliable_refusal_count;
+        return SEDS_OK;
     }
 
     if (!board_recovery_managed_update_allowed(packet)) {
+        /* Stale, unready or not the station: never applied or cached, but
+         * acknowledged. An error here aborted RX before its ACK, so the
+         * station retransmitted the same refused FLIGHT_STATE forever. */
         (void)clear_managed_cache();
-        ++g_flight_state_cache_errors;
-        return SEDS_HANDLER_ERROR;
+        ++g_reliable_refusal_count;
+        return SEDS_OK;
     }
     const uint8_t state = packet->payload[0];
     if (!ota_stream_state_begin(state)) {

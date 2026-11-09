@@ -11,7 +11,7 @@ static struct { SedsRouter*r; } g_router;
 typedef unsigned UINT;typedef uint32_t ULONG;typedef struct{unsigned tx_queue_enqueued;ULONG*tx_queue_read;}TX_QUEUE;
 typedef enum{SD_CARD_STATUS_OK,SD_CARD_STATUS_IO_ERROR,SD_CARD_STATUS_BUSY,SD_CARD_STATUS_BACKPRESSURE}sd_card_status_t;
 static uint32_t g_sd_pressure_records_enqueued,g_sd_pressure_records_dropped;
-static uint32_t g_pressure_sd_batches_received,g_pressure_sd_invalid_batches;
+static uint32_t g_pressure_sd_batches_received,g_pressure_sd_invalid_batches,g_reliable_refusal_count;
 static unsigned g_sd_services_initialized=1;static uint64_t g_sd_close_unix_ms=1767225620000ULL;
 static uint32_t g_sd_route_epoch=3;
 #define SD_LAUNCH_WINDOW_MS 20000U

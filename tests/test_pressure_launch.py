@@ -90,7 +90,7 @@ typedef int SedsResult;
 #define SEDS_IO -14
 #define SEDS_HANDLER_ERROR -7
 #define SEDS_DT_VALVE_PRESSURE_SD_V1 157797238U
-static unsigned g_pressure_sd_batches_received,g_pressure_sd_invalid_batches;
+static unsigned g_pressure_sd_batches_received,g_pressure_sd_invalid_batches,g_reliable_refusal_count;
 typedef struct {uint32_t ty;const uint8_t*payload;size_t payload_len;const char*sender;size_t sender_len;}SedsPacketView;
 @pressure_sd_receive@
 static uint32_t sequence=1000;
