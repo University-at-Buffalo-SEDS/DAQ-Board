@@ -755,6 +755,18 @@ static SedsResult init_telemetry_router_locked(void) {
   result = board_packet_store_init();
   if (result != SEDS_OK) return result;
 
+  /* Never try zstd payload compression on transmit. ZSTD_compress keeps a
+   * 3.8 KiB context on the calling stack and then mallocs a workspace of at
+   * least 18.9 KiB from the newlib heap, which here has 1,864 B free, so
+   * every attempt failed after spending ~4.5 KiB of the router thread's stack
+   * and the payload went out uncompressed anyway. */
+  SedsRuntimeTuningConfig tuning;
+  result = seds_get_runtime_tuning_config(&tuning);
+  if (result != SEDS_OK) return result;
+  tuning.payload_compress_threshold = SIZE_MAX;
+  result = seds_set_runtime_tuning_config(&tuning);
+  if (result != SEDS_OK) return result;
+
   /* Keep one clock origin through construction and initial queue service. */
   g_router.start_time = tx_raw_now_ms_locked();
   r = seds_router_new(node_now_since_ms, NULL, locals,
