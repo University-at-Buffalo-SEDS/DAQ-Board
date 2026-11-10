@@ -16,6 +16,7 @@ extern volatile uint32_t g_telemetry_discovery_seen;
 #define FLIGHT_STATE_PERSIST_KEY 0x46535445u
 #define FLIGHT_STATE_MAX_VALUE 15U
 #define FLIGHT_STATE_UNSYNCED_RETRY_MS 500U
+#define FLIGHT_STATE_PERSIST_RETRY_MS 1000U
 
 volatile uint32_t g_flight_state_cache_value __attribute__((used, externally_visible)) = 0U;
 volatile uint32_t g_flight_state_cache_restores __attribute__((used, externally_visible)) = 0U;
@@ -30,6 +31,8 @@ static bool g_persist_pending;
 static uint8_t g_persisted_state = UINT8_MAX;
 #ifdef TELEMETRY_ENABLED
 static bool g_network_value_seen;
+/* GET cadence while unseen; once a value is applied (and only then can a
+ * persist be pending) it paces the durability retry instead. */
 static uint32_t g_last_refresh_ms;
 static SedsRouter *g_cache_router;
 static SedsResult persist_update(const SedsPacketView *packet, void *user);
@@ -164,6 +167,22 @@ int32_t flight_state_cache_reset_startup(void)
 }
 
 #ifdef TELEMETRY_ENABLED
+/* Caller holds the OTA owner. Busy is ordinary contention, not a fault. */
+static void persist_pending(void)
+{
+    const int32_t stored =
+        persist_state_nowait((uint8_t)g_flight_state_cache_value, !g_persist_ready);
+    if (stored != 0) {
+        if (stored != -14) ++g_flight_state_cache_errors;
+        return;
+    }
+    g_persist_ready = true;
+    ++g_flight_state_cache_writes;
+    const uint32_t mask = __get_PRIMASK(); __disable_irq();
+    g_persist_pending = false;
+    __set_PRIMASK(mask);
+}
+
 static SedsResult persist_update(const SedsPacketView *packet, void *user)
 {
     (void)user;
@@ -190,14 +209,12 @@ static SedsResult persist_update(const SedsPacketView *packet, void *user)
         return SEDS_OK;
     }
     const uint8_t state = packet->payload[0];
-    if (!ota_stream_state_begin(state)) {
-        (void)clear_managed_cache();
-        ++g_flight_state_cache_errors;
-        return SEDS_HANDLER_ERROR;
-    }
+    /* Taking the OTA owner applies its inhibition even when busy; busy only
+     * means flash is not ours now, so durability waits for the poll. */
+    const bool owner = ota_stream_state_begin(state);
     const SedsResult apply_result = flight_state_cache_apply_network_update(packet);
     if (apply_result != SEDS_OK) {
-        ota_stream_state_end();
+        if (owner) ota_stream_state_end();
         (void)clear_managed_cache();
         g_flight_state_cache_errors++;
         return apply_result;
@@ -209,22 +226,14 @@ static SedsResult persist_update(const SedsPacketView *packet, void *user)
     if (changed) g_persist_pending = true;
     __set_PRIMASK(mask);
     g_flight_state_cache_updates++;
-    if (!changed) { ota_stream_state_end(); return SEDS_OK; }
-
-    const int32_t stored = g_persist_ready ? persist_state_nowait(state, false) : -9;
-    if (stored != 0) {
-        /* Only this observation is retired. Natural reliable retry retains
-         * its original packet identity/time; normal Busy is not flash damage. */
-        (void)clear_managed_cache();
-        if (stored != -14) ++g_flight_state_cache_errors;
-        ota_stream_state_end();
-        return stored == -14 ? SEDS_IO : SEDS_HANDLER_ERROR;
+    if (changed) {
+        /* Applied: acknowledge it whatever flash does. An error withholds
+         * the receipt and stalls the station's ordered FLIGHT_STATE stream
+         * (Aborted included) behind this write. */
+        g_last_refresh_ms = HAL_GetTick();
+        if (owner) persist_pending();
     }
-    ++g_flight_state_cache_writes;
-    const uint32_t completed_mask = __get_PRIMASK(); __disable_irq();
-    g_persist_pending = false;
-    __set_PRIMASK(completed_mask);
-    ota_stream_state_end();
+    if (owner) ota_stream_state_end();
     return SEDS_OK;
 }
 
@@ -249,9 +258,17 @@ SedsResult flight_state_cache_init(SedsRouter *router)
 SedsResult flight_state_cache_poll(SedsRouter *router)
 {
     if (router == NULL) return SEDS_BAD_ARG;
+    const uint32_t now_ms = HAL_GetTick();
+    if (g_persist_pending &&
+        (uint32_t)(now_ms - g_last_refresh_ms) >= FLIGHT_STATE_PERSIST_RETRY_MS) {
+        g_last_refresh_ms = now_ms;
+        if (ota_stream_state_begin((uint8_t)g_flight_state_cache_value)) {
+            persist_pending();
+            ota_stream_state_end();
+        }
+    }
     if (g_network_value_seen) return SEDS_OK;
     if (g_telemetry_discovery_seen == 0U) return SEDS_OK;
-    const uint32_t now_ms = HAL_GetTick();
     if ((uint32_t)(now_ms - g_last_refresh_ms) <
         FLIGHT_STATE_UNSYNCED_RETRY_MS) return SEDS_OK;
     g_last_refresh_ms = now_ms;

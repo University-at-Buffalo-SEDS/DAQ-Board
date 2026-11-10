@@ -24,6 +24,7 @@ SOURCES = [
     ('read_u64', 'Core/Src/daq_log_clock.c'),
     ('clock_update', 'Core/Src/daq_log_clock.c'),
     ('clear_managed_cache', 'Core/Src/flight_state_cache.c'),
+    ('persist_pending', 'Core/Src/flight_state_cache.c'),
     ('persist_update', 'Core/Src/flight_state_cache.c'),
     ('authorized_primary', 'Core/Src/board_recovery_transport.c'),
     ('board_recovery_handle', 'Core/Src/board_recovery_transport.c'),

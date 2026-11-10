@@ -111,8 +111,9 @@ int main(int argc,char **argv){
  assert((out.flags&(BOARD_RECOVERY_STATE_VALID|BOARD_RECOVERY_SUPPORTED))==(BOARD_RECOVERY_STATE_VALID|BOARD_RECOVERY_SUPPORTED));
  assert(!(out.flags&(BOARD_RECOVERY_OUTPUTS_VALID|BOARD_RECOVERY_SAFE_OUTPUTS)));
  if(!strcmp(argv[1],"busy")){
-  busy_owner=1;assert(update(7)==-14&&flight_state_cache_value()==7&&writes==0&&clears==1&&!flight_state_cache_is_durable()&&!store_faults);
-  busy_owner=0;assert(update(7)==0&&stored==7&&writes==1&&clears==1&&flight_state_cache_is_durable());
+  /* Applied and acknowledged; busy flash is retried, never a fault or a cache retirement. */
+  busy_owner=1;assert(update(7)==0&&flight_state_cache_value()==7&&writes==0&&clears==0&&!flight_state_cache_is_durable()&&!store_faults);
+  busy_owner=0;assert(update(7)==0&&stored==7&&writes==1&&clears==0&&flight_state_cache_is_durable());
   busy_owner=1;assert(board_recovery_apply_safe(0,1,&out)==-14&&out.abort_epoch==1&&out.actual_state==7&&writes==1&&!store_faults);
   busy_owner=0;assert(board_recovery_apply_safe(0,1,&out)==0&&out.abort_epoch==2&&out.actual_state==0&&flight_state_cache_is_durable());
  }else if(!strcmp(argv[1],"success")){
@@ -142,9 +143,11 @@ int main(int argc,char **argv){
   allow_update=1;assert(update(1)==0&&flight_state_cache_value()==1&&stored==1);
   assert(board_recovery_apply_safe(0,1,&out)!=0&&writes==w+1);
  }else if(!strcmp(argv[1],"ordinary_retry")){
-  fail_write=1;assert(update(0)==-9&&flight_state_cache_value()==0);
-  assert(persistent_store_init()==0);assert(update(0)==-9&&writes==2);fail_write=0;assert(persistent_store_init()==0);
-  assert(update(0)==0&&writes==3&&stored==0);assert(update(0)==0&&writes==3&&clears==2); /* Both failed persistence owners retire SDK cache; volatile apply/retry counts unchanged. */
+  /* An applied value is acknowledged; a pending write is retried and the SDK
+   * cache, which holds the applied value, is never retired for it. */
+  fail_write=1;assert(update(0)==0&&flight_state_cache_value()==0);
+  assert(persistent_store_init()==0);assert(update(0)==0&&writes==2);fail_write=0;assert(persistent_store_init()==0);
+  assert(update(0)==0&&writes==3&&stored==0);assert(update(0)==0&&writes==3&&clears==0);
  }else if(!strcmp(argv[1],"apply_failure")){
   fail_apply=1;assert(update(3)==-14&&flight_state_cache_value()==5&&stored==5&&writes==0&&clears==1&&callback);
   fail_apply=0;assert(update(3)==0&&flight_state_cache_value()==3&&stored==3&&writes==1&&clears==1);
@@ -168,7 +171,7 @@ class ResetOwnerTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         if cls.tmp is not None:cls.tmp.cleanup()
-    def test_busy_defers_without_fault_or_false_reset_and_same_observation_retries(self):self.run_case('busy')
+    def test_busy_is_acknowledged_without_fault_or_false_reset_and_retries(self):self.run_case('busy')
     def test_actual_owner_success_and_idempotency(self):self.run_case('success')
     def test_failed_write_preserves_applied_state_and_epoch(self):self.run_case('write_failure')
     def test_failed_readback_preserves_applied_state_and_epoch(self):self.run_case('read_failure')

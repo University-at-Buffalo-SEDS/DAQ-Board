@@ -62,7 +62,10 @@ static bool ota_stream_state_begin(uint8_t s){(void)s;++ota_open;return true;}
 static void ota_stream_state_end(void){--ota_open;}
 static SedsResult flight_state_cache_apply_network_update(const SedsPacketView*p){(void)p;++applies;return SEDS_OK;}
 static int32_t persist_state_nowait(uint8_t s,bool f){(void)s;(void)f;return 0;}
+static uint32_t g_last_refresh_ms;
+static uint32_t HAL_GetTick(void){return 0U;}
 /* SOURCE_FUNCTION:clear_managed_cache */
+/* SOURCE_FUNCTION:persist_pending */
 /* SOURCE_FUNCTION:persist_update */
 
 /* BOARD_RECOVERY_REQUEST: only the refusal paths are reachable here. */
