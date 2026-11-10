@@ -454,7 +454,7 @@ def clean_build(ui: UI, repo_root: Path, build_subdir: str | None = None) -> Non
     ui.say("ok", f"Reclaimed approximately {format_reclaimed(reclaimed)} ({reclaimed:,} allocated file bytes)")
 
 
-def configure_and_build(ui: UI, cfg: BuildConfig, target: str | None = None) -> tuple[Path, Path]:
+def configure(ui: UI, cfg: BuildConfig) -> None:
     cfg.build_dir.mkdir(parents=True, exist_ok=True)
 
     telemetry_flag = f"-DENABLE_TELEMETRY={'ON' if cfg.telemetry else 'OFF'}"
@@ -481,6 +481,17 @@ def configure_and_build(ui: UI, cfg: BuildConfig, target: str | None = None) -> 
         "-B", str(cfg.build_dir),
         "-G", cfg.generator,
     ], cwd=cfg.repo_root)
+
+
+def ensure_test_dependencies(ui: UI, cfg: BuildConfig) -> None:
+    """Native tests reuse LaunchCore from a configured build's FetchContent
+    cache; a fresh checkout has none, so configure once (no build)."""
+    if not any(cfg.repo_root.glob("build/*/_deps/sedslaunchcore-src/CMakeLists.txt")):
+        configure(ui, cfg)
+
+
+def configure_and_build(ui: UI, cfg: BuildConfig, target: str | None = None) -> tuple[Path, Path]:
+    configure(ui, cfg)
 
     build_cmd = ["cmake", "--build", str(cfg.build_dir)]
     if target:
@@ -983,7 +994,7 @@ def main() -> None:
         results: list[tuple[str, str]] = []
         _run_test_stage(
             ui, results, "Host and Python unit tests",
-            lambda: run_host_tests(ui, cfg.repo_root),
+            lambda: (ensure_test_dependencies(ui, cfg), run_host_tests(ui, cfg.repo_root)),
         )
         _run_test_stage(
             ui, results, "GoogleTest unit tests",

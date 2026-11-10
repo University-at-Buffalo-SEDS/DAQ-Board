@@ -25,6 +25,20 @@ class OtaBuildScriptTests(unittest.TestCase):
             with self.assertRaisesRegex(build.FriendlyError, "from 1 to 1000"):
                 build.build_cfg_from_args(mock.Mock(), args)
 
+    def test_fresh_checkout_test_run_configures_dependencies_once(self):
+        # Native tests take LaunchCore from a configured FetchContent cache.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cfg = mock.Mock(repo_root=root)
+            with mock.patch.object(build, "configure") as configure:
+                build.ensure_test_dependencies(mock.Mock(), cfg)
+                self.assertEqual(configure.call_count, 1)
+                cached = root / "build" / "Debug" / "_deps" / "sedslaunchcore-src"
+                cached.mkdir(parents=True)
+                (cached / "CMakeLists.txt").write_text("")
+                build.ensure_test_dependencies(mock.Mock(), cfg)
+                self.assertEqual(configure.call_count, 1)
+
     def test_clean_command_removes_all_or_selected_build_artifacts(self):
         self.assertEqual(build.make_parser().parse_args(["clean"]).cmd, "clean")
         ui = mock.Mock()

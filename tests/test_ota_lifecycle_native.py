@@ -2,10 +2,12 @@
 No physical flash, image verification, original-UTC or packed-transport claim.
 """
 from pathlib import Path
+import json
 import subprocess
 import tempfile
 import unittest
 ROOT=Path(__file__).resolve().parents[1]
+BOARD=json.loads((ROOT/'sim/board.json').read_text())['name']
 # The station clock in the authority slice reads the board tick; it stays
 # idle here (no GS time is observed), so freshness equals the network clock.
 STATION_TICK='#include <stdatomic.h>\ntypedef unsigned long ULONG;\n#define TX_TIMER_TICKS_PER_SECOND 1000\nstatic ULONG tx_time_get(void){return 0;}\n'
@@ -18,7 +20,8 @@ class OtaLifecycleTests(unittest.TestCase):
   with tempfile.TemporaryDirectory(prefix='ota-lifecycle-') as tmp:
    p=Path(tmp);a=p/'authority.c';a.write_text('#include "board_recovery_transport.h"\n#include "board_recovery_floor.h"\n#include "persistent_store.h"\n'+STATION_TICK+authority)
    cmd=['cc','-std=c11','-DTELEMETRY_ENABLED','-Wall','-Wextra','-Werror','-g','-fsanitize=address,undefined','-fno-omit-frame-pointer','-fno-pie','-no-pie']
-   if ROOT.name=='DAQ-Board':cmd+=['-DDATA4_DAQ']
+   # Select by the board layout, never the checkout directory name.
+   if BOARD=='DAQ-Board':cmd+=['-DDATA4_DAQ']
    cmd+=['-I'+str(fixture),'-I'+str(ROOT/'Core/Inc'),'-I'+str(ROOT/'Bootloader'),*[str(ROOT/'Core/Src'/n) for n in ['ota_stream.c','flight_state_cache.c','board_recovery_query.c']],str(a),str(fixture/'harness.c'),'-o',str(p/'test')]
    subprocess.run(cmd,check=True)
    for case in CASES:
