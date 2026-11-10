@@ -4,7 +4,8 @@ The SDK withholds the end-to-end ACK (and forgets the packet) when a receive
 callback fails, so the sender retransmits a deterministic refusal for its
 whole retry budget. The actual DAQ callbacks run under the real native SDK;
 refused packets must be ACKed, counted and never applied, while transient
-failures (busy writer, storage write) keep failing so the sender retries.
+failures (a busy SD writer) keep failing so the sender retries; an applied
+calibration whose storage write fails is acknowledged and retried from the poll.
 """
 from pathlib import Path
 import subprocess
@@ -20,6 +21,7 @@ SOURCES = [
     ('calibration_valid', 'Core/Src/daq_calibration.c'),
     ('daq_calibration_current', 'Core/Src/daq_calibration.c'),
     ('refuse_calibration', 'Core/Src/daq_calibration.c'),
+    ('persist_calibration', 'Core/Src/daq_calibration.c'),
     ('apply_calibration', 'Core/Src/daq_calibration.c'),
     ('read_u64', 'Core/Src/daq_log_clock.c'),
     ('clock_update', 'Core/Src/daq_log_clock.c'),

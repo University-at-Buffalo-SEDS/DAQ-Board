@@ -30,6 +30,9 @@ static bool g_kg50_network_value_seen;
 static bool g_thermal_network_value_seen;
 static bool g_filter_network_value_seen;
 static bool g_input_network_value_seen;
+/* Nonzero while the applied calibration is not durable. The 500 ms poll
+ * counts it 1, 2: the retry runs on every second tick (once per second). */
+static uint8_t g_calibration_persist_pending;
 static uint32_t g_last_refresh_ms;
 #endif
 
@@ -116,6 +119,21 @@ static SedsResult refuse_calibration(const SedsPacketView *packet, void *user)
   return SEDS_OK;
 }
 
+static void persist_calibration(void)
+{
+  if (!g_persist_ready) g_persist_ready = persistent_store_init() == LAUNCHCORE_PERSIST_OK;
+  const daq_calibration_t current = daq_calibration_current();
+  if (!g_persist_ready ||
+      persistent_store_set(DAQ_CALIBRATION_PERSIST_KEY, &current, sizeof(current)) !=
+          LAUNCHCORE_PERSIST_OK)
+  {
+    g_daq_calibration_errors++;
+    return;
+  }
+  g_calibration_persist_pending = 0U;
+  g_daq_calibration_persist_writes++;
+}
+
 static SedsResult apply_calibration(const SedsPacketView *packet, void *user)
 {
   const bool filter = packet != NULL && packet->ty == SEDS_DT_DAQ_FILTER_CALIBRATION;
@@ -131,20 +149,6 @@ static SedsResult apply_calibration(const SedsPacketView *packet, void *user)
          packet->payload, packet->payload_len);
   if (!calibration_valid(&next)) return refuse_calibration(packet, user);
   const bool changed = memcmp(&next, &g_calibration, sizeof(next)) != 0;
-  if (changed)
-  {
-    if (!g_persist_ready ||
-        persistent_store_set(DAQ_CALIBRATION_PERSIST_KEY, &next, sizeof(next)) !=
-            LAUNCHCORE_PERSIST_OK)
-    {
-      /* Transient: retire the cached observation so the identical retry
-       * runs this callback again instead of being accepted unpersisted. */
-      (void)seds_router_invalidate_network_variable_cache((SedsRouter *)user, packet->ty, NULL);
-      g_daq_calibration_errors++;
-      return SEDS_HANDLER_ERROR;
-    }
-    g_daq_calibration_persist_writes++;
-  }
   const uint32_t primask = __get_PRIMASK();
   __disable_irq();
   g_calibration = next;
@@ -155,6 +159,14 @@ static SedsResult apply_calibration(const SedsPacketView *packet, void *user)
   else g_network_value_seen = true;
   g_daq_calibration_updates++;
   if (changed) sd_card_set_calibration(&next);
+  if (changed || g_calibration_persist_pending)
+  {
+    /* Applied: acknowledge it whatever flash does. An error withholds the
+     * receipt and stalls the station's ordered calibration stream behind
+     * this write; durability is retried from the poll instead. */
+    g_calibration_persist_pending = 1U;
+    persist_calibration();
+  }
   return SEDS_OK;
 }
 
@@ -226,10 +238,18 @@ SedsResult daq_calibration_init(SedsRouter *router)
 SedsResult daq_calibration_poll(SedsRouter *router)
 {
   if (router == NULL) return SEDS_BAD_ARG;
-  if ((g_network_value_seen && g_kg50_network_value_seen && g_thermal_network_value_seen && g_filter_network_value_seen && g_input_network_value_seen) || g_telemetry_discovery_seen == 0U) return SEDS_OK;
+  const bool all_seen = g_network_value_seen && g_kg50_network_value_seen && g_thermal_network_value_seen &&
+                        g_filter_network_value_seen && g_input_network_value_seen;
+  if ((all_seen && !g_calibration_persist_pending) || g_telemetry_discovery_seen == 0U) return SEDS_OK;
   const uint32_t now = HAL_GetTick();
   if ((uint32_t)(now - g_last_refresh_ms) < DAQ_CALIBRATION_RETRY_MS) return SEDS_OK;
   g_last_refresh_ms = now;
+  if (g_calibration_persist_pending && ++g_calibration_persist_pending > 2U)
+  {
+    g_calibration_persist_pending = 1U;
+    persist_calibration();
+  }
+  if (all_seen) return SEDS_OK;
   SedsResult result = SEDS_OK;
   if (!g_network_value_seen)
     result = seds_router_request_managed_variable(router, SEDS_DT_DAQ_LOADCELL_CALIBRATION);

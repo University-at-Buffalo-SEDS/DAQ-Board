@@ -116,14 +116,14 @@ int main(void) {
   assert(requests[0]==1 && requests[1]==1);
   float kg50[7]={1,2,3,0,0,1,6};
   SedsPacketView packet={138,kg50,sizeof(kg50)};
-  /* Storage failure is transient: no ACK, and the cached observation is
-   * retired so the identical retry runs this callback again. */
+  /* A storage failure is applied and acknowledged and keeps its cached
+   * observation; only durability is retried (the identical retry here). */
   fail_persist=1; unsigned retired=invalidations;
-  assert(apply_calibration(&packet,&router)==SEDS_HANDLER_ERROR && invalidations==retired+1);
-  assert(g_calibration.kg50[1]==1 && !g_kg50_network_value_seen);
-  assert(sd_calibration.kg50[1]==1 && rotations==1);
+  assert(apply_calibration(&packet,&router)==SEDS_OK && invalidations==retired);
+  assert(g_calibration.kg50[1]==2 && g_kg50_network_value_seen);
+  assert(sd_calibration.kg50[1]==2 && rotations==2);
   fail_persist=0;
-  assert(apply_calibration(&packet,NULL)==SEDS_OK);
+  assert(apply_calibration(&packet,NULL)==SEDS_OK && rotations==2);
   assert(g_calibration.kg1000_slope==2 && g_calibration.iadc_slope==4);
   assert(g_calibration.kg50[2]==3 && sd_calibration.kg50[2]==3);
   assert(persisted_len==sizeof(daq_calibration_t));
@@ -138,8 +138,8 @@ int main(void) {
   assert(isnan(daq_calibration_temperature_raw(&g_calibration,1,12,126)));
   float tau[2]={100,200};
   packet=(SedsPacketView){142,tau,sizeof(tau)};
-  fail_persist=1; assert(apply_calibration(&packet,&router)==SEDS_HANDLER_ERROR);
-  assert(g_calibration.filter_tau_ms[0]==0 && !g_filter_network_value_seen);
+  fail_persist=1; assert(apply_calibration(&packet,&router)==SEDS_OK);
+  assert(g_calibration.filter_tau_ms[0]==100 && g_filter_network_value_seen);
   fail_persist=0; assert(apply_calibration(&packet,NULL)==SEDS_OK);
   assert(g_calibration.filter_tau_ms[0]==100 && g_filter_network_value_seen);
   unsigned refused=g_reliable_refusal_count;

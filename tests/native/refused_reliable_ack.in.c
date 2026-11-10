@@ -37,9 +37,12 @@ static bool g_persist_ready=true,g_network_value_seen,g_kg50_network_value_seen,
 static uint32_t g_daq_calibration_errors,g_daq_calibration_persist_writes,g_daq_calibration_updates;
 #define DAQ_CALIBRATION_PERSIST_KEY 1U
 static unsigned calibration_sets;static void sd_card_set_calibration(const daq_calibration_t*c){(void)c;++calibration_sets;}
+static uint8_t g_calibration_persist_pending;
+static int persistent_store_init(void){return LAUNCHCORE_PERSIST_OK;}
 /* SOURCE_FUNCTION:calibration_valid */
 /* SOURCE_FUNCTION:daq_calibration_current */
 /* SOURCE_FUNCTION:refuse_calibration */
+/* SOURCE_FUNCTION:persist_calibration */
 /* SOURCE_FUNCTION:apply_calibration */
 
 /* Launch log clock network variable. */
@@ -124,11 +127,11 @@ int main(int argc,char**argv){
   assert(g_calibration.filter_tau_ms[0]==0.0f&&calibration_sets==0&&g_reliable_refusal_count==1);
   assert(seds_router_cached_managed_variable_packed_len(r,SEDS_DT_DAQ_FILTER_CALIBRATION)==0);
   assert(deliver(r,sid,SEDS_DT_DAQ_FILTER_CALIBRATION,SEDS_EP_SD_CARD,"GS",good,sizeof good,&acked)==SEDS_OK&&acked==1&&g_calibration.filter_tau_ms[0]==5.0f);
-  /* A failed storage write is transient: no ACK and the observation is
-   * retired, so the identical retry runs the callback again. */
-  fail_persist=1;assert(deliver(r,sid,SEDS_DT_DAQ_FILTER_CALIBRATION,SEDS_EP_SD_CARD,"GS",other,sizeof other,&acked)!=SEDS_OK&&acked==0&&g_calibration.filter_tau_ms[0]==5.0f);
-  assert(seds_router_cached_managed_variable_packed_len(r,SEDS_DT_DAQ_FILTER_CALIBRATION)==0);
-  puts("PASS refused calibration is acknowledged, not applied and not cached; storage failure keeps its retry");
+  /* A failed storage write is applied and acknowledged; only durability is
+   * retried (from the poll), so the station's ordered stream never stalls. */
+  fail_persist=1;assert(deliver(r,sid,SEDS_DT_DAQ_FILTER_CALIBRATION,SEDS_EP_SD_CARD,"GS",other,sizeof other,&acked)==SEDS_OK&&acked==1&&g_calibration.filter_tau_ms[0]==7.0f&&g_calibration_persist_pending);
+  assert(seds_router_cached_managed_variable_packed_len(r,SEDS_DT_DAQ_FILTER_CALIBRATION)!=0);
+  puts("PASS refused calibration is acknowledged, not applied and not cached; a storage failure is acknowledged and stays pending");
  }else if(!strcmp(mode,"clock")){
   r=router(NULL,0,&sid);
   assert(seds_router_enable_network_variable(r,SEDS_DT_DAQ_LOG_CLOCK,true,false)==SEDS_OK);
