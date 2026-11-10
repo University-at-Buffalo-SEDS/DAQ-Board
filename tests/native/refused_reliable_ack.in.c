@@ -56,6 +56,8 @@ static unsigned clock_sets;static void sd_card_set_launch_clock(uint64_t s,uint6
 
 /* FLIGHT_STATE managed variable. */
 #define FLIGHT_STATE_MAX_VALUE 15U
+#define FLIGHT_STATE_ABORTED 15U
+static SedsResult board_recovery_push_abort_status(SedsRouter*r){(void)r;return SEDS_OK;}
 static volatile uint32_t g_flight_state_cache_value,g_flight_state_cache_writes,g_flight_state_cache_updates,g_flight_state_cache_errors;
 static bool g_has_value,g_persist_pending;static uint8_t g_persisted_state=UINT8_MAX;
 static SedsRouter*g_cache_router;
@@ -81,7 +83,8 @@ bool board_commissioning_pending(void){abort();}
 bool board_commissioning_note_query(const BoardRecoveryRequest*r,uint64_t a,uint64_t b,uint32_t c){(void)r;(void)a;(void)b;(void)c;abort();}
 int32_t board_commissioning_stage(const BoardRecoveryRequest*r,uint64_t a,uint64_t b,uint32_t c,void*x,CommissionReply y,CommissionClock z){(void)r;(void)a;(void)b;(void)c;(void)x;(void)y;(void)z;abort();}
 static void board_recovery_observe_station_time(SedsRouter*r,const SedsPacketView*p){(void)r;(void)p;abort();}
-static SedsResult commissioning_status(SedsRouter*r,uint8_t x,const BoardRecoveryRequest*q,uint32_t u){(void)r;(void)x;(void)q;(void)u;abort();}
+static SedsResult commissioning_status(SedsRouter*r,uint8_t x,const BoardRecoveryRequest*q,uint32_t u,uint8_t f){(void)r;(void)x;(void)q;(void)u;(void)f;abort();}
+static uint64_t last_query_issuer;
 static uint64_t commissioning_now(void*c){(void)c;abort();}
 static bool commissioning_reply(void*c,const BoardRecoveryRequest*q,uint8_t x){(void)c;(void)q;(void)x;abort();}
 /* SOURCE_FUNCTION:authorized_primary */

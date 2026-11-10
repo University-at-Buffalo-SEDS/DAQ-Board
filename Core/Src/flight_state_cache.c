@@ -15,6 +15,7 @@ extern volatile uint32_t g_telemetry_discovery_seen;
 
 #define FLIGHT_STATE_PERSIST_KEY 0x46535445u
 #define FLIGHT_STATE_MAX_VALUE 15U
+#define FLIGHT_STATE_ABORTED 15U
 #define FLIGHT_STATE_UNSYNCED_RETRY_MS 500U
 #define FLIGHT_STATE_PERSIST_RETRY_MS 1000U
 
@@ -51,6 +52,13 @@ __attribute__((weak)) SedsResult
 flight_state_cache_apply_network_update(const SedsPacketView *packet)
 {
     (void)packet;
+    return SEDS_OK;
+}
+/* board_recovery_transport.c owns the definition. */
+__attribute__((weak)) SedsResult
+board_recovery_push_abort_status(SedsRouter *router)
+{
+    (void)router;
     return SEDS_OK;
 }
 
@@ -209,6 +217,9 @@ static SedsResult persist_update(const SedsPacketView *packet, void *user)
         return SEDS_OK;
     }
     const uint8_t state = packet->payload[0];
+    /* An applied change to Aborted pushes one status to the station. */
+    const bool aborting = state == FLIGHT_STATE_ABORTED &&
+        !(g_has_value && g_flight_state_cache_value == FLIGHT_STATE_ABORTED);
     /* Taking the OTA owner applies its inhibition even when busy; busy only
      * means flash is not ours now, so durability waits for the poll. */
     const bool owner = ota_stream_state_begin(state);
@@ -226,6 +237,7 @@ static SedsResult persist_update(const SedsPacketView *packet, void *user)
     if (changed) g_persist_pending = true;
     __set_PRIMASK(mask);
     g_flight_state_cache_updates++;
+    if (aborting) (void)board_recovery_push_abort_status(g_cache_router);
     if (changed) {
         /* Applied: acknowledge it whatever flash does. An error withholds
          * the receipt and stalls the station's ordered FLIGHT_STATE stream
