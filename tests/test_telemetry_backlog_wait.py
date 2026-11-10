@@ -7,6 +7,7 @@ class BacklogWaitTests(unittest.TestCase):
         source=(ROOT/'Core/Src/telemetry_thread.c').read_text()
         helper=source[source.index('static uint8_t immediate_work_passes;'):source.index('void telemetry_thread_entry(')]
         harness=r'''#include <stdint.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <assert.h>
 typedef unsigned long ULONG;
@@ -22,14 +23,17 @@ int main(void){
  for(unsigned hz=1000;hz<=50000;hz+=49000){
   expected_ticks=(hz+999U)/1000U;immediate_work_passes=0;yields=sleeps=0;
   pending=1;
-  for(unsigned i=0;i<10;++i)wait_for_telemetry_work(expected_ticks);
+  for(unsigned i=0;i<10;++i)wait_for_telemetry_work(expected_ticks,false);
   assert(yields==8 && sleeps==2 && immediate_work_passes==0);
-  wait_for_telemetry_work(expected_ticks);assert(immediate_work_passes==1);
-  pending=0;wait_for_telemetry_work(expected_ticks);
+  wait_for_telemetry_work(expected_ticks,false);assert(immediate_work_passes==1);
+  pending=0;wait_for_telemetry_work(expected_ticks,false);
   assert(sleeps==3 && immediate_work_passes==0);
-  pending=-10;wait_for_telemetry_work(expected_ticks);assert(sleeps==4);
-  pending=1;g_router.r=NULL;wait_for_telemetry_work(expected_ticks);
+  pending=-10;wait_for_telemetry_work(expected_ticks,false);assert(sleeps==4);
+  pending=1;g_router.r=NULL;wait_for_telemetry_work(expected_ticks,false);
   assert(sleeps==5 && yields==9);g_router.r=(void *)1;
+  /* Work the CAN queue refused this pass sleeps rather than spinning. */
+  immediate_work_passes=0;wait_for_telemetry_work(expected_ticks,true);
+  assert(sleeps==6 && yields==9);
  }
  return 0;
 }'''

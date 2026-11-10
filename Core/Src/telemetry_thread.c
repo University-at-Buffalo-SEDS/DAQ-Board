@@ -1,4 +1,5 @@
 #include "board_watchdog.h"
+#include <stdbool.h>
 // telemetry_thread.c
 #include "DAQ-Threads.h"
 #include "daq_rates.h"
@@ -99,9 +100,18 @@ extern UART_HandleTypeDef huart1;
  * exceed that cap. Keep draining a bounded burst, yielding to equal-priority
  * SD/report workers each time; acquisition remains higher priority. */
 static uint8_t immediate_work_passes;
-static void wait_for_telemetry_work(ULONG poll_ticks)
+#ifdef TELEMETRY_CAN_BUS
+extern volatile uint32_t g_can_tx_rejected;
+#define CAN_TX_REFUSALS() g_can_tx_rejected
+#else
+#define CAN_TX_REFUSALS() 0U
+#endif
+/* Queued SDK work that the CAN TX queue just refused cannot move until the
+ * bus drains; spinning on it starves the lower-priority SD writer, so the
+ * local record would be lost exactly when the network link is down. */
+static void wait_for_telemetry_work(ULONG poll_ticks, bool can_refused)
 {
-    if(g_router.r != NULL && seds_router_has_queued_work(g_router.r)>0 &&
+    if(!can_refused && g_router.r != NULL && seds_router_has_queued_work(g_router.r)>0 &&
        immediate_work_passes<4U){
         ++immediate_work_passes;
         tx_thread_relinquish();
@@ -130,6 +140,7 @@ void telemetry_thread_entry(ULONG initial_input)
 
     for (;;)
     {
+        const uint32_t can_rejected = CAN_TX_REFUSALS();
         board_watchdog_progress(BOARD_WATCHDOG_NETWORK);
 #ifdef TELEMETRY_BOARD_LINK_UART
         board_link_uart_process();
@@ -159,7 +170,7 @@ void telemetry_thread_entry(ULONG initial_input)
             last_stack_sample = now;
         }
 
-        wait_for_telemetry_work(poll_ticks);
+        wait_for_telemetry_work(poll_ticks, CAN_TX_REFUSALS() != can_rejected);
     }
 }
 
