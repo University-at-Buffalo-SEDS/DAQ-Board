@@ -18,6 +18,17 @@ layout.
 ./build.py test --all --release --ultra-soak
 ```
 
+A factory flash (the default `--image factory`) also erases the board's
+LaunchCore persistent store, so records from an older flash layout cannot
+survive into the new image and block the store. It wipes the cached flight
+state, boot identity, recovery floor, commissioning record, load-cell
+calibration and KG50 input setting. With `stm32prog-cli` and `st-flash` (1.8.0
+or newer) only the store pages are erased. `dfu` cannot erase a page range, so
+it mass-erases the whole chip (including the OTA delta region) before writing
+the factory image. `st-util` and `stlink-gdbserver` cannot erase and refuse
+unless you pass `--keep-persist`. Pass `--keep-persist` to keep the store, or
+`--erase-persist` to erase it with an app-only flash.
+
 On Docker hosts that cannot create bridge interfaces (including the Jupiter
 validation host), prefix the command with
 `SEDS_FIRMWARE_SIM_DOCKER_NETWORK=host`. The linked test requires GroundStation
