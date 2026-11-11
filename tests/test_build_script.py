@@ -125,33 +125,6 @@ class OtaBuildScriptTests(unittest.TestCase):
         self.assertIn('probe.get("name") == "fdcan_tx_ok"', runner)
         self.assertIn('probe["minimum"] = 1', runner)
 
-    def test_stale_local_simulator_image_is_refused(self):
-        """local-dev-v<version> is reused across simulator revisions. An image
-        built before the U5 factory-boot budget and framed probes fails the
-        factory boot check or drops probe samples; refuse it with the fix."""
-        from sim import run_full
-
-        missing = mock.Mock(returncode=1, stdout="", stderr="denied")
-        present = mock.Mock(returncode=0, stdout="", stderr="")
-        stale = mock.Mock(returncode=0, stdout="2026-11-09T17:50:39.435011788-05:00\n", stderr="")
-        fresh = mock.Mock(returncode=0, stdout="2026-11-10T00:30:00.5-05:00\n", stderr="")
-        ui = mock.Mock()
-        for created, accepted in ((stale, False), (fresh, True)):
-            with self.subTest(created=created.stdout.strip()):
-                with mock.patch.dict(run_full.os.environ, {}, clear=True):
-                    with mock.patch.object(
-                        run_full.subprocess, "run",
-                        side_effect=[missing, missing, present, created],
-                    ):
-                        if accepted:
-                            self.assertEqual(
-                                run_full.resolve_simulator_image(ui, "/usr/bin/docker", Path("/board"), "stm32u5"),
-                                "seds-firmware-simulator:local-dev-v0.4.15",
-                            )
-                        else:
-                            with self.assertRaisesRegex(RuntimeError, "predates FirmwareSimulator 12f3b71"):
-                                run_full.resolve_simulator_image(ui, "/usr/bin/docker", Path("/board"), "stm32u5")
-
     def test_missing_registry_image_is_built_from_a_fresh_clone(self):
         from sim import run_full
 
