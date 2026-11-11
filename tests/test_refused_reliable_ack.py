@@ -26,6 +26,7 @@ SOURCES = [
     ('read_u64', 'Core/Src/daq_log_clock.c'),
     ('clock_update', 'Core/Src/daq_log_clock.c'),
     ('clear_managed_cache', 'Core/Src/flight_state_cache.c'),
+    ('flight_state_cache_from_wire', 'Core/Src/flight_state_cache.c'),
     ('persist_pending', 'Core/Src/flight_state_cache.c'),
     ('persist_update', 'Core/Src/flight_state_cache.c'),
     ('authorized_primary', 'Core/Src/board_recovery_transport.c'),
@@ -56,6 +57,10 @@ class RefusedReliableAckTests(unittest.TestCase):
             marker = '/* SOURCE_FUNCTION:' + name + ' */'
             assert code.count(marker) == 1, marker
             code = code.replace(marker, definition((ROOT / file).read_text(), name))
+        # The contract (a) mapping block, exactly as the cache header has it.
+        header = (ROOT / 'Core/Inc/flight_state_cache.h').read_text()
+        begin, end = '/* FLIGHT_STATE contract (a): begin */', '/* FLIGHT_STATE contract (a): end */'
+        code = code.replace('/* SOURCE_CONTRACT */', header[header.index(begin):header.index(end) + len(end)])
         source = path / 'refused.c'
         source.write_text(code)
         cls.exe = path / 'refused'
@@ -89,6 +94,12 @@ class RefusedReliableAckTests(unittest.TestCase):
 
     def test_refused_flight_state_is_acknowledged_and_not_cached(self):
         self.run_case('fstate')
+
+    def test_in_flight_state_is_applied_and_out_of_set_refused(self):
+        self.run_case('fstate_in_flight')
+
+    def test_retired_flight_state_is_mapped_and_logged_once(self):
+        self.run_case('fstate_retired')
 
     def test_refused_recovery_request_is_acknowledged(self):
         self.run_case('recovery')

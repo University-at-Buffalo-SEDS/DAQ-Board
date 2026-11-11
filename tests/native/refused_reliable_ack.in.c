@@ -66,10 +66,14 @@ static uint8_t board_recovery_managed_update_allowed(const SedsPacketView*p){(vo
 static bool ota_stream_state_begin(uint8_t s){(void)s;++ota_open;return true;}
 static void ota_stream_state_end(void){--ota_open;}
 static SedsResult flight_state_cache_apply_network_update(const SedsPacketView*p){(void)p;++applies;return SEDS_OK;}
+static uint8_t flight_state_cache_from_wire(uint8_t raw);
 static int32_t persist_state_nowait(uint8_t s,bool f){(void)s;(void)f;return 0;}
 static uint32_t g_last_refresh_ms;
 static uint32_t HAL_GetTick(void){return 0U;}
 /* SOURCE_FUNCTION:clear_managed_cache */
+/* SOURCE_CONTRACT */
+static volatile uint32_t g_flight_state_contract_violations,g_flight_state_contract_logged,g_flight_state_contract_first_raw;
+/* SOURCE_FUNCTION:flight_state_cache_from_wire */
 /* SOURCE_FUNCTION:persist_pending */
 /* SOURCE_FUNCTION:persist_update */
 
@@ -149,15 +153,35 @@ int main(int argc,char**argv){
   r=router(NULL,0,&sid);g_cache_router=r;
   assert(seds_router_enable_network_variable(r,SEDS_DT_FLIGHT_STATE,true,false)==SEDS_OK);
   assert(seds_router_on_network_variable_update(r,SEDS_DT_FLIGHT_STATE,persist_update,NULL)==SEDS_OK);
-  uint8_t state=3,bad=99;
+  uint8_t state=2,bad=99;
   /* Not allowed now (stale, unready or not the station): acknowledged only. */
   assert(deliver(r,sid,SEDS_DT_FLIGHT_STATE,SEDS_EP_FLIGHT_STATE,"GS",&state,1,&acked)==SEDS_OK&&acked==1);
   assert(applies==0&&g_flight_state_cache_value==0&&!g_has_value&&ota_open==0&&g_reliable_refusal_count==1);
   assert(seds_router_cached_managed_variable_packed_len(r,SEDS_DT_FLIGHT_STATE)==0);
   managed_allowed=1;
   assert(deliver(r,sid,SEDS_DT_FLIGHT_STATE,SEDS_EP_FLIGHT_STATE,"GS",&bad,1,&acked)==SEDS_OK&&acked==1&&applies==0&&g_reliable_refusal_count==2);
-  assert(deliver(r,sid,SEDS_DT_FLIGHT_STATE,SEDS_EP_FLIGHT_STATE,"GS",&state,1,&acked)==SEDS_OK&&acked==1&&applies==1&&g_flight_state_cache_value==3);
+  assert(deliver(r,sid,SEDS_DT_FLIGHT_STATE,SEDS_EP_FLIGHT_STATE,"GS",&state,1,&acked)==SEDS_OK&&acked==1&&applies==1&&g_flight_state_cache_value==2);
   puts("PASS refused FLIGHT_STATE is acknowledged, not applied and not cached");
+ }else if(!strcmp(mode,"fstate_in_flight")||!strcmp(mode,"fstate_retired")){
+  r=router(NULL,0,&sid);g_cache_router=r;managed_allowed=1;
+  assert(seds_router_enable_network_variable(r,SEDS_DT_FLIGHT_STATE,true,false)==SEDS_OK);
+  assert(seds_router_on_network_variable_update(r,SEDS_DT_FLIGHT_STATE,persist_update,NULL)==SEDS_OK);
+  if(!strcmp(mode,"fstate_in_flight")){
+   /* InFlight (16) is in contract set (a): applied and acknowledged. */
+   uint8_t s=16;assert(deliver(r,sid,SEDS_DT_FLIGHT_STATE,SEDS_EP_FLIGHT_STATE,"GS",&s,1,&acked)==SEDS_OK&&acked==1&&applies==1&&g_flight_state_cache_value==16);
+   /* Above InFlight is not a FLIGHT_STATE: acknowledged, never applied. */
+   s=17;assert(deliver(r,sid,SEDS_DT_FLIGHT_STATE,SEDS_EP_FLIGHT_STATE,"GS",&s,1,&acked)==SEDS_OK&&acked==1&&applies==1&&g_flight_state_cache_value==16);
+   assert(g_flight_state_contract_violations==0);
+   puts("PASS InFlight FLIGHT_STATE applied; 17 acknowledged, not applied");
+  }else{
+   /* Older firmware: mapped, logged once and acknowledged, never refused into a retransmit loop. */
+   const uint8_t raw[]={4U,9U,14U,3U},mapped[]={2U,16U,13U,2U};
+   for(unsigned i=0;i<sizeof raw;i++){
+    assert(deliver(r,sid,SEDS_DT_FLIGHT_STATE,SEDS_EP_FLIGHT_STATE,"GS",&raw[i],1,&acked)==SEDS_OK&&acked==1&&applies==i+1U&&g_flight_state_cache_value==mapped[i]);
+    assert(g_flight_state_contract_violations==i+1U&&g_flight_state_contract_logged==1U&&g_flight_state_contract_first_raw==4U);
+   }
+   puts("PASS retired FLIGHT_STATE mapped, logged once and acknowledged");
+  }
  }else if(!strcmp(mode,"recovery")){
   SedsLocalEndpointDesc l={.endpoint=SEDS_EP_BOARD_RECOVERY,.packet_handler=recovery_handler};r=router(&l,1,&sid);
   uint8_t body[32]={1};uint8_t bad[32]={9};

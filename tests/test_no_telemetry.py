@@ -113,7 +113,7 @@ void persistent_store_note_failure(void){assert(0);}
 launchcore_persist_status_t persistent_store_init(void) { ++inits; return LAUNCHCORE_PERSIST_OK; }
 launchcore_persist_status_t persistent_store_get(uint32_t key, void *value, size_t *size) { assert(key==0x46535445u && *size==1); ++reads; *(uint8_t*)value=3; return LAUNCHCORE_PERSIST_OK; }
 launchcore_persist_status_t persistent_store_set(uint32_t key,const void *value,size_t size) { (void)key;(void)value;(void)size;assert(0);return LAUNCHCORE_PERSIST_STORAGE_ERROR; }
-int main(void) { flight_state_cache_restore();flight_state_cache_restore();assert(inits==1&&reads==1);assert(flight_state_cache_has_value());assert(flight_state_cache_value()==3);return 0; }
+int main(void) { flight_state_cache_restore();flight_state_cache_restore();assert(inits==1&&reads==1);assert(flight_state_cache_has_value());assert(flight_state_cache_value()==2) /* retired FillTest restores as Fill */;return 0; }
 ''')
             command = ['cc','-std=c11','-Wall','-Wextra','-Werror','-Wno-unknown-attributes',
                        '-I'+str(work),'-I'+str(ROOT/'Core/Inc'),str(ROOT/'Core/Src/flight_state_cache.c'),

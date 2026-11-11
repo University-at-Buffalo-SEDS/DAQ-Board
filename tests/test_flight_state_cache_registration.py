@@ -57,7 +57,7 @@ volatile uint32_t g_telemetry_discovery_seen;
 volatile uint32_t g_reliable_refusal_count;
 static unsigned writes,invalidations,enables,registrations;
 static int fail_enable,fail_callback;
-static uint8_t stored=5;
+static uint8_t stored=6;
 static uint32_t irq_mask;
 uint32_t __get_PRIMASK(void){return irq_mask;}
 void __disable_irq(void){irq_mask=1;}
@@ -84,10 +84,10 @@ int main(int argc,char**argv){
  fail_enable=!strcmp(argv[1],"enable_failure");fail_callback=!strcmp(argv[1],"callback_failure");
  if(fail_enable||fail_callback){
   assert(flight_state_cache_init(&router)==SEDS_HANDLER_ERROR&&g_cache_router==NULL);
-  assert(writes==0&&invalidations==0&&flight_state_cache_value()==5);
+  assert(writes==0&&invalidations==0&&flight_state_cache_value()==6);
   assert(clear_managed_cache()==SEDS_BAD_ARG);
   assert(flight_state_cache_reset_startup()==-9&&writes==1&&stored==0&&invalidations==0);
-  assert(flight_state_cache_value()==5); /* No falsely confirmed volatile Startup. */
+  assert(flight_state_cache_value()==6); /* No falsely confirmed volatile Startup. */
   fail_enable=fail_callback=0;
  }
  assert(flight_state_cache_init(&router)==SEDS_OK&&g_cache_router==&router);

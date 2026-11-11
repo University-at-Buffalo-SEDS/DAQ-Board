@@ -64,8 +64,10 @@ static inline uint16_t sd_file_get_u16(const uint8_t *p) { return (uint16_t)(p[0
 static inline uint32_t sd_file_get_u32(const uint8_t *p)
 { return (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24); }
 
-/* Downloads are permitted only in Idle (1), Landed (13) and Recovery (14).
- * Startup, every Fill phase, Armed, Launch, flight and Aborted are refused. */
+/* Downloads are permitted only in Idle (1) and Landed (13). A retired
+ * Recovery (14) is mapped to Landed on receipt; accepting it here too keeps a
+ * value restored from older firmware readable. Startup, Fill, Armed, Launch,
+ * InFlight and Aborted are refused. */
 static inline bool sd_file_state_allowed(bool has_value, uint8_t flight_state)
 {
     return has_value && (flight_state == 1U || flight_state == 13U || flight_state == 14U);

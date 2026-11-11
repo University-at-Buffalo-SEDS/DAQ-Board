@@ -30,7 +30,7 @@ PRELUDE = RESET_HARNESS[:RESET_HARNESS.index("int main(int argc,char **argv){")]
 
 CASES = r'''
 static int ota_busy,ota_owned;
-bool ota_stream_state_begin(uint8_t phase){assert(phase<=15U&&!ota_owned);if(ota_busy)return false;ota_owned=1;return true;}
+bool ota_stream_state_begin(uint8_t phase){assert(phase<=16U&&!ota_owned);if(ota_busy)return false;ota_owned=1;return true;}
 void ota_stream_state_end(void){assert(ota_owned);ota_owned=0;}
 extern volatile uint32_t g_flight_state_cache_errors;
 static SedsRouter poll_router=1;
@@ -38,7 +38,7 @@ static void poll_at(unsigned at){tick=at;assert(flight_state_cache_poll(&poll_ro
 static SedsResult apply(uint8_t s){SedsResult r=update(s);assert(!ota_owned&&!owner);return r;}
 int main(int argc,char **argv){
  assert(argc==2);SedsRouter router=0;
- assert(flight_state_cache_init(&router)==0&&flight_state_cache_value()==5);
+ assert(flight_state_cache_init(&router)==0&&flight_state_cache_value()==6);
  tick=10000;
  if(!strcmp(argv[1],"write_failure")){
   fail_write=1;
@@ -65,9 +65,9 @@ int main(int argc,char **argv){
  }else if(!strcmp(argv[1],"ota_busy")){
   ota_busy=1;
   /* OTA owns flash: still applied and acknowledged, never written now. */
-  assert(apply(3)==SEDS_OK&&flight_state_cache_value()==3&&writes==0);
+  assert(apply(13)==SEDS_OK&&flight_state_cache_value()==13&&writes==0);
   poll_at(11000);assert(writes==0);
-  ota_busy=0;poll_at(12000);assert(writes==1&&stored==3&&flight_state_cache_is_durable());
+  ota_busy=0;poll_at(12000);assert(writes==1&&stored==13&&flight_state_cache_is_durable());
  }else if(!strcmp(argv[1],"newer_value")){
   busy_owner=1;assert(apply(1)==SEDS_OK&&apply(2)==SEDS_OK&&writes==0);
   busy_owner=0;poll_at(11000);assert(writes==1&&stored==2);
