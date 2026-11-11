@@ -1,4 +1,5 @@
 #include "sd_storage_io.h"
+#include "sd_profile.h"
 #include "fx_api.h"
 #include "main.h"
 #include <stddef.h>
@@ -105,8 +106,11 @@ static UINT sd_io_ready(void)
     if ((uint32_t)(HAL_GetTick() - started) >= SD_IO_TIMEOUT_MS) {
       ++g_sd_dma_timeouts; return FX_IO_ERROR;
     }
-    /* At least one millisecond at either1kHz or50kHz ThreadX tick rates. */
+    /* At least one millisecond at either1kHz or50kHz ThreadX tick rates.
+     * Card busy time is therefore observed in whole-tick steps. */
+    SD_PROF_BEGIN(slept);
     tx_thread_sleep(sd_io_ticks(1U));
+    SD_PROF_END(ready_sleep_cycles, slept); SD_PROF_COUNT(ready_sleeps, 1U);
   } while (1);
 }
 

@@ -31,6 +31,10 @@ message("Build type: " ${CMAKE_BUILD_TYPE})
 
 # Enable CMake support for ASM and C languages
 enable_language(C ASM)
+option(DAQ_SD_PROFILE "Bench only: DWT cycle profile of the SD writer (g_sd_profile)" OFF)
+if(DAQ_SD_PROFILE)
+    add_compile_definitions(DAQ_SD_PROFILE=1)
+endif()
 option(SEDS_FIRMWARE_SIM_TEST "Enable simulator-only network observability" OFF)
 if(SEDS_FIRMWARE_SIM_TEST)
     add_compile_definitions(SEDS_FIRMWARE_SIM_TEST=1)

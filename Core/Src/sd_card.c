@@ -24,6 +24,47 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "sd_profile.h"
+#if defined(DAQ_SD_PROFILE) && DAQ_SD_PROFILE
+/* Bench build only: time the writer's encode, FileX and media calls in place. */
+volatile sd_profile_t g_sd_profile;
+static inline int sd_prof_format_raw(char *dst, size_t capacity, uint64_t network_ms, uint64_t uptime,
+    const char *sensor, int32_t raw_code, float raw_value, float calibrated_value, float temperature,
+    int32_t temperature_code, uint64_t sequence, sd_raw_format_cache_t *cache)
+{
+  SD_PROF_BEGIN(t);
+  const int length = sd_format_csv_raw_record(dst, capacity, network_ms, uptime, sensor, raw_code,
+      raw_value, calibrated_value, temperature, temperature_code, sequence, cache);
+  SD_PROF_END(encode_cycles, t); SD_PROF_COUNT(records, 1U);
+  return length;
+}
+static inline UINT sd_prof_file_write(FX_FILE *file, VOID *buffer, ULONG size)
+{
+  SD_PROF_BEGIN(t);
+  const UINT status = fx_file_write(file, buffer, size);
+  SD_PROF_END(file_write_cycles, t); SD_PROF_COUNT(file_writes, 1U);
+  return status;
+}
+static inline UINT sd_prof_io_write(const UCHAR *buffer, ULONG sector, ULONG count)
+{
+  SD_PROF_BEGIN(t);
+  const UINT status = sd_storage_io_write(buffer, sector, count);
+  SD_PROF_END(io_cycles, t); SD_PROF_COUNT(io_writes, 1U); SD_PROF_COUNT(io_sectors_written, count);
+  return status;
+}
+static inline UINT sd_prof_io_read(UCHAR *buffer, ULONG sector, ULONG count)
+{
+  SD_PROF_BEGIN(t);
+  const UINT status = sd_storage_io_read(buffer, sector, count);
+  SD_PROF_END(io_cycles, t); SD_PROF_COUNT(io_reads, 1U);
+  return status;
+}
+#define sd_format_csv_raw_record sd_prof_format_raw
+#undef fx_file_write
+#define fx_file_write sd_prof_file_write
+#define sd_storage_io_write sd_prof_io_write
+#define sd_storage_io_read sd_prof_io_read
+#endif
 
 extern SD_HandleTypeDef hsd1;
 UINT _fx_partition_offset_calculate(void *partition_sector, UINT partition,
@@ -1890,6 +1931,7 @@ void sd_card_writer_thread_entry(ULONG initial_input)
         ((tx_time_get() - last_flush) >= TX_TIMER_TICKS_PER_SECOND))
     {
       const uint32_t flush_start_ms = HAL_GetTick();
+      SD_PROF_BEGIN(sync_started);
       sd_update_filesystem_clock();
       if ((sd_log_flush(&g_sd_regular_log) == FX_SUCCESS) &&
           (sd_log_flush(&g_sd_launch_log) == FX_SUCCESS) &&
@@ -1905,6 +1947,7 @@ void sd_card_writer_thread_entry(ULONG initial_input)
         g_sd_write_error_count++;
       }
       last_flush = tx_time_get();
+      SD_PROF_END(sync_cycles, sync_started); SD_PROF_COUNT(syncs, 1U);
       const uint32_t flush_ms = HAL_GetTick() - flush_start_ms;
       if (flush_ms > g_sd_max_flush_ms) g_sd_max_flush_ms = flush_ms;
     }
@@ -1959,6 +2002,7 @@ UINT sd_card_init(TX_BYTE_POOL *byte_pool)
     return TX_GROUP_ERROR;
   }
 
+  sd_profile_start();
   fx_system_initialize();
   /* Unknown time is explicitly the FAT epoch, never FileX's 2017 default. */
   (void)fx_system_date_set(1980U, 1U, 1U);

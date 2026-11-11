@@ -166,3 +166,45 @@ Run the test with:
 ```sh
 python3 -m unittest tests.test_sd_throughput -v
 ```
+
+## DWT bench procedure (hardware, for the bench operator)
+
+1. Configure and build a profile image, using at most four jobs:
+
+   ```sh
+   ./build.py build --release --build-subdir Profile_Script
+   cmake -S . -B build/Profile_Script -DDAQ_SD_PROFILE=ON
+   cmake --build build/Profile_Script -j4
+   ```
+
+   Build the same image from the commit before this change as well, for
+   comparison.
+2. Flash it the usual way and run the bench load: 2410 records/s offered, plus
+   the usual network rows.
+3. Wait at least 30 s. Then read `g_sd_profile` twice over SWD, 10 s apart, for
+   example with `p g_sd_profile` in arm-none-eabi-gdb against the profile ELF.
+   At the same moments, read the BOARD_HEALTH and SD diagnostics:
+   - raw enqueued, written, dropped and flushed;
+   - `sd_write_errors`;
+   - `sd_max_write_ms`.
+
+   With the debugger, also read `g_sd_dma_max_wait_ms`, `g_sd_max_flush_ms`
+   and `g_sd_raw_slots_peak`.
+4. Compute each value from the deltas over the 10 s, with clock = 160e6:
+
+   | Measure | Formula | Expected |
+   |---|---|---|
+   | Encode cycles per record | `encode_cycles / records` | about 4-6k |
+   | Card-wait share of wall time | `io_cycles / (clock x 10 s)` | former writer close to 1 means SD-bound |
+   | Encode share of wall time | `encode_cycles / (clock x 10 s)` | under 0.15 |
+   | ms per command | `io_cycles / (io_writes + io_reads) / 160e3` | compare with the 6 ms model fit |
+   | Sectors per write | `io_sectors_written / io_writes` | former about 4; new 20 or more |
+   | Busy-poll tick rounding | `ready_sleeps` per command, and `ready_sleep_cycles / ready_sleeps` | about 160k cycles = 1 ms; whole-tick waits per command show how much latency is tick rounding |
+   | Sync cost | `sync_cycles / syncs` | |
+
+5. Read the result:
+   - **SD-bound:** I/O share is high and encode share is low.
+   - **CPU-starved by other threads:** neither I/O nor encode accounts for the
+     wall time.
+   - **Fix confirmed:** with the new image, rejected = 0, accepted = offered,
+     and accepted minus processed returns near 0 after each card stall.
