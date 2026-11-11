@@ -9,11 +9,21 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 
 SIMULATOR_REPOSITORY = (
     "https://github.com/University-at-Buffalo-SEDS/FirmwareSimulator.git"
 )
 SIMULATOR_INTERFACE_VERSION = "0.4.15"
+# The local fallback tag (local-dev-v<version>) is reused across simulator
+# revisions. This layout needs FirmwareSimulator 79f98f5, which gives a U5
+# factory flash time to provision blank storage before ThreadX starts (older
+# images stop the factory flow at 50 ms and report "factory boot flow never
+# reached _tx_thread_schedule"), and 12f3b71 (2026-11-10 04:49 UTC), which
+# frames each probe sample so host load cannot drop it ("probe ... returned 9
+# of 10 samples"). An image created before 12f3b71 cannot contain both.
+SIMULATOR_MINIMUM_REVISION = "12f3b71"
+SIMULATOR_MINIMUM_CREATED = datetime(2026, 11, 10, 4, 49, 55, tzinfo=timezone.utc)
 FIRMWARE_BRANCH = "dev"
 FIRMWARE_ORGANIZATION = "University-at-Buffalo-SEDS"
 SIMULATOR_DOCKER_PLATFORM = os.environ.get(
@@ -206,6 +216,39 @@ def _build_simulator_image(ui, docker: str, source: Path, image: str) -> None:
     subprocess.run(build, check=True)
 
 
+def _image_created(docker: str, image: str) -> datetime | None:
+    result = subprocess.run(
+        [docker, "image", "inspect", "--format", "{{.Created}}", image],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    text = result.stdout.strip()
+    # Docker prints nanoseconds and either Z or a numeric offset.
+    match = re.fullmatch(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)", text)
+    if not match:
+        return None
+    fraction = (match.group(2) or "0")[:6].ljust(6, "0")
+    zone = "+00:00" if match.group(3) == "Z" else match.group(3)
+    return datetime.fromisoformat(f"{match.group(1)}.{fraction}{zone}")
+
+
+def _require_current_local_image(docker: str, image: str) -> None:
+    """Refuse a reused local tag that cannot contain the required simulator."""
+    created = _image_created(docker, image)
+    if created is not None and created >= SIMULATOR_MINIMUM_CREATED:
+        return
+    built = created.isoformat() if created else "an unknown time"
+    raise RuntimeError(
+        f"{image} was built at {built}, which predates FirmwareSimulator "
+        f"{SIMULATOR_MINIMUM_REVISION} ({SIMULATOR_MINIMUM_CREATED.isoformat()}). "
+        "Its results for this board are not valid (the factory boot budget and "
+        "probe framing are missing). Rebuild it from a current FirmwareSimulator "
+        "dev checkout with SEDS_FIRMWARE_SIM_SOURCE=/path/to/FirmwareSimulator, "
+        "or select a current image with SEDS_FIRMWARE_SIM_IMAGE."
+    )
+
+
 def resolve_simulator_image(ui, docker: str, repo_root: Path, _architecture: str) -> str:
     requested = os.environ.get(
         "SEDS_FIRMWARE_SIM_IMAGE",
@@ -238,6 +281,7 @@ def resolve_simulator_image(ui, docker: str, repo_root: Path, _architecture: str
     if _image_exists(docker, requested):
         return requested
     if _image_exists(docker, local):
+        _require_current_local_image(docker, local)
         return local
 
     git = shutil.which("git")
