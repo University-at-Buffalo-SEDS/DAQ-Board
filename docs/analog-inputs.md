@@ -107,8 +107,9 @@ than 75% of its row pool remains free. Loadcell mirrors, including the selected
 P6 input, bypass this optional gate. The separate valve-pressure queue holds
 800 samples, 3.2 seconds at 250 samples/s. Required numeric telemetry uses
 compact batches of captured values and clocks, sharing calibration/session
-metadata and expanding to unchanged CSV in the writer. The line pool is 62 KiB;
-the reclaimed RAM funds a 332 KiB raw pool. Larger raw allocations retain the
+metadata and expanding to unchanged CSV in the writer. The line pool is 49 KiB;
+the reclaimed RAM funds a 321 KiB raw pool (62 and 332 KiB before 24 KiB moved to
+sector-aligned log staging; see sd-write-path.md). Larger raw allocations retain the
 original sixteen-record service turn so other SD streams are not starved.
 
 Native queue tests save all 50,000 protected raw samples at 2,500 samples/s

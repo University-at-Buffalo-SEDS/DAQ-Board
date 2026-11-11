@@ -46,6 +46,9 @@ static _Alignas(32) UCHAR g_sd_transfer_buffer[4096];
 static unsigned io_calls,fail_io_call,needs_reinit;
 static UINT sd_storage_io_write(const UCHAR *b,ULONG s,ULONG n){assert(!mask&&b==g_sd_transfer_buffer&&n<=8);(void)s;now+=10;++io_calls;return io_calls==fail_io_call?FX_IO_ERROR:FX_SUCCESS;}
 static unsigned sd_storage_io_requires_reinit(void){return needs_reinit;}
+#define SD_STORAGE_IO_MAX_SECTORS 64U
+/* This fixture's source is not IDMA-capable: every chunk uses the bounce buffer. */
+static uint8_t sd_storage_io_dma_capable(const void *b,ULONG n){(void)b;(void)n;return 0;}
 static unsigned g_sd_media,flush_result;
 static UINT fx_media_flush(unsigned *m){assert(!mask&&m==&g_sd_media);return flush_result;}
 '''

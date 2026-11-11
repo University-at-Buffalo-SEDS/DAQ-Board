@@ -10,7 +10,6 @@ extern SD_HandleTypeDef hsd1;
 #define SD_IO_ERROR 4UL
 #define SD_IO_EVENTS (SD_IO_IRQ | SD_IO_DONE | SD_IO_ERROR)
 #define SD_IO_TIMEOUT_MS 2000U
-#define SD_IO_MAX_SECTORS 8U
 static TX_EVENT_FLAGS_GROUP g_sd_io_events;
 static uint8_t g_sd_io_initialized;
 static volatile uint8_t g_sd_io_active, g_sd_io_reinit;
@@ -113,14 +112,9 @@ static UINT sd_io_ready(void)
 
 static UINT sd_io_transfer(UCHAR *buffer, ULONG sector, ULONG count, uint8_t write)
 {
-  if (!g_sd_io_initialized || !buffer || ((uintptr_t)buffer & 31U) ||
-      count == 0U || count > SD_IO_MAX_SECTORS) return FX_IO_ERROR;
-#if defined(__arm__) || defined(__thumb__)
-  /* U585 DCACHE1 bypasses internal SRAM. CPU copies and SDMMC IDMA share this
-   * already aligned buffer coherently; no polling cache operations in IRQs. */
-  if ((uintptr_t)buffer < 0x20000000UL ||
-      (uintptr_t)buffer > 0x200C0000UL - (uintptr_t)count * 512U) return FX_IO_ERROR;
-#endif
+  /* U585 DCACHE1 bypasses internal SRAM. CPU copies and SDMMC IDMA share an
+   * aligned internal-SRAM buffer coherently; no polling cache operations in IRQs. */
+  if (!g_sd_io_initialized || !sd_storage_io_dma_capable(buffer, count)) return FX_IO_ERROR;
   const uint32_t saved = __get_PRIMASK(); __disable_irq();
   if (g_sd_io_active) { __set_PRIMASK(saved); return FX_IO_ERROR; }
   g_sd_io_active = 1U;

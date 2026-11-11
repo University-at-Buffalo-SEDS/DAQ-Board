@@ -119,11 +119,17 @@ static void __set_PRIMASK(uint32_t m){mask=m;}
 static unsigned g_sd_max_read_ms, g_sd_max_write_ms;
 static unsigned HAL_GetTick(void) { return ++tick; }
 static unsigned sd_storage_io_requires_reinit(void){return reinit;}
-static UCHAR g_sd_transfer_buffer[8*512];
-static UCHAR disk[20*512];
+static _Alignas(32) UCHAR g_sd_transfer_buffer[8*512];
+static UCHAR disk[80*512];
 static unsigned calls, fail_call;
+#define SD_STORAGE_IO_MAX_SECTORS 64U
+static uint8_t sd_storage_io_dma_capable(const void *b, ULONG n) {
+  return b && !((uintptr_t)b & 31U) && n && n <= SD_STORAGE_IO_MAX_SECTORS;
+}
 static int transfer(UCHAR *buffer, ULONG sector, ULONG count, int write) {
-  assert(count > 0 && count <= 8 && sector + count <= 20);
+  /* Bounced transfers hold at most the 8-sector buffer; aligned sources go in place. */
+  assert(count > 0 && sector + count <= 80);
+  assert(buffer == g_sd_transfer_buffer ? count <= 8 : sd_storage_io_dma_capable(buffer, count));
   if (++calls == fail_call) return FX_IO_ERROR;
   if (write) memcpy(disk + sector*512, buffer, count*512);
   else memcpy(buffer, disk + sector*512, count*512);
@@ -133,12 +139,19 @@ static unsigned sd_storage_io_read(UCHAR *b, ULONG s, ULONG n) { return transfer
 static unsigned sd_storage_io_write(const UCHAR *b, ULONG s, ULONG n) { return transfer((UCHAR*)b,s,n,1); }
 ''' + adapter + r'''
 int main(void) {
-  UCHAR input[17*512], output[17*512];
-  for (size_t i=0; i<sizeof(input); ++i) input[i]=(UCHAR)(i*17+i/512);
+  static _Alignas(32) UCHAR storage[17*512+1], aligned[70*512];
+  UCHAR *input=storage+1, output[17*512];
+  for (size_t i=0; i<17*512; ++i) input[i]=(UCHAR)(i*17+i/512);
   assert(sd_hal_write(input, 2, 17) == FX_SUCCESS && calls == 3);
   calls=0;
   assert(sd_hal_read(output, 2, 17) == FX_SUCCESS && calls == 3);
-  assert(memcmp(input, output, sizeof(input)) == 0);
+  assert(memcmp(input, output, sizeof(output)) == 0);
+  /* An aligned source (log buffer or FileX cache) is written in place in
+   * commands of up to SD_STORAGE_IO_MAX_SECTORS. */
+  for (size_t i=0; i<sizeof(aligned); ++i) aligned[i]=(UCHAR)(i*7+i/512);
+  calls=0;
+  assert(sd_hal_write(aligned, 5, 70) == FX_SUCCESS && calls == 2);
+  assert(memcmp(disk+5*512, aligned, sizeof(aligned)) == 0);
   calls=0; fail_call=2;
   assert(sd_hal_read(output, 2, 17) == FX_IO_ERROR && calls == 2);
   calls=0;

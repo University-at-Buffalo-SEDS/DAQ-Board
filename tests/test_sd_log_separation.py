@@ -114,7 +114,7 @@ int main(void) {
    * same row, which is then written exactly once. */
   unsigned failed = 0;
   fail_write = 1;
-  for (unsigned i = 0; i < 2000; ++i) if (put(3) != 0) ++failed;
+  for (unsigned i = 0; i < 8000; ++i) if (put(3) != 0) ++failed; /* fills the 16 KiB stage */
   fail_write = 0;
   assert(failed > 0 && g_sd_regular_log.open && g_sd_write_error_count == failed);
   while (failed--) assert(put(3) == 0);
@@ -129,8 +129,8 @@ int main(void) {
   drain();
   assert(rows_in[0][1] == 11000 && rows_in[1][1] == 1);
   assert(rows_in[1][2] == 11002 && rows_in[0][2] == 1);
-  assert(rows_in[0][3] == 3001 && rows_in[1][4] == 1 && rows_in[0][5] == 1);
-  assert(rows == 25007 && fail_open == 0);
+  assert(rows_in[0][3] == 9001 && rows_in[1][4] == 1 && rows_in[0][5] == 1);
+  assert(rows == 31007 && fail_open == 0);
   return 0;
 }
 """

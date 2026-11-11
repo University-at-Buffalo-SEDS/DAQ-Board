@@ -35,12 +35,12 @@ static void __disable_irq(void){irq_mask=1;}
 static void __set_PRIMASK(uint32_t value){irq_mask=value;}
 ''' + record_definition + TYPES + types + r'''
 static TX_BLOCK_POOL g_sd_line_pool,g_sd_raw_pool;
-static unsigned char raw_storage[332U*1024U+8],line_storage[62U*1024U+8];
+static unsigned char raw_storage[321U*1024U+8],line_storage[49U*1024U+8];
 static unsigned g_sd_line_slots_used,g_sd_line_slots_peak,g_sd_raw_slots_used,g_sd_raw_slots_peak;
 ''' + FUNCTIONS + helpers + r'''
 int main(void){
- mock_pool_init(&g_sd_raw_pool,raw_storage,332U*1024U,SD_RAW_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE);
- mock_pool_init(&g_sd_line_pool,line_storage,62U*1024U,SD_LINE_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE);
+ mock_pool_init(&g_sd_raw_pool,raw_storage,321U*1024U,SD_RAW_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE);
+ mock_pool_init(&g_sd_line_pool,line_storage,49U*1024U,SD_LINE_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE);
  assert(g_sd_raw_pool.tx_block_pool_total==g_sd_raw_pool.budget/(g_sd_raw_pool.tx_block_pool_block_size+sizeof(void*)));
  assert(g_sd_line_pool.tx_block_pool_total==g_sd_line_pool.budget/(g_sd_line_pool.tx_block_pool_block_size+sizeof(void*)));
  for(unsigned round=0;round<100;round++){
@@ -56,7 +56,7 @@ int main(void){
   }
   assert(nr==g_sd_raw_pool.tx_block_pool_total&&nl==g_sd_line_pool.tx_block_pool_total);
   assert(g_sd_raw_slots_used==nr&&g_sd_line_slots_used==nl);
-  assert(mock_pool_used_bytes(&g_sd_raw_pool)<=332U*1024U&&mock_pool_used_bytes(&g_sd_line_pool)<=62U*1024U);
+  assert(mock_pool_used_bytes(&g_sd_raw_pool)<=321U*1024U&&mock_pool_used_bytes(&g_sd_line_pool)<=49U*1024U);
   for(unsigned i=0;i<nr;i++){
    for(size_t j=0;j<raw[i]->count*sizeof(sd_raw_adc_record_t);j++)assert(((unsigned char*)raw[i]->samples)[j]==0x5a);
    sd_free_raw_slot(raw[i]);
@@ -90,8 +90,8 @@ int main(void){
                 "#define SD_RAW_BATCH_MAX DAQ_RAW_BATCH_CAPACITY\n#define SD_LINE_MAX 384U\n"
                 + 'typedef struct' + record + 'sd_raw_adc_record_t;\n' + types + r"""
 #define ROUND_WORD(x) (((x)+sizeof(void*)-1)/sizeof(void*)*sizeof(void*))
-unsigned char target_raw_blocks[(332U*1024U)/(ROUND_WORD(SD_RAW_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE)+sizeof(void*))];
-unsigned char target_line_blocks[(62U*1024U)/(ROUND_WORD(SD_LINE_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE)+sizeof(void*))];
+unsigned char target_raw_blocks[(321U*1024U)/(ROUND_WORD(SD_RAW_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE)+sizeof(void*))];
+unsigned char target_line_blocks[(49U*1024U)/(ROUND_WORD(SD_LINE_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE)+sizeof(void*))];
 unsigned char target_raw_block_bytes[ROUND_WORD(SD_RAW_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE)+sizeof(void*)];
 unsigned char target_line_block_bytes[ROUND_WORD(SD_LINE_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE)+sizeof(void*)];
 unsigned char target_raw_records_per_block[SD_RAW_SLOT_CAPACITY];
@@ -110,10 +110,10 @@ unsigned char target_scalar_records_per_block[SD_SCALAR_BATCH_MAX];
                 sizes[match[2]] = int(match[1])
         raw_records = sizes['target_raw_blocks'] * sizes['target_raw_records_per_block']
         scalar_records = sizes['target_line_blocks'] * sizes['target_scalar_records_per_block']
-        self.assertLessEqual(sizes['target_raw_blocks'] * sizes['target_raw_block_bytes'], 332 * 1024)
-        self.assertLessEqual(sizes['target_line_blocks'] * sizes['target_line_block_bytes'], 62 * 1024)
+        self.assertLessEqual(sizes['target_raw_blocks'] * sizes['target_raw_block_bytes'], 321 * 1024)
+        self.assertLessEqual(sizes['target_line_blocks'] * sizes['target_line_block_bytes'], 49 * 1024)
         self.assertGreaterEqual(raw_records, 2500 * 3 + sizes['target_raw_records_per_block'])
         self.assertGreaterEqual(scalar_records, 500 * 3 + sizes['target_scalar_records_per_block'])
         print(f"ARM fixed pools: raw={sizes['target_raw_blocks']} blocks/{raw_records} records, "
               f"scalar={sizes['target_line_blocks']} blocks/{scalar_records} records; "
-              "332/62KiB includes alignment+ThreadX link overhead")
+              "321/49KiB includes alignment+ThreadX link overhead")

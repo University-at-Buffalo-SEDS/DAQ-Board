@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 
+
 extern SD_HandleTypeDef hsd1;
 UINT _fx_partition_offset_calculate(void *partition_sector, UINT partition,
                                     ULONG *partition_start,
@@ -201,10 +202,12 @@ volatile uint32_t g_sd_pressure_records_flushed;
 
 static TX_EVENT_FLAGS_GROUP g_sd_flags;
 /* Numeric acquisition rows use compact batches instead of full CSV strings.
- * Reinvest that RAM in raw acquisition and pressure stall coverage. */
+ * Reinvest that RAM in raw acquisition and pressure stall coverage. The two
+ * pools gave 24 KiB to the sector-aligned log staging buffers; both still
+ * cover three seconds at 2500 raw records/s and 500 rows/s on the target. */
 static TX_BLOCK_POOL g_sd_line_pool, g_sd_raw_pool;
-static UCHAR g_sd_line_pool_storage[62U * 1024U] SD_ALIGN_32;
-static UCHAR g_sd_raw_pool_storage[332U * 1024U] SD_ALIGN_32;
+static UCHAR g_sd_line_pool_storage[49U * 1024U] SD_ALIGN_32;
+static UCHAR g_sd_raw_pool_storage[321U * 1024U] SD_ALIGN_32;
 /* Keep at least the acquisition configuration's original minimum reserve.
  * The fixed-block pool additionally covers measured multi-second
  * card stalls at the observed2.5ksamples/s rate when queued tails coalesce. */
@@ -223,6 +226,10 @@ volatile uint32_t g_sd_optional_snapshots_completed, g_sd_optional_snapshots_def
 volatile uint32_t g_sd_optional_snapshot_rows_discarded, g_sd_optional_snapshots_refused;
 
 static FX_MEDIA g_sd_media;
+/* Each log stages whole SD sectors. Writes end on a sector boundary, so FileX
+ * sends every full sector straight from this 32-byte aligned buffer to IDMA as
+ * one multi-block command; only the bytes after the last boundary wait for the
+ * next write or the once-per-second flush. */
 /* One open log receives every row (raw ADC, telemetry and pressure) of one
  * route key. Two handles exist only so a transition never closes a file while
  * rows that belong to it are still queued: the regular session file and the
@@ -231,7 +238,7 @@ static FX_MEDIA g_sd_media;
 typedef struct {
   FX_FILE file;
   char name[64];
-  UCHAR buffer[4096U];
+  _Alignas(32) UCHAR buffer[16U * 1024U];
   size_t len;
   ULONG retry_offset;
   uint64_t key;
@@ -239,6 +246,7 @@ typedef struct {
   uint8_t open, retry_active, reserve_disabled;
 } sd_log_t;
 static sd_log_t g_sd_regular_log, g_sd_launch_log;
+_Static_assert(sizeof(g_sd_regular_log.buffer) % 512U == 0U, "Log staging holds whole sectors");
 /* Writer-only: newest key whose file has been finished. A finished launch
  * window never reopens; late rows join the following regular file instead. */
 static uint64_t g_sd_regular_closed_key, g_sd_launch_done_key;
@@ -572,13 +580,19 @@ static UINT sd_hal_read(UCHAR *destination, ULONG sector, ULONG sector_count)
   return FX_SUCCESS;
 }
 
+/* FileX passes whole sectors straight from an aligned log buffer or its own
+ * aligned cache: IDMA reads those in place, up to one multi-block command per
+ * SD_STORAGE_IO_MAX_SECTORS. Any other source goes through the bounce buffer. */
 static UINT sd_hal_write(const UCHAR *source, ULONG sector, ULONG sector_count)
 {
   const uint32_t started = HAL_GetTick();
   while (sector_count != 0U) {
-    const ULONG count = sector_count > SD_TRANSFER_SECTORS ? SD_TRANSFER_SECTORS : sector_count;
-    memcpy(g_sd_transfer_buffer, source, (size_t)count * SD_SECTOR_SIZE);
-    if (sd_storage_io_write(g_sd_transfer_buffer, sector, count) != FX_SUCCESS) {
+    const ULONG direct = sector_count > SD_STORAGE_IO_MAX_SECTORS ? SD_STORAGE_IO_MAX_SECTORS : sector_count;
+    const uint8_t in_place = sd_storage_io_dma_capable(source, direct);
+    const ULONG count = in_place ? direct :
+        (sector_count > SD_TRANSFER_SECTORS ? SD_TRANSFER_SECTORS : sector_count);
+    if (!in_place) memcpy(g_sd_transfer_buffer, source, (size_t)count * SD_SECTOR_SIZE);
+    if (sd_storage_io_write(in_place ? source : g_sd_transfer_buffer, sector, count) != FX_SUCCESS) {
       if (sd_storage_io_requires_reinit()) g_sd_ready = 0U;
       return FX_IO_ERROR;
     }
@@ -885,10 +899,44 @@ static UINT sd_log_flush(sd_log_t *log)
   return FX_SUCCESS;
 }
 
+/* Throughput flush: write the first `bytes` staged bytes and move the rest,
+ * unchanged, to the front of the buffer. A failure keeps everything. */
+static UINT sd_log_flush_prefix(sd_log_t *log, size_t bytes)
+{
+  const size_t total = log->len;
+  log->len = bytes;
+  const UINT status = sd_log_flush(log);
+  if (status != FX_SUCCESS) { log->len = total; return status; }
+  log->len = total - bytes;
+  if (log->len != 0U) memmove(log->buffer, log->buffer + bytes, log->len);
+  return FX_SUCCESS;
+}
+
+/* Write up to the last sector boundary and keep the partial sector staged.
+ * After a durable flush (or the header) left the file offset mid-sector,
+ * first complete that one sector on its own; the remaining bytes then start
+ * at the aligned buffer front, so FileX hands whole sectors to IDMA in place. */
+#define SD_LOG_SECTOR_BYTES 512U
+static UINT sd_log_flush_sectors(sd_log_t *log)
+{
+  uint64_t offset = log->retry_active ? log->retry_offset : log->file.fx_file_current_file_offset;
+  const size_t head = (size_t)((SD_LOG_SECTOR_BYTES - offset % SD_LOG_SECTOR_BYTES) % SD_LOG_SECTOR_BYTES);
+  if (head != 0U && log->len > head + SD_LOG_SECTOR_BYTES) {
+    const UINT status = sd_log_flush_prefix(log, head);
+    if (status != FX_SUCCESS) return status;
+    offset += head;
+  }
+  const size_t tail = (size_t)((offset + log->len) % SD_LOG_SECTOR_BYTES);
+  if (log->len <= tail) return sd_log_flush(log);
+  return sd_log_flush_prefix(log, log->len - tail);
+}
+
 static UINT sd_log_write(sd_log_t *log, const void *data, size_t len)
 {
-  if (log->open == 0U || data == NULL || len == 0U || len > sizeof(log->buffer))
+  if (log->open == 0U || data == NULL || len == 0U || len > sizeof(log->buffer) - SD_LOG_SECTOR_BYTES)
     return FX_PTR_ERROR;
+  if (len > sizeof(log->buffer) - log->len && sd_log_flush_sectors(log) != FX_SUCCESS)
+    return FX_IO_ERROR;
   if (len > sizeof(log->buffer) - log->len && sd_log_flush(log) != FX_SUCCESS)
     return FX_IO_ERROR;
   memcpy(log->buffer + log->len, data, len);

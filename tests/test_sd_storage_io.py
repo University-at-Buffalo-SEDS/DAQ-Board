@@ -132,7 +132,7 @@ int main(void){
  sd_storage_io_irq();assert(g_sd_dma_stale_irqs==1);
  assert(sd_storage_io_init()==TX_SUCCESS&&sd_storage_io_init()==TX_SUCCESS);
  assert(sd_storage_io_read(buffer+1,0,1)==FX_IO_ERROR);
- assert(sd_storage_io_read(buffer,0,0)==FX_IO_ERROR&&sd_storage_io_read(buffer,0,9)==FX_IO_ERROR&&!start_calls);
+ assert(sd_storage_io_read(buffer,0,0)==FX_IO_ERROR&&sd_storage_io_read(buffer,0,SD_STORAGE_IO_MAX_SECTORS+1U)==FX_IO_ERROR&&!start_calls);
  scenario=0;invalid_reentry=1;assert(sd_storage_io_read(buffer,10,8)==FX_SUCCESS);
  assert(!dma_owned&&!irq_enabled&&hal_irq_calls==1&&g_sd_dma_reads==1);
  for(unsigned i=0;i<4096;i++)assert(buffer[i]==(uint8_t)(10+i/512));

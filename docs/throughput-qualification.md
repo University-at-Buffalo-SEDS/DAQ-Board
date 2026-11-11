@@ -14,7 +14,9 @@ nonblocking allocation; calibration snapshots use a bounded interrupt-masked
 copy rather than a storage mutex. Acquisition remains priority5, live workers6,
 and storage7 (smaller numbers run first).
 
-SDMMC uses internal DMA with the existing aligned4KiB SRAM buffer. The IRQ only
+SDMMC uses internal DMA: aligned SRAM sources (log staging buffers and the FileX
+cache) are read in place, anything else through the aligned 4 KiB bounce buffer
+(see sd-write-path.md). The IRQ only
 signals an event. Vendor completion/CMD12 handling runs in the storage task,
 because it can poll for a command response. The writer sleeps while waiting for
 DMA/card programming. Error recovery quiesces DMA before buffer reuse and
@@ -27,8 +29,9 @@ modeled SD/report consumer pauses. The candidate holds both loadcell gaps to
 30 ms and capture age to 2 ms in those tests. These are queue/ownership tests,
 not real ThreadX CPU scheduling or physical card-throughput evidence.
 
-ARM pool geometry provides7808 raw records in332KiB and2240 numeric rows in
-62KiB. That is about3.12s at the observed2500 raw records/s, or1.40s at the
+ARM pool geometry provides 7552 raw records in 321 KiB and 1792 numeric rows in
+49 KiB (formerly 7808 in 332 KiB and 2240 in 62 KiB, before 24 KiB moved to the
+sector-aligned log staging). That is about 3.0 s at the observed 2500 raw records/s, or 1.36 s at the
 configured5556 read-budget upper bound. Finite buffers cannot guarantee no
 storage loss through arbitrary or sustained card stalls. The objective of this
 change is that such storage pressure cannot block the live producer path.

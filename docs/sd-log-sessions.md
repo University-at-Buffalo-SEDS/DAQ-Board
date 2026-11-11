@@ -78,7 +78,8 @@ the fetched FileX mirroring routine, including boundary sectors and failed-write
 retry. Map precision alone did not eliminate drops on the physical card; compact
 queues are also needed to absorb the remaining stalls.
 
-The regular and launch files each have a 4 KiB write buffer. Previously,
+The regular and launch files each have a 16 KiB sector-aligned staging buffer
+(4 KiB before; see sd-write-path.md). Previously,
 telemetry rows reached FileX individually, generating many partial-sector
 updates even though raw writes were batched. Both buffers flush before the
 regular media flush and before closure. A failed pending-buffer write prevents

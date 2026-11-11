@@ -72,7 +72,9 @@ storage. A changed calibration closes the current log and starts a new file so
 one file is never interpreted using mixed calibration epochs.
 
 Before removing the card, power the board down normally and wait a few seconds.
-The writer batches records into 4 KiB writes and flushes the FAT volume once per
+The writer stages records in a 16 KiB buffer per open file and writes whole,
+sector-aligned blocks that IDMA reads in place (see
+[SD write path](docs/sd-write-path.md)). It flushes the FAT volume once per
 second (and immediately when the input-voltage power-loss threshold is crossed).
 Raw batches are serviced with bounded work so CSV rows and flushes cannot starve.
 The networking worker polls at a one-millisecond interval with the 1 kHz

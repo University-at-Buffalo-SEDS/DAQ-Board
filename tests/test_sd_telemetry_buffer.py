@@ -33,7 +33,7 @@ static size_t written;
 static UINT sd_prepare_file_space(sd_log_t *l,size_t n) {(void)l;(void)n;return reserve_fail?FX_IO_ERROR:0;}
 static UINT fx_file_seek(FX_FILE *f, ULONG offset) { f->fx_file_current_file_offset=offset; return 0; }
 static UINT fx_file_write(FX_FILE *f, void *p, ULONG bytes) {
-  assert(f==g_sd_telemetry_file && bytes && bytes<=4096);
+  assert(f==g_sd_telemetry_file && bytes && bytes<=sizeof(g_log.buffer));
   ++calls;
   const ULONG n=fail ? bytes/2 : bytes; /* Real failures can advance file position. */
   memcpy(disk+f->fx_file_current_file_offset,p,n); f->fx_file_current_file_offset+=n;
