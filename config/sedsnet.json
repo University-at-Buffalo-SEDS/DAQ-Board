@@ -73,7 +73,7 @@
         "FillSdCard",
         "ActuatorGroundStation"
       ],
-      "reliable": "Ordered",
+      "reliable": "Unordered",
       "priority": 0
     },
     {
@@ -313,7 +313,7 @@
         "FillSdCard",
         "ActuatorGroundStation"
       ],
-      "reliable": "Ordered",
+      "reliable": "Unordered",
       "priority": 0
     },
     {
@@ -613,7 +613,7 @@
       "rust": "ActuatorAvBayUnderglow",
       "name": "AV_BAY_UNDERGLOW",
       "doc": "Persistent avionics-bay underglow network variable (0 off, 1 on).",
-      "reliable": "Ordered",
+      "reliable": "Unordered",
       "priority": 16,
       "class": "Data",
       "element": {
@@ -629,7 +629,7 @@
       "rust": "FlightBuzzer",
       "name": "FLIGHT_BUZZER",
       "doc": "Persistent Flight Computer startup-buzzer enable variable.",
-      "reliable": "Ordered",
+      "reliable": "Unordered",
       "priority": 16,
       "class": "Data",
       "element": {
@@ -986,7 +986,7 @@
       "endpoints": [
         "ActuatorGroundStation"
       ],
-      "reliable": "Ordered",
+      "reliable": "Unordered",
       "priority": 200
     }
   ]
