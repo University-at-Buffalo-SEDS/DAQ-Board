@@ -60,7 +60,12 @@ int main(void) {
 #include <assert.h>
 #define CAN_BUS_RX_RING_DEPTH 4
 #define __DMB() do {} while (0)
-typedef struct { uint32_t std_id; uint8_t len; uint8_t data[64]; } can_bus_rx_frame_t;
+typedef struct{uint32_t std_id;uint8_t len,ts[3],data[64];}can_bus_rx_frame_t;
+/* Microsecond RX stamp (board_clock_us.h), inert here. */
+static uint64_t stub_board_us;
+__attribute__((unused)) static uint64_t board_now_us(void){return stub_board_us;}
+__attribute__((unused)) static uint64_t g_can_rx_us;
+__attribute__((unused)) static uint64_t can_bus_frame_rx_us(const can_bus_rx_frame_t *f){(void)f;return stub_board_us;}
 static volatile uint16_t g_rx_head, g_rx_tail;
 static volatile uint32_t g_fdcan_rx_ring_drop_count;
 ''' + "static can_bus_rx_frame_t g_rx_ring" + ring + r'''

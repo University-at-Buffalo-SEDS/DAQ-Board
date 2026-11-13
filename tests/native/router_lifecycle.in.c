@@ -198,6 +198,10 @@ void __real_seds_router_free(SedsRouter*);
 void __wrap_seds_router_free(SedsRouter*r){frees++;__real_seds_router_free(r);}
 static uint64_t tx_raw_now_ms_locked(void){return clock_ms;}
 static uint64_t node_now_since_ms(void*u){(void)u;return clock_ms-g_router.start_time;}
+/* Microsecond board clock and interrupt stamps (hardware-free). */
+static uint64_t node_now_since_us(void){return (clock_ms-g_router.start_time)*1000U;}
+static uint64_t telemetry_router_us(uint64_t board_us){return board_us;}
+static uint64_t can_bus_current_rx_us(void){return 0U;}
 static SedsResult tx_send_with_priority(const uint8_t*p,size_t n,uint8_t priority,void*u){(void)p;(void)n;(void)priority;(void)u;return SEDS_OK;}
 static void telemetry_can_rx(const uint8_t*p,size_t n,void*u){(void)p;(void)n;(void)u;}
 static int can_bus_subscribe_rx(void(*cb)(const uint8_t*,size_t,void*),void*u){assert(cb==telemetry_can_rx&&!u);return HAL_OK;}
