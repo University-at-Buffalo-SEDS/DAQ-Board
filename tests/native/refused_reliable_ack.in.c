@@ -59,6 +59,7 @@ static unsigned clock_sets;static void sd_card_set_launch_clock(uint64_t s,uint6
 #define FLIGHT_STATE_ABORTED 15U
 static SedsResult board_recovery_push_abort_status(SedsRouter*r){(void)r;return SEDS_OK;}
 static volatile uint32_t g_flight_state_cache_value,g_flight_state_cache_writes,g_flight_state_cache_updates,g_flight_state_cache_errors;
+static volatile uint32_t g_flight_state_writes_held_aborted;
 static bool g_has_value,g_persist_pending;static uint8_t g_persisted_state=UINT8_MAX;
 static SedsRouter*g_cache_router;
 static uint8_t managed_allowed;static unsigned applies,ota_open;

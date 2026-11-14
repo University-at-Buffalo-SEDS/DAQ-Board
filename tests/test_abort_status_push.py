@@ -29,7 +29,8 @@ int main(void){
  assert(flight_state_cache_init(&router)==0&&flight_state_cache_value()==6);
  assert(update(15)==0&&flight_state_cache_value()==15&&pushes==1&&pushed_router==&router);
  assert(update(15)==0&&pushes==1);           /* a repeated Aborted write pushes none */
- assert(update(1)==0&&pushes==1);            /* other states push none */
+ assert(update(1)==0&&flight_state_cache_value()==15&&pushes==1); /* held while Aborted: pushes none */
+ assert(flight_state_cache_reset_startup()==0&&update(1)==0&&pushes==1); /* Reset; other states push none */
  assert(update(15)==0&&pushes==2);           /* a new change to Aborted pushes again */
  return 0;
 }
