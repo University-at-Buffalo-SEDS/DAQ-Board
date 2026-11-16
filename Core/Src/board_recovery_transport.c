@@ -32,6 +32,11 @@ static volatile uint64_t station_utc;static volatile ULONG station_tick;
 static uint64_t back_utc;static ULONG back_tick;static uint8_t back_held;
 /* Set by a backward re-anchor until the network clock agrees again. */
 static _Atomic uint8_t station_stepped_back;
+/* Board tick of the last backward re-anchor; a GS stamp far ahead of the
+ * station clock within BOARD_RECOVERY_STEP_COPY_WINDOW_MS of it is a copy
+ * stamped on the old clock. */
+#define BOARD_RECOVERY_STEP_COPY_WINDOW_MS 600000U
+static volatile ULONG back_anchor_tick;static volatile uint8_t back_anchor_valid;
 static _Atomic uint32_t station_seq;
 static uint64_t station_estimate(void){
  for(unsigned i=0U;i<4U;i++){
@@ -68,7 +73,7 @@ void board_recovery_observe_station_time(SedsRouter*router,const SedsPacketView*
  const uint64_t elapsed=((uint64_t)(ULONG)(now-back_tick)*1000U)/TX_TIMER_TICKS_PER_SECOND;
  if(back_held&&elapsed<=10000U&&stamp>back_utc){
   const uint64_t expected=back_utc+elapsed;
-  if((stamp>=expected?stamp-expected:expected-stamp)<=BOARD_RECOVERY_STATION_REANCHOR_MS){station_store(stamp);back_held=0U;atomic_store(&station_stepped_back,1U);
+  if((stamp>=expected?stamp-expected:expected-stamp)<=BOARD_RECOVERY_STATION_REANCHOR_MS){station_store(stamp);back_held=0U;atomic_store(&station_stepped_back,1U);back_anchor_tick=tx_time_get();back_anchor_valid=1U;
    /* The SDK keeps a managed FLIGHT_STATE stamped on the old clock and drops
     * every older-stamped write from the same sender; forget it. */
    (void)seds_router_invalidate_network_variable_cache(router,SEDS_DT_FLIGHT_STATE,NULL);return;}
@@ -105,7 +110,7 @@ uint8_t board_recovery_station_behind(uint64_t mark,uint64_t station)
 {
  return station!=0U&&station!=UINT64_MAX&&mark>station&&mark-station>BOARD_RECOVERY_STATION_STEP_BACK_MS;
 }
-uint8_t board_recovery_command_is_stale(const SedsPacketView *packet)
+static uint8_t command_time_stale(const SedsPacketView *packet)
 {
  if (packet==0) return 1U;
  uint64_t now=recovery_router?board_recovery_station_now(recovery_router):0U;
@@ -121,16 +126,32 @@ uint8_t board_recovery_command_is_stale(const SedsPacketView *packet)
  }
  return 0U;
 }
+/* After a GS clock step back, a GS stamp more than a minute ahead of the
+ * station clock is a copy sent on the old clock (a late retransmit); it is
+ * refused whether or not the recovery floor is active. An Aborted
+ * FLIGHT_STATE is never refused for this: Abort always gets through. */
+uint8_t board_recovery_predates_step(const SedsPacketView *packet)
+{
+ if (packet==0 || recovery_router==0 || !back_anchor_valid) return 0U;
+ if ((ULONG)(tx_time_get()-back_anchor_tick) >= (ULONG)(((uint64_t)BOARD_RECOVERY_STEP_COPY_WINDOW_MS*TX_TIMER_TICKS_PER_SECOND)/1000U)) return 0U;
+ if (packet->ty==SEDS_DT_FLIGHT_STATE && packet->payload!=NULL && packet->payload_len==1U && packet->payload[0]==15U) return 0U;
+ if (!authorized_primary(recovery_router,packet)) return 0U;
+ return board_recovery_station_behind(packet->timestamp,board_recovery_station_now(recovery_router));
+}
+uint8_t board_recovery_command_is_stale(const SedsPacketView *packet)
+{
+ return command_time_stale(packet) || board_recovery_predates_step(packet);
+}
 uint8_t board_recovery_managed_update_allowed(const SedsPacketView *packet)
 {
  if (!persistent_store_controls_ready() || !board_recovery_floor_is_healthy()) return 0U;
- if (!board_recovery_floor_active()) return packet!=NULL && packet->ty==SEDS_DT_FLIGHT_STATE ? recovery_router!=NULL && authorized_primary(recovery_router,packet) : 1U;
+ if (!board_recovery_floor_active()) return packet!=NULL && packet->ty==SEDS_DT_FLIGHT_STATE ? recovery_router!=NULL && authorized_primary(recovery_router,packet) && !board_recovery_predates_step(packet) : 1U;
  return recovery_router!=0 && authorized_primary(recovery_router,packet) &&
         !board_recovery_command_is_stale(packet);
 }
 uint8_t board_recovery_automatic_is_stale(const SedsPacketView *packet)
 {
- return board_recovery_command_is_stale(packet);
+ return command_time_stale(packet);
 }
 
 static SedsResult commissioning_status(SedsRouter*router,uint8_t result,const BoardRecoveryRequest*request,uint32_t uptime,uint8_t extra_flags){

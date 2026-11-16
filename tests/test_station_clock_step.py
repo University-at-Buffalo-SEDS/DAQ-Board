@@ -42,7 +42,7 @@ def harness():
 typedef unsigned long ULONG;typedef unsigned UINT;
 typedef int SedsResult;typedef int SedsRouter;
 enum {SEDS_OK=0,SEDS_IO=-14,SEDS_DT_HEARTBEAT=106,SEDS_DT_VALVE=5};
-typedef struct {int ty;const char*sender;size_t sender_len;uint64_t timestamp;} SedsPacketView;
+typedef struct {int ty;const char*sender;size_t sender_len;uint64_t timestamp;const uint8_t*payload;size_t payload_len;} SedsPacketView;
 #define T0 UINT64_C(1794183600000)
 static SedsRouter cookie;static SedsRouter*recovery_router=&cookie;
 static ULONG ticks;static ULONG tx_time_get(void){return ticks;}
@@ -52,7 +52,8 @@ static uint8_t authorized_primary(SedsRouter*r,const SedsPacketView*p){(void)r;r
 /* Persisted floor: the last Reset, stamped at T0 on the old GS clock. */
 static uint64_t floor_ts=T0;
 static uint8_t board_recovery_command_time_allowed(uint64_t s){return s>floor_ts;}
-static uint8_t board_recovery_floor_active(void){return 1U;}
+static uint8_t floor_on=1U;
+static uint8_t board_recovery_floor_active(void){return floor_on;}
 static uint8_t board_recovery_floor_read_cutoff(uint64_t*c){*c=floor_ts;return 1U;}
 static uint8_t board_recovery_floor_cached_cutoff(uint64_t*c){*c=floor_ts;return 1U;}
 static uint64_t cutoff;
@@ -67,7 +68,7 @@ uint8_t board_recovery_station_behind(uint64_t mark,uint64_t station);
         *(function(transport, n) for n in (
             "station_estimate", "station_store",
             "board_recovery_station_behind", "board_recovery_observe_station_time",
-            "board_recovery_station_now", "board_recovery_command_is_stale")),
+            "board_recovery_station_now", "command_time_stale", "board_recovery_predates_step", "board_recovery_command_is_stale")),
     ]
     return "\n".join(pieces) + MAIN
 
@@ -127,10 +128,35 @@ static void single_late_heartbeat(void){
  assert(board_recovery_station_now(&cookie)>=before);
  assert(!invalidated);
 }
+/* No recovery floor (never Reset): before the step a copy sent on the old
+ * clock is admitted; after the GS steps back 4 h and the station clock
+ * re-anchors, a late retransmit of it is refused, a fresh request is
+ * admitted, and an Aborted FLIGHT_STATE copy is never refused for this. */
+static void late_copy_without_floor(void){
+ station_store(0U);back_held=0U;back_anchor_valid=0U;ticks=1;gs_offset=0;cutoff=0;floor_ts=0;floor_on=0U;
+ for(;ticks<10000;ticks++)if(ticks%1000==500)heartbeat();
+ const uint64_t old=gs_now()-200U;
+ assert(admitted(old));
+ gs_offset-=INT64_C(14400000);
+ for(ULONG end=ticks+5000;ticks<end;ticks++)if(ticks%1000==500)heartbeat();
+ assert(back_anchor_valid);
+ assert(!admitted(old));
+ assert(admitted(gs_now()));
+ const uint8_t aborted=15U,idle=2U;
+ SedsPacketView abort_copy={SEDS_DT_FLIGHT_STATE,"GS",2,old,&aborted,1};
+ SedsPacketView state_copy={SEDS_DT_FLIGHT_STATE,"GS",2,old,&idle,1};
+ assert(!board_recovery_predates_step(&abort_copy));
+ assert(board_recovery_predates_step(&state_copy)&&board_recovery_command_is_stale(&state_copy));
+ /* Only the GS clock stepped: another sender's stamp is not judged by it. */
+ SedsPacketView other={SEDS_DT_VALVE,"VB",2,old,0,0};
+ assert(!board_recovery_predates_step(&other));
+ floor_on=1U;
+}
 int main(void){
  run(-INT64_C(14400000));
  run(INT64_C(14400000));
  single_late_heartbeat();
+ late_copy_without_floor();
  return 0;
 }
 """
@@ -144,7 +170,7 @@ class StationClockStep(unittest.TestCase):
             # Boards without a heartbeat endpoint re-anchor on any GS packet.
             extra = [] if "packet->ty!=SEDS_DT_HEARTBEAT" in transport else ["-DANY_PACKET"]
             build = subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror"] + extra + [
-                                    "-Wno-unused-function", "-fsanitize=address,undefined",
+                                    "-Wno-unused-function", "-Wno-missing-field-initializers", "-fsanitize=address,undefined",
                                     "-x", "c", "-", "-o", str(exe)],
                                    input=harness(), text=True, capture_output=True)
             self.assertEqual(build.returncode, 0, build.stderr)

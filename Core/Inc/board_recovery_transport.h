@@ -23,6 +23,10 @@ uint64_t board_recovery_station_now(SedsRouter*router);
  * clock predates a backward GS clock step. */
 #define BOARD_RECOVERY_STATION_STEP_BACK_MS UINT64_C(60000)
 uint8_t board_recovery_station_behind(uint64_t mark,uint64_t station);
+/* Nonzero for a GS packet stamped more than a minute ahead of the station
+ * clock within ten minutes of a backward re-anchor (an Aborted FLIGHT_STATE
+ * excepted): a copy sent on the old clock. */
+uint8_t board_recovery_predates_step(const SedsPacketView *packet);
 /* Router owner only: a valid network clock more than 60 s from the station
  * clock (which then restarts from the next GS packet). */
 bool board_recovery_network_clock_resync_needed(uint64_t network_now);
