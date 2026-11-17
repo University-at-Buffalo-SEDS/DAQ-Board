@@ -14,6 +14,8 @@ extern int telemetry_router_leave(void);
 #include "daq_log_clock.h"
 #include "sd_card.h"
 #include "flight_state_cache.h"
+#include "daq_dac.h"
+#include "daq_dac_control.h"
 #include "board_recovery_transport.h"
 #include "sim_network_probe.h"
 #include "board_can_priority.h"
@@ -716,6 +718,24 @@ static SedsResult sd_retry_receive(const SedsPacketView *packet, void *context)
   return SEDS_OK;
 }
 
+/* SD_CARD is the DAQ's command endpoint: the DAC owns two of its types and
+ * the SD retry handler the rest. */
+static SedsResult sd_card_endpoint_receive(const SedsPacketView *packet, void *context)
+{
+  if (!packet) return sd_retry_receive(packet, context);
+  /* ABORT reaches SD_CARD too: whoever sent it, the DAC output stops now. */
+  if (packet->ty == SEDS_DT_ABORT) { daq_dac_emergency_off(DAQ_DAC_OFF_ABORT); return SEDS_OK; }
+  if (packet->ty == SEDS_DT_DAQ_DAC_COMMAND) {
+    /* Only the station drives the DAC. The type is unreliable: anything
+     * else is dropped, and the station's lease keepalive is the retry. */
+    if (packet->sender && packet->payload &&
+        seds_router_sender_matches_hostname(g_router.r, packet->sender, packet->sender_len, "GS", 2U))
+      daq_dac_submit_command(packet->payload, packet->payload_len);
+    return SEDS_OK;
+  }
+  return sd_retry_receive(packet, context);
+}
+
 static SedsResult Board_Recovery_handler(const SedsPacketView *packet, void *user)
 {
   (void)user;
@@ -764,7 +784,7 @@ static SedsResult init_telemetry_router_locked(void) {
           .packed_handler = NULL,
           .user = NULL,
       },
-      {.endpoint = SEDS_EP_SD_CARD, .packet_handler = sd_retry_receive, .packed_handler = NULL, .user = NULL},
+      {.endpoint = SEDS_EP_SD_CARD, .packet_handler = sd_card_endpoint_receive, .packed_handler = NULL, .user = NULL},
       {.endpoint = SEDS_EP_VALVE_PRESSURE_LOG, .packet_handler = pressure_sd_receive, .packed_handler = NULL, .user = NULL},
       {
           .endpoint = SEDS_EP_HEART_BEAT,
@@ -881,7 +901,8 @@ static SedsResult init_telemetry_router_locked(void) {
     result = seds_router_set_typed_route(r, -1, (uint32_t)SEDS_DT_DAQ_ADC_TEMPERATURE,
                                        g_can_side_id, true);
   const uint32_t analog_types[] = {SEDS_DT_DAQ_SAR_VOLTAGES, SEDS_DT_DAQ_SDADC_VOLTAGES,
-                                   SEDS_DT_DAQ_CURRENT_SENSE, SEDS_DT_DAQ_POWER_MONITOR};
+                                   SEDS_DT_DAQ_CURRENT_SENSE, SEDS_DT_DAQ_POWER_MONITOR,
+                                   SEDS_DT_DAQ_DAC_STATUS};
   for (unsigned i = 0; result == SEDS_OK && i < sizeof(analog_types)/sizeof(analog_types[0]); ++i)
     result = seds_router_set_typed_route(r, -1, analog_types[i], g_can_side_id, true);
   if (result != SEDS_OK) {

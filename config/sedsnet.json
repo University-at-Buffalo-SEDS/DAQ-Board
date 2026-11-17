@@ -958,6 +958,38 @@
       "priority": 240
     },
     {
+      "rust": "DaqDacCommand",
+      "name": "DAQ_DAC_COMMAND",
+      "doc": "GS DAC command v1, 32 LE bytes; see DAQ docs/dac-validation.md. Lease keepalive; enable only in Startup/Idle.",
+      "class": "Data",
+      "element": {
+        "kind": "Static",
+        "data_type": "UInt8",
+        "count": 32
+      },
+      "endpoints": [
+        "FillSdCard"
+      ],
+      "reliable": "Off",
+      "priority": 200
+    },
+    {
+      "rust": "DaqDacStatus",
+      "name": "DAQ_DAC_STATUS",
+      "doc": "DAQ DAC status v1, 80 LE bytes: gate, per-channel active, applied wave, off reason, output and ADC4 readback volts.",
+      "class": "Data",
+      "element": {
+        "kind": "Static",
+        "data_type": "UInt8",
+        "count": 80
+      },
+      "endpoints": [
+        "ActuatorGroundStation"
+      ],
+      "reliable": "Off",
+      "priority": 16
+    },
+    {
       "rust": "DaqLaunchLogStatus",
       "name": "DAQ_LAUNCH_LOG_STATUS",
       "doc": "Actual DAQ SD launch session, stored close UTC milliseconds, receiver accepted clock revision (each UInt64 lo/hi), flags: services, ready, deadline anchored, cutoff reached, matching raw/telemetry launch handles open, final flush pending. Receipt is not proof of application: compare exact pair and revision.",

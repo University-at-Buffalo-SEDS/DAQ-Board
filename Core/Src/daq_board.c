@@ -107,7 +107,9 @@ UINT daq_board_sample(daq_snapshot_t *snapshot)
     snapshot->analog_sample_fresh = 1U;
   }
 
-  if (daq_dac_sample(&dac_sample) != TX_SUCCESS)
+  /* DAC readback shares the 100 ms internal-ADC pass and only runs while a
+   * channel is active, so the idle acquisition cycle is unchanged. */
+  if (daq_dac_sample(&dac_sample, snapshot->analog_sample_fresh) != TX_SUCCESS)
   {
     g_daq_board_sample_status = 3U;
     return TX_NOT_DONE;

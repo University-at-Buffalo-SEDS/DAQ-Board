@@ -3,6 +3,7 @@
 #include "DAQ-Threads.h"
 
 #include "daq_board.h"
+#include "daq_dac.h"
 #include "main.h"
 #include "stm32u5xx_hal_gpio.h"
 #include "sd_card.h"
@@ -306,6 +307,9 @@ static void daq_network_thread_entry(ULONG argument)
   (void)argument;
   for (;;) {
     daq_network_process_once(HAL_GetTick());
+    /* Independent of acquisition: the DAC lease and state gate still run if
+     * sampling stalls. Rate-limited to 50 ms inside. */
+    daq_dac_service(HAL_GetTick());
     tx_thread_sleep((TX_TIMER_TICKS_PER_SECOND + 999U) / 1000U);
   }
 }

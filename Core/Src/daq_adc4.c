@@ -71,6 +71,15 @@ UINT daq_adc4_init(void)
   return TX_SUCCESS;
 }
 
+UINT daq_adc4_read_internal(uint32_t channel, float *volts)
+{
+  uint32_t raw = 0U;
+  if (volts == NULL) return TX_PTR_ERROR;
+  if (daq_adc4_read_raw(channel, &raw) != HAL_OK) { *volts = NAN; return TX_NOT_DONE; }
+  *volts = daq_adc4_counts_to_voltage(raw);
+  return TX_SUCCESS;
+}
+
 UINT daq_adc4_sample(daq_adc4_sample_t *sample)
 {
   uint32_t raw = 0U;
