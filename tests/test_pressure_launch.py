@@ -48,6 +48,8 @@ static unsigned g_sd_services_initialized=1;
 static unsigned g_sd_write_error_count,g_sd_csv_rows_written_count;
 static uint64_t utc=1767225600000ULL, local=100000;
 static uint64_t daq_log_unix_ms(void){assert(!mask);return utc;}
+/* The network clock is not about to step to a newer epoch here. */
+static uint64_t daq_log_unix_ms_settled(void){return daq_log_unix_ms();}
 static uint64_t daq_log_monotonic_ms(void){return local;}
 static unsigned sd_calibration_snapshot(daq_calibration_t *value){memset(value,0,sizeof(*value));value->kg1000_slope=7;return 1;}
 #include "sd_record_format.h"

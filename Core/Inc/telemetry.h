@@ -61,6 +61,7 @@ SedsResult telemetry_poll_discovery(void);
 
 uint64_t telemetry_now_ms(void);
 uint64_t telemetry_unix_ms(void);
+uint64_t telemetry_unix_ms_settled(void);
 uint64_t telemetry_unix_s(void);
 uint8_t telemetry_unix_is_valid(void);
 

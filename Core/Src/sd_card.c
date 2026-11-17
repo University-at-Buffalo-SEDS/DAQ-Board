@@ -389,7 +389,7 @@ static uint8_t sd_launch_finished(void)
   uint32_t mask = __get_PRIMASK(); __disable_irq();
   const uint8_t needs_utc = g_sd_close_unix_ms != 0U && !g_sd_deadline_anchored && !g_sd_launch_closed;
   __set_PRIMASK(mask);
-  const uint64_t utc = needs_utc ? daq_log_unix_ms() : 0U;
+  const uint64_t utc = needs_utc ? daq_log_unix_ms_settled() : 0U;
   const uint64_t local = daq_log_monotonic_ms();
   mask = __get_PRIMASK(); __disable_irq();
   if (g_sd_close_unix_ms != 0U && !g_sd_deadline_anchored && !g_sd_launch_closed && utc != 0U) {
@@ -405,7 +405,9 @@ static uint8_t sd_launch_finished(void)
 
 void sd_card_set_launch_clock(uint64_t session, uint64_t close_unix_ms)
 {
-  const uint64_t now = session != 0U ? daq_log_unix_ms() : 0U;
+  /* The deadline is mapped once onto the monotonic clock, never by a clock
+   * that is about to step to a newer network time epoch. */
+  const uint64_t now = session != 0U ? daq_log_unix_ms_settled() : 0U;
   const uint64_t local = daq_log_monotonic_ms();
   const uint32_t mask = __get_PRIMASK(); __disable_irq();
   const uint64_t prior_session = g_sd_session, prior_close = g_sd_close_unix_ms;

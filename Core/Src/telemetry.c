@@ -283,6 +283,24 @@ uint64_t telemetry_unix_ms(void) {
 }
 
 
+/* UTC for anchoring a station deadline: 0 while this board knows of a newer
+ * network time epoch than its own clock (it is about to step to it). */
+uint64_t telemetry_unix_ms_settled(void) {
+#ifdef TELEMETRY_ENABLED
+  if (!telemetry_router_enter()) return 0;
+  SedsTimeSyncStatus status;
+  uint64_t result = 0ULL;
+  if (g_router.r == NULL ||
+      (seds_router_get_timesync_status(g_router.r, &status) == SEDS_OK &&
+       status.newest_seen_epoch <= status.epoch))
+    result = telemetry_unix_ms_locked();
+  if (!telemetry_router_leave()) return 0;
+  return result;
+#else
+  return telemetry_unix_ms_locked();
+#endif
+}
+
 uint64_t telemetry_unix_s(void) { return telemetry_unix_ms() / 1000ULL; }
 
 uint8_t telemetry_unix_is_valid(void) { return telemetry_unix_ms() != 0ULL ? 1U : 0U; }

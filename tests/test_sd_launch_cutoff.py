@@ -33,6 +33,8 @@ static uint32_t __get_PRIMASK(void){return mask;}
 static void __disable_irq(void){mask=1;}
 static void __set_PRIMASK(uint32_t m){mask=m;}
 static uint64_t daq_log_unix_ms(void){assert(!mask);return utc;}
+/* The network clock is not about to step to a newer epoch here. */
+static uint64_t daq_log_unix_ms_settled(void){return daq_log_unix_ms();}
 static uint64_t daq_log_monotonic_ms(void){return board_uptime_extend(&uptime,raw);}
 """+body+route_epoch_support(source)+r"""
 int main(void){
@@ -100,6 +102,8 @@ static uint32_t __get_PRIMASK(void){return mask;}
 static void __disable_irq(void){mask=1;}
 static void __set_PRIMASK(uint32_t m){mask=m;}
 static uint64_t daq_log_unix_ms(void){assert(!mask);return utc;}
+/* The network clock is not about to step to a newer epoch here. */
+static uint64_t daq_log_unix_ms_settled(void){return daq_log_unix_ms();}
 static uint64_t daq_log_monotonic_ms(void){return local;}
 static uint32_t HAL_GetTick(void){return (uint32_t)local;}
 static int seds_router_enable_network_variable(SedsRouter *r,unsigned ty,bool read,bool write){(void)r;(void)ty;(void)read;(void)write;return 0;}

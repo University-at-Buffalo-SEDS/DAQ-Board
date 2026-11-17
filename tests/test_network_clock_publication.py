@@ -62,4 +62,36 @@ int main(void){SedsPacketView p={.timestamp=1794183600000ULL};
  assert(telemetry_heartbeat_handler(NULL,NULL)==SEDS_OK&&probes==2);return 0;}
 '''
   compile_and_run(self,code)
+ def test_launch_deadline_is_not_anchored_while_reanchoring(self):
+  """The launch deadline (station UTC) is mapped once onto the monotonic
+  clock; never by a network clock about to step to a newer epoch."""
+  sd=(ROOT/'Core/Src/sd_card.c').read_text()
+  for name in ('static uint8_t sd_launch_finished(','void sd_card_set_launch_clock('):
+   body=function(sd,name)
+   self.assertIn('daq_log_unix_ms_settled()',body)
+   self.assertNotIn('daq_log_unix_ms()',body)
+  source=(ROOT/'Core/Src/telemetry.c').read_text()
+  body=function(source,'uint64_t telemetry_unix_ms_settled(')
+  code=r"""#include <assert.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#define TELEMETRY_ENABLED 1
+typedef int SedsResult;typedef int SedsRouter;
+#define SEDS_OK 0
+typedef struct{uint16_t epoch,newest_seen_epoch;}SedsTimeSyncStatus;
+static SedsRouter router;static struct{SedsRouter*r;}g_router={&router};
+static uint16_t epoch=4,newest=4;static int entered;
+static int telemetry_router_enter(void){entered++;return 1;}
+static int telemetry_router_leave(void){entered--;return 1;}
+static SedsResult seds_router_get_timesync_status(SedsRouter*r,SedsTimeSyncStatus*s){assert(r==&router&&entered==1);s->epoch=epoch;s->newest_seen_epoch=newest;return SEDS_OK;}
+static uint64_t telemetry_unix_ms_locked(void){return 1794183600000ULL;}
+"""+body+r"""
+int main(void){
+ assert(telemetry_unix_ms_settled()==1794183600000ULL&&!entered);
+ newest=5;assert(telemetry_unix_ms_settled()==0&&!entered);
+ epoch=5;assert(telemetry_unix_ms_settled()==1794183600000ULL);
+ return 0;}
+"""
+  compile_and_run(self,code)
 if __name__=='__main__':unittest.main()

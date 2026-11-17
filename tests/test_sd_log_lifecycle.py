@@ -140,6 +140,8 @@ static uint32_t __get_PRIMASK(void) { return 0; }
 static void __disable_irq(void) {}
 static void __set_PRIMASK(uint32_t value) {(void)value;}
 static uint64_t daq_log_unix_ms(void) { ++utc_reads; return utc; }
+/* The network clock is not about to step to a newer epoch here. */
+static uint64_t daq_log_unix_ms_settled(void){return daq_log_unix_ms();}
 static uint64_t daq_log_monotonic_ms(void) { return local; }
 ''' + lifecycle + route_epoch_support(source) + r'''
 int main(void) {

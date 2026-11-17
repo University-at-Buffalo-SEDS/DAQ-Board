@@ -26,3 +26,12 @@ static inline uint64_t daq_log_unix_ms_cached(void) {
  return 0U;
 #endif
 }
+/* UTC to map a station deadline onto the monotonic clock: 0 (map it later)
+ * while the network clock is about to step to a newer time-base epoch. */
+static inline uint64_t daq_log_unix_ms_settled(void) {
+#ifdef TELEMETRY_ENABLED
+ return telemetry_unix_ms_settled();
+#else
+ return 0U;
+#endif
+}
