@@ -441,6 +441,15 @@ static void daq_observe_input_faults(const daq_snapshot_t *snapshot,
   const uint32_t now = (uint32_t)snapshot->monotonic_ms;
   const unsigned kg50 = kg50_input == 1U ? 9U : 1U;
   daq_input_faults_t *faults = &g_daq_input_faults;
+#if DAQ_CHAMBER_SCAN_MASK != 0U
+  /* Launch T0 for the chamber burn window; read only with a chamber reading
+   * (10 Hz auxiliary scan) and outside the IRQ lock (it takes its own). */
+  uint32_t since_t0 = DAQ_CHAMBER_NO_LAUNCH;
+#if (DISABLE_SD_CARD == 0U)
+  if (window->count[DAQ_CHAMBER_ADC_CHANNEL] != 0U && !DAQ_FAULT_CHAMBER_ALWAYS_ON)
+    since_t0 = sd_card_launch_since_t0_ms();
+#endif
+#endif
   const uint32_t saved = __get_PRIMASK();
   __disable_irq();
   if (!g_daq_input_faults_ready) {
@@ -458,7 +467,8 @@ static void daq_observe_input_faults(const daq_snapshot_t *snapshot,
 #if DAQ_CHAMBER_SCAN_MASK != 0U
   if (window->count[DAQ_CHAMBER_ADC_CHANNEL] != 0U)
     daq_input_faults_chamber(faults, mcp3564r_connector_voltage(DAQ_CHAMBER_ADC_CHANNEL,
-        window->voltage_sum[DAQ_CHAMBER_ADC_CHANNEL] / window->count[DAQ_CHAMBER_ADC_CHANNEL]), now);
+        window->voltage_sum[DAQ_CHAMBER_ADC_CHANNEL] / window->count[DAQ_CHAMBER_ADC_CHANNEL]), now,
+        since_t0);
 #endif
   __set_PRIMASK(saved);
 }

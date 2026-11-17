@@ -88,10 +88,7 @@
 #endif
 /* No signal: below half the live zero, and never below 0.05 V. A dead input
  * read 0.006-0.017 V all session, burn included (CH6, P4/3), and the
- * unconnected CH7 read 0.013 V; 0.05 V is 3x that. Caveat: a 0-5 V PX309 has
- * a zero offset of +/-2% FS (+/-0.1 V), so a vented, healthy one may also read
- * near 0 V. The operator text says so; a 1-5 V or 0.5-4.5 V transducer is
- * unambiguous. */
+ * unconnected CH7 read 0.013 V; 0.05 V is 3x that. */
 #define DAQ_FAULT_CHAMBER_FLOOR_V 0.05f
 #define DAQ_FAULT_CHAMBER_NO_SIGNAL_V \
   (DAQ_CHAMBER_LIVE_ZERO_V * 0.5f > DAQ_FAULT_CHAMBER_FLOOR_V ? DAQ_CHAMBER_LIVE_ZERO_V * 0.5f : DAQ_FAULT_CHAMBER_FLOOR_V)
@@ -100,6 +97,33 @@
  * cannot. Clear after 1 s with a signal. */
 #define DAQ_FAULT_CHAMBER_SET_MS 2000U
 #define DAQ_FAULT_CHAMBER_CLEAR_MS 1000U
+/* When the check runs. A transducer with a live zero above the floor (1-5 V,
+ * 0.5-4.5 V) reads it whenever powered, so a missing signal is a fault at any
+ * time and the check always runs. A 0-5 V transducer (the installed PX309,
+ * same type as the oxidizer tank PT) reads about 0 V at 0 psig, within its
+ * +/-2% FS (+/-0.1 V) zero offset: vented, healthy and dead look alike. Its
+ * check therefore runs only while the chamber must be pressurized, in the
+ * launch burn window T0 + BURN_START to T0 + BURN_END, with T0 from
+ * DAQ_LOG_CLOCK (deadline - 20 s, sd_card_launch_since_t0_ms). Outside it
+ * (at rest, during fill, with no launch scheduled, or without the SD launch
+ * clock) the chamber fault is inactive; its reading is still reported. */
+#define DAQ_FAULT_CHAMBER_ALWAYS_ON (DAQ_CHAMBER_LIVE_ZERO_V * 0.5f > DAQ_FAULT_CHAMBER_FLOOR_V)
+/* Start: past ignition delay and chamber fill. In the 2026-11-16 fire T0 was
+ * 9.3 s and thrust began at 10.3 s (T0 + 1.0 s); 1.5 s leaves 0.5 s margin,
+ * so a healthy transducer has a signal before the check starts and the rise
+ * is never counted as an episode. */
+#ifndef DAQ_FAULT_CHAMBER_BURN_START_MS
+#define DAQ_FAULT_CHAMBER_BURN_START_MS 1500U
+#endif
+/* End: a bound on the burn. The 2026-11-16 burn ended at T0 + 5.4 s; 5 s stays
+ * inside it, so tail-off (a real return to 0 psig) is never checked. With the
+ * 2 s set time a dead input activates by T0 + 3.5 s. */
+#ifndef DAQ_FAULT_CHAMBER_BURN_END_MS
+#define DAQ_FAULT_CHAMBER_BURN_END_MS 5000U
+#endif
+_Static_assert(DAQ_FAULT_CHAMBER_BURN_END_MS - DAQ_FAULT_CHAMBER_BURN_START_MS > DAQ_FAULT_CHAMBER_SET_MS &&
+               DAQ_FAULT_CHAMBER_BURN_END_MS > DAQ_FAULT_CHAMBER_BURN_START_MS,
+               "the chamber burn window must be longer than the chamber set time");
 
 /* --- Reporting (DAQ_INPUT_HEALTH) ---------------------------------------- */
 /* Periodic report; a new fault episode is reported early, no sooner than the

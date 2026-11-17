@@ -5,7 +5,8 @@ the GS recording 2026-11-17_00-59-46_065 (times in ms from each window's
 first sample, as recorded by the GS):
   vmain_mv_*                DAQ_POWER_MONITOR[2], VMAIN mV
   ch6_connector_uv_0_20s    DAQ_SDADC_VOLTAGES[4], chamber CH6 connector uV
-                            (launch accepted at 0.1 s, T0 9.3 s, burn 10.3-14.7 s)
+                            (launch accepted at 0.1 s, T0 9.3 s, burn 10.3-14.7 s;
+                            should have read about 1-3+ V in the burn)
   p6_legs_uv_449_459s       DAQ_SDADC_VOLTAGES[0..1], P6/3 CH2 (S+) and CH3 uV
   kg1000_pin_uv_*           KG1000 legacy raw * 16000/921, ADC-pin uV
 The GS recorded these thinned (VMAIN about 3 Hz); the DAQ observes the same
@@ -49,8 +50,11 @@ int main(void) {
       if (op[0] == 'S') daq_input_faults_supply(&s, (float)a, t);
       else if (op[0] == 'K') daq_input_faults_kg1000(&s, (float)a, t);
       else if (op[0] == 'F') daq_input_faults_kg50(&s, (float)a, t);
-      else if (op[0] == 'C') daq_input_faults_chamber(&s, (float)a, t);
-      else return 3;
+      else if (op[0] == 'C') {
+        /* C t volts since_t0_ms; a negative since_t0_ms is no launch window. */
+        if (scanf("%lf", &b) != 1) return 2;
+        daq_input_faults_chamber(&s, (float)a, t, b < 0.0 ? DAQ_CHAMBER_NO_LAUNCH : (uint32_t)b);
+      } else return 3;
     }
   }
   return 0;
@@ -69,21 +73,28 @@ class Report:
         self.p6_imbalance_max_mv, self.p6_common_mv = words[8] & 0xFFFF, words[8] >> 16
 
 
+def build(binary, *defines):
+    subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wconversion', '-Wno-sign-conversion',
+                    *defines, '-I', str(ROOT / 'Core/Inc'), '-x', 'c', '-', '-o', str(binary), '-lm'],
+                   input=DRIVER, text=True, check=True)
+
+
 class InputFaultTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.binary = Path(cls.tmp.name) / 'faults'
-        subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wconversion', '-Wno-sign-conversion',
-                        '-I', str(ROOT / 'Core/Inc'), '-x', 'c', '-', '-o', str(cls.binary), '-lm'],
-                       input=DRIVER, text=True, check=True)
+        build(cls.binary)
+        # A 1-5 V transducer: live zero 1.0 V, no-signal level 0.5 V, always checked.
+        cls.live_zero_binary = Path(cls.tmp.name) / 'faults_live_zero'
+        build(cls.live_zero_binary, '-DDAQ_CHAMBER_LIVE_ZERO_V=1.0f')
 
     @classmethod
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def run_ops(self, ops):
-        out = subprocess.run([str(self.binary)], input='\n'.join(ops) + '\n', text=True,
+    def run_ops(self, ops, binary=None):
+        out = subprocess.run([str(binary or self.binary)], input='\n'.join(ops) + '\n', text=True,
                              capture_output=True, check=True).stdout.split('\n')
         results = []
         for line in out:
@@ -246,37 +257,117 @@ class InputFaultTests(unittest.TestCase):
         self.assertEqual(reports[10].p6_common_mv, 1138)
 
     # --- Chamber ----------------------------------------------------------
+    # The installed 0-5 V PX309 reads about 0 V at 0 psig, so its check runs
+    # only from T0 + 1.5 s to T0 + 5 s (DAQ_FAULT_CHAMBER_BURN_*_MS).
 
-    def test_fire_chamber_reads_no_signal_through_the_burn(self):
+    FIRE_T0_MS = 9300
+
+    def chamber_ops(self, samples, t0_ms=None, unit=1e6):
+        """One 'C' op and one state query per sample; t0_ms None = no launch."""
+        ops = []
+        for t, value in samples:
+            since = t - t0_ms if t0_ms is not None and t0_ms <= t < t0_ms + 20000 else -1
+            ops += [f'C {t} {value / unit} {since}', 'A']
+        return ops + ['R']
+
+    def test_fire_chamber_reads_no_signal_in_the_burn_window(self):
         samples = FIXTURE['ch6_connector_uv_0_20s']
         self.assertLess(max(uv for _, uv in samples), 20000)
-        ops = []
-        for t, uv in samples:
-            ops += [f'C {t} {uv / 1e6}', 'A']
-        ops.append('R')
-        results = self.run_ops(ops)
+        results = self.run_ops(self.chamber_ops(samples, self.FIRE_T0_MS))
         states, report = results[:-1], results[-1]
         times = [t for t, _ in samples]
         active = [t for t, state in zip(times, states) if state[0] & CHAMBER]
-        self.assertTrue(active and active[0] <= 2500, 'active within 2 s of the first reading')
-        burn = [state[0] & CHAMBER for t, state in zip(times, states) if 10300 <= t <= 14700]
-        self.assertTrue(burn and all(burn))
+        t0 = self.FIRE_T0_MS
+        self.assertTrue(active, 'the dead input is caught in the burn')
+        self.assertGreaterEqual(active[0], t0 + 3500, 'armed at T0 + 1.5 s, 2 s set time')
+        self.assertLessEqual(active[0], t0 + 3500 + 300, 'within one recorded sample spacing')
+        self.assertLess(active[-1], t0 + 5000, 'inactive after T0 + 5 s')
+        self.assertFalse(any(state[1] & CHAMBER for t, state in zip(times, states) if t < t0 + 1500),
+                         'no episode before the window')
         self.assertEqual(report.episodes[7], 1)
+        self.assertEqual(report.active & CHAMBER, 0)
         self.assertLess(report.chamber_min_mv, 20)
         self.assertEqual(report.words[9] >> 16, 50)
 
-    def test_chamber_transient_does_not_activate_and_signal_clears(self):
+    def test_fire_chamber_at_rest_and_without_a_launch_is_not_a_fault(self):
+        samples = FIXTURE['ch6_connector_uv_0_20s']
+        results = self.run_ops(self.chamber_ops(samples))
+        states, report = results[:-1], results[-1]
+        self.assertEqual([state for state in states if state != (0, 0)], [])
+        self.assertEqual((report.active, report.latched, report.episodes[7]), (0, 0, 0))
+        self.assertTrue(report.words[0] & 0x200, 'the reading is still reported')
+        self.assertLess(report.chamber_min_mv, 20)
+
+    def test_vented_zero_volts_at_rest_for_a_minute_is_not_a_fault(self):
+        ops = [f'C {t} 0.0 -1' for t in range(0, 60000, 100)] + ['A', 'R']
+        state, report = self.run_ops(ops)
+        self.assertEqual(state, (0, 0))
+        self.assertEqual((report.latched, report.episodes[7], report.chamber_mv), (0, 0, 0))
+        # The countdown and the first 1.5 s after T0 (ignition delay) are not checked either.
+        ops = [f'C {t} 0.0 {t - 20000 if t >= 20000 else -1}' for t in range(0, 21500, 100)] + ['A', 'R']
+        state, report = self.run_ops(ops)
+        self.assertEqual((state, report.episodes[7]), ((0, 0), 0))
+
+    def test_healthy_rising_pressure_in_the_burn_window_is_not_a_fault(self):
+        # PX309-1KG5V: 200 psig/V. 0 V until ignition at T0 + 1.0 s (as in the
+        # fire), 400 psig (2 V) by T0 + 1.4 s, 300-600 psig through the burn.
+        samples = []
+        for t in range(0, 6000, 100):
+            if t < 1000:
+                v = 0.004
+            elif t < 1400:
+                v = 2.0 * (t - 1000) / 400
+            else:
+                v = 1.5 + 1.5 * ((t // 100) % 7) / 6
+            samples.append((t, v))
+        results = self.run_ops(self.chamber_ops(samples, 0, unit=1))
+        states, report = results[:-1], results[-1]
+        self.assertEqual([state for state in states if state != (0, 0)], [])
+        self.assertEqual((report.latched, report.episodes[7]), (0, 0))
+
+    def test_chamber_burn_window_boundaries(self):
+        states = self.run_ops([
+            'C 0 0.01 1499', 'A',                     # before T0 + 1.5 s: not checked
+            'C 1 0.01 1500', 'A',                     # armed: an episode starts
+            'C 2000 0.01 3499', 'A', 'C 2001 0.01 3500', 'A',   # 2 s set time
+            'C 3500 0.01 4999', 'A', 'C 3501 0.01 5000', 'A',   # T0 + 5 s: inactive
+            'C 3600 0.01 -1', 'A', 'R'])
+        self.assertEqual(states[0], (0, 0))
+        self.assertEqual(states[1], (0, CHAMBER))
+        self.assertEqual(states[2][0], 0)
+        self.assertEqual(states[3][0], CHAMBER)
+        self.assertEqual(states[4][0], CHAMBER)
+        self.assertEqual(states[5][0], 0)
+        self.assertEqual(states[6][0], 0)
+        self.assertEqual((states[7].latched, states[7].episodes[7]), (CHAMBER, 1),
+                         'the in-window fault is latched into the next report and counted')
+
+    def test_chamber_transient_in_the_window_does_not_activate_and_signal_clears(self):
         reports = self.run_ops([
-            'C 0 1.2', 'C 100 0.01', 'C 1900 0.01', 'A', 'C 2000 1.0', 'A',
-            'C 3000 0.01', 'C 5000 0.01', 'A', 'C 5100 0.08', 'C 7000 0.08', 'A',
-            'C 7100 0.1', 'C 8099 0.1', 'A', 'C 8100 0.1', 'A', 'R'])
+            'C 0 1.2 1500', 'C 100 0.01 1600', 'C 1900 0.01 3400', 'A', 'C 2000 1.0 3500', 'A',
+            'C 2100 0.01 3600', 'C 4100 0.01 4900', 'A', 'C 4200 0.08 4950', 'A', 'R'])
         self.assertEqual(reports[0][0], 0, '1.8 s low is a transient')
         self.assertEqual(reports[1][0], 0)
         self.assertEqual(reports[2][0], CHAMBER)
         self.assertEqual(reports[3][0], CHAMBER, '0.08 V is inside the 0.05-0.1 V band')
+        self.assertEqual(reports[4].episodes[7], 2)
+
+    def test_live_zero_transducer_is_checked_at_any_time_with_hysteresis(self):
+        run = lambda ops: self.run_ops(ops, self.live_zero_binary)
+        reports = run([
+            'C 0 1.2 -1', 'C 100 0.01 -1', 'C 1900 0.01 -1', 'A', 'C 2000 1.1 -1', 'A',
+            'C 3000 0.01 -1', 'C 5000 0.01 -1', 'A', 'C 5100 0.8 -1', 'C 7000 0.8 -1', 'A',
+            'C 7100 1.0 -1', 'C 8099 1.0 -1', 'A', 'C 8100 1.0 -1', 'A', 'R'])
+        self.assertEqual(reports[0][0], 0, '1.8 s low is a transient')
+        self.assertEqual(reports[1][0], 0)
+        self.assertEqual(reports[2][0], CHAMBER, 'no launch needed: 0 V is never valid')
+        self.assertEqual(reports[3][0], CHAMBER, '0.8 V is inside the 0.5-1.0 V band')
         self.assertEqual(reports[4][0], CHAMBER)
         self.assertEqual(reports[5][0], 0)
         self.assertEqual(reports[6].episodes[7], 2)
+        self.assertEqual(reports[6].words[9] >> 16, 500)
+        state, report = run([f'C {t} {uv / 1e6} -1' for t, uv in FIXTURE['ch6_connector_uv_0_20s']] + ['A', 'R'])
+        self.assertEqual((state[0], report.episodes[7]), (CHAMBER, 1), 'the fire input, at any time')
 
     # --- Reporting ----------------------------------------------------------
 
@@ -291,7 +382,7 @@ class InputFaultTests(unittest.TestCase):
         self.assertEqual(self.run_ops(ops)[-1].episodes[1], 0xFFFF)
 
     def test_nan_readings_are_ignored(self):
-        reports = self.run_ops(['S 0 nan', 'K 0 nan', 'C 0 nan', 'I 1', 'P 0 nan 1.1', 'A', 'R'])
+        reports = self.run_ops(['S 0 nan', 'K 0 nan', 'C 0 nan 2000', 'I 1', 'P 0 nan 1.1', 'A', 'R'])
         self.assertEqual(reports[0], (0, 0))
         self.assertEqual(reports[1].words[6:9], [0xFFFFFFFF] * 3)
 

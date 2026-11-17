@@ -94,3 +94,18 @@ No SDK reserved IDs or board control/ACK policy changes are involved.
 A 0V-output sensor cannot distinguish real zero gauge pressure from every
 possible wiring/power fault by voltage alone. The range flag identifies values
 outside the nominal range; it does not certify sensor health.
+
+The live input-fault check (`DAQ_INPUT_HEALTH`, `Core/Inc/daq_input_faults.h`)
+therefore looks for "no signal" (below 0.05 V for 2 s) only while the chamber
+must be pressurized: from T0 + 1.5 s to T0 + 5 s, where T0 is the launch
+`DAQ_LOG_CLOCK` deadline minus 20 s. The start leaves margin for ignition
+delay (thrust began at T0 + 1.0 s in the 2026-11-16 fire); the end stays inside
+the burn (it ended at T0 + 5.4 s). In that fire CH6 read 0.008-0.020 V through
+the burn, which this catches by T0 + 3.5 s. At rest, during fill, in HITL with
+no launch, or in a build without the SD launch clock the chamber fault stays
+inactive; the reading is still reported. A transducer with a live zero
+(`DAQ_CHAMBER_LIVE_ZERO_V` of 1.0 or 0.5 V) is checked at all times. The DAQ
+cannot tell an absent 0-5 V PT from a vented one either: when no chamber PT is
+connected (as in the 2026-11-16 fire), mark it not installed on GroundStation
+(`chamber_pt_installed`), which hides and silences this check and shows the
+chamber as not installed instead of 0 psig.

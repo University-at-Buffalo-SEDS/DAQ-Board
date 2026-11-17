@@ -420,6 +420,19 @@ uint8_t sd_card_launch_window_active(void)
   return active;
 }
 
+uint32_t sd_card_launch_since_t0_ms(void)
+{
+  const uint64_t local = daq_log_monotonic_ms();
+  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  (void)sd_route_session_locked(local);
+  uint32_t since = UINT32_MAX;
+  if (g_sd_deadline_anchored && !g_sd_launch_closed && local < g_sd_close_local_ms &&
+      g_sd_close_local_ms - local <= SD_LAUNCH_WINDOW_MS)
+    since = SD_LAUNCH_WINDOW_MS - (uint32_t)(g_sd_close_local_ms - local);
+  __set_PRIMASK(mask);
+  return since;
+}
+
 static uint64_t sd_run_snapshot(void)
 {
   const uint32_t mask = __get_PRIMASK();

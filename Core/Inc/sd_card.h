@@ -108,6 +108,11 @@ void sd_card_note_network_time(uint64_t unix_ms, uint64_t local_ms);
 /* Nonzero from SD_LAUNCH_SUPPLY_LEAD_MS before the launch window opens until
  * it closes: acquisition then logs the board supply at the launch rate. */
 uint8_t sd_card_launch_window_active(void);
+/* Milliseconds since launch T0 (the DAQ_LOG_CLOCK deadline - 20 s, on the
+ * monotonic clock it was mapped to) while the launch window is open, else
+ * UINT32_MAX: no launch scheduled, deadline not yet mapped, before T0, or
+ * after the window closed. */
+uint32_t sd_card_launch_since_t0_ms(void);
 
 #ifdef __cplusplus
 }

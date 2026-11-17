@@ -365,7 +365,12 @@ every 200 ms) when a new fault episode starts. The checks are:
 - The selected KG50 input at its rail: +/-2.4 V on AMP2, +/-0.15 V on P6.
 - P6 only: the two sense legs (CH2 = P6/3 S+, CH3) more than 50 mV apart,
   or their mean outside 0.6-1.8 V (bridge excitation or both leads lost).
-- Chamber transducer below 0.05 V (or half its live zero) for 2 s.
+- Chamber transducer below 0.05 V (or half its live zero) for 2 s. The
+  installed 0-5 V PX309 reads about 0 V when vented, so for it this runs only
+  in the launch burn window, T0 + 1.5 s to T0 + 5 s (T0 from `DAQ_LOG_CLOCK`):
+  no warning at rest, during fill, or with no launch scheduled. A transducer
+  with a live zero (1-5 V, 0.5-4.5 V; `DAQ_CHAMBER_LIVE_ZERO_V`) is checked
+  at all times.
 
 Each fault is debounced, has level and time hysteresis, counts its episodes
 since boot, and is latched until the next report, so a dip between two

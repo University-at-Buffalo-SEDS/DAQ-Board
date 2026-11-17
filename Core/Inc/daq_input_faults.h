@@ -164,14 +164,32 @@ static inline void daq_input_faults_p6_legs(daq_input_faults_t *s, float plus_v,
                        now_ms);
 }
 
-/* Assigned chamber transducer, connector volts. */
-static inline void daq_input_faults_chamber(daq_input_faults_t *s, float connector_v, uint32_t now_ms)
+/* `since_t0_ms` for daq_input_faults_chamber when no launch window is open. */
+#define DAQ_CHAMBER_NO_LAUNCH UINT32_MAX
+
+/* Nonzero while the chamber no-signal check runs: always for a transducer
+ * with a live zero, otherwise only in the burn window (config header). */
+static inline int daq_input_faults_chamber_armed(uint32_t since_t0_ms)
+{
+  return DAQ_FAULT_CHAMBER_ALWAYS_ON ||
+         (since_t0_ms >= DAQ_FAULT_CHAMBER_BURN_START_MS && since_t0_ms < DAQ_FAULT_CHAMBER_BURN_END_MS);
+}
+
+/* Assigned chamber transducer, connector volts; `since_t0_ms` is the time
+ * since launch T0, or DAQ_CHAMBER_NO_LAUNCH. The reading is always reported;
+ * the fault is inactive while the check is not armed. Episodes stay. */
+static inline void daq_input_faults_chamber(daq_input_faults_t *s, float connector_v, uint32_t now_ms,
+                                            uint32_t since_t0_ms)
 {
   if (!isfinite(connector_v)) return;
   s->chamber_seen = 1U;
   const uint16_t mv = daq_input_faults_mv(connector_v);
   s->chamber_mv = mv;
   if (s->chamber_min_mv == DAQ_INPUT_HEALTH_NO_MV || mv < s->chamber_min_mv) s->chamber_min_mv = mv;
+  if (!daq_input_faults_chamber_armed(since_t0_ms)) {
+    daq_input_fault_idle(s, DAQ_FAULT_CHAMBER_NO_SIGNAL);
+    return;
+  }
   daq_input_fault_step(s, DAQ_FAULT_CHAMBER_NO_SIGNAL, connector_v < DAQ_FAULT_CHAMBER_NO_SIGNAL_V,
                        connector_v >= DAQ_FAULT_CHAMBER_CLEAR_V, now_ms);
 }
