@@ -34,6 +34,9 @@ uint64_t board_commissioning_query_generation(void){return generation;}uint8_t b
 uint8_t board_recovery_floor_cached_cutoff(uint64_t*c){*c=0U;return 1U;}uint8_t board_recovery_floor_active(void){return 1;}uint8_t board_recovery_floor_is_healthy(void){return 1;}uint8_t board_recovery_command_time_allowed(uint64_t stamp){return stamp>100&&stamp!=UINT64_MAX;}
 bool seds_router_sender_matches_hostname(const SedsRouter*r,const char*s,size_t n,const char*name,size_t count){assert(r&&!irq_mask);return s&&n==count&&!memcmp(s,name,n);}
 SedsResult seds_router_get_network_time_ms(SedsRouter*r,uint64_t*out){assert(r&&!irq_mask);*out=clock_ms;return 0;}
+/* One time-base epoch; the network clock reads clock_ms. */
+SedsResult seds_router_network_stamp_fresh(SedsRouter*r,uint16_t e,uint64_t ts,uint64_t age,uint64_t ahead,bool*out){assert(r&&out&&!irq_mask);*out=e==0U&&(clock_ms>=ts?clock_ms-ts<=age:ts-clock_ms<=ahead);return 0;}
+SedsResult seds_router_raise_time_epoch(SedsRouter*r,uint16_t e,uint16_t*out){assert(r&&!irq_mask);if(out)*out=e;return 0;}
 SedsResult seds_router_enable_network_variable(SedsRouter*r,uint32_t ty,bool a,bool b){assert(r&&ty==SEDS_DT_FLIGHT_STATE&&a&&!b);return 0;}
 SedsResult seds_router_on_network_variable_update(SedsRouter*r,uint32_t ty,SedsResult(*fn)(const SedsPacketView*,void*),void*u){assert(r&&ty==SEDS_DT_FLIGHT_STATE&&!u);cache_callback=fn;return 0;}
 SedsResult seds_router_request_managed_variable(SedsRouter*r,uint32_t ty){(void)r;(void)ty;return 0;}

@@ -40,6 +40,11 @@ const launchcore_storage_driver_t launchcore_board_storage_driver={.init=init_me
 static void sdk_unlocked(void){assert(!physical||!physical->locked);}
 bool seds_router_sender_matches_hostname(const SedsRouter*r,const char*s,size_t n,const char*name,size_t len){sdk_unlocked();assert(r&&len==2&&!memcmp(name,"GS",2));return s&&((n==2&&!memcmp(s,"GS",2))||(n==10&&!memcmp(s,"@addr:1234",10)));}
 SedsResult seds_router_get_network_time_ms(SedsRouter*r,uint64_t*out){sdk_unlocked();assert(r);*out=clock_ms;return SEDS_OK;}
+/* The SDK window over the fixture clock: one time-base epoch (clock_epoch)
+ * that reads clock_ms; a stamp from an older epoch is not translated here. */
+static uint16_t clock_epoch;
+SedsResult seds_router_network_stamp_fresh(SedsRouter*r,uint16_t e,uint64_t ts,uint64_t age,uint64_t ahead,bool*out){sdk_unlocked();assert(r&&out&&age==15000U&&ahead==1000U);*out=e==clock_epoch&&(clock_ms>=ts?clock_ms-ts<=age:ts-clock_ms<=ahead);return SEDS_OK;}
+SedsResult seds_router_raise_time_epoch(SedsRouter*r,uint16_t e,uint16_t*out){sdk_unlocked();assert(r);if(e>clock_epoch)clock_epoch=e;if(out)*out=clock_epoch;return SEDS_OK;}
 SedsResult seds_router_log_queue_typed(SedsRouter*r,SedsDataType type,const void*p,size_t count,size_t width,SedsElemKind kind){sdk_unlocked();assert(r&&type==201&&count==40&&width==1&&kind==SEDS_EK_UNSIGNED);memcpy(response,p,40);assert((response[3]&32U)==EXPECTED_CAP);app_replies++;return SEDS_OK;}
 /* No older status is pending here: the Abort push's supersede pass finds none. */
 int32_t seds_router_copy_reliable_pending(SedsRouter*r,size_t first,SedsReliablePendingRow*rows,size_t capacity){sdk_unlocked();assert(r&&rows&&capacity);(void)first;memset(rows,0,capacity*sizeof *rows);return 0;}

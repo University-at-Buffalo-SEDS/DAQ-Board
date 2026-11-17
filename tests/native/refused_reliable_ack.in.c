@@ -85,12 +85,12 @@ uint64_t board_commissioning_query_generation(void){abort();}
 bool board_commissioning_uncertain_first(void){abort();}
 uint8_t board_commissioning_query_result(void){abort();}
 bool board_commissioning_pending(void){abort();}
-bool board_commissioning_note_query(const BoardRecoveryRequest*r,uint64_t a,uint64_t b,uint32_t c){(void)r;(void)a;(void)b;(void)c;abort();}
-int32_t board_commissioning_stage(const BoardRecoveryRequest*r,uint64_t a,uint64_t b,uint32_t c,void*x,CommissionReply y,CommissionClock z){(void)r;(void)a;(void)b;(void)c;(void)x;(void)y;(void)z;abort();}
-static void board_recovery_observe_station_time(SedsRouter*r,const SedsPacketView*p){(void)r;(void)p;abort();}
+bool board_commissioning_note_query(const BoardRecoveryRequest*r,uint64_t a,uint32_t c,void*x,CommissionFresh z){(void)r;(void)a;(void)c;(void)x;(void)z;abort();}
+int32_t board_commissioning_stage(const BoardRecoveryRequest*r,uint64_t a,uint32_t c,void*x,CommissionReply y,CommissionFresh z){(void)r;(void)a;(void)c;(void)x;(void)y;(void)z;abort();}
+static uint64_t board_recovery_packet_stamp(const SedsPacketView*p){(void)p;abort();}
 static SedsResult commissioning_status(SedsRouter*r,uint8_t x,const BoardRecoveryRequest*q,uint32_t u,uint8_t f){(void)r;(void)x;(void)q;(void)u;(void)f;abort();}
 static uint64_t last_query_issuer;
-static uint64_t commissioning_now(void*c){(void)c;abort();}
+static bool commissioning_fresh(void*c,uint64_t s){(void)c;(void)s;abort();}
 static bool commissioning_reply(void*c,const BoardRecoveryRequest*q,uint8_t x){(void)c;(void)q;(void)x;abort();}
 /* SOURCE_FUNCTION:authorized_primary */
 /* SOURCE_FUNCTION:board_recovery_handle */

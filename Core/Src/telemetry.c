@@ -109,12 +109,6 @@ RouterState g_router = {.r = NULL, .created = 0U, .start_time = 0ULL};
  * remote discovery topology change and a valid SEDSNet network clock. */
 volatile uint32_t g_telemetry_discovery_seen = 0U;
 volatile uint32_t g_telemetry_timesync_valid = 0U;
-/* Network clock restarts after it disagreed with the station clock by >60 s. */
-volatile uint32_t g_network_clock_resyncs = 0U;
-/* A restart cannot fix a source that disagrees with the GS; repeating it on
- * every GS packet kept the clock torn down. Monotonic ticks pace it. */
-#define NETWORK_CLOCK_RESYNC_HOLDOFF_TICKS (30U * (ULONG)TX_TIMER_TICKS_PER_SECOND)
-static ULONG g_network_clock_resync_tick;
 volatile uint32_t g_telemetry_network_ready = 0U;
 volatile uint32_t g_telemetry_peer_mask = 0U;
 volatile uint32_t g_sim_heartbeat_attempts = 0U;
@@ -241,8 +235,6 @@ static SedsResult telemetry_configure_timesync_locked(SedsRouter *router) {
 
 static SedsResult telemetry_heartbeat_handler(const SedsPacketView *pkt, void *user) {
   (void)sim_probe_heartbeat_handler(pkt, user);
-  /* GS heartbeats keep the recovery freshness clock current, also in Abort. */
-  if (pkt != NULL) board_recovery_observe_station_time(g_router.r, pkt);
   (void)user;
   return SEDS_OK;
 }
@@ -517,17 +509,8 @@ static UNUSED_FUNCTION void rx_synchronous(const uint8_t *bytes, size_t len) {
 
 static void telemetry_update_network_health(SedsRouter *router) {
   uint64_t network_time_ms = 0ULL;
-  const ULONG now_ticks = tx_time_get();
   if (seds_router_get_network_time_ms(router, &network_time_ms) == SEDS_OK) {
     g_telemetry_timesync_valid = 1U;
-    if ((g_network_clock_resyncs == 0U ||
-         (ULONG)(now_ticks - g_network_clock_resync_tick) >= NETWORK_CLOCK_RESYNC_HOLDOFF_TICKS) &&
-        board_recovery_network_clock_resync_needed(network_time_ms) &&
-        telemetry_configure_timesync_locked(router) == SEDS_OK) {
-      g_network_clock_resyncs++;
-      g_network_clock_resync_tick = now_ticks;
-      network_time_ms = 0ULL;
-    }
   }
   const daq_clock_cache_t clock = daq_clock_cache_make(network_time_ms, HAL_GetTick());
   const uint32_t mask = __get_PRIMASK();
@@ -930,6 +913,12 @@ static SedsResult init_telemetry_router_locked(void) {
   g_discovery_schema_announced = 0U;
   g_discovery_schema_retry_ms = 0ULL;
   result = flight_state_cache_init(r);
+  if (result != SEDS_OK) {
+    seds_router_free(r);
+    return result;
+  }
+  /* The network time epoch never falls below the persisted recovery floor's. */
+  result = board_recovery_restore_time_epoch(r);
   if (result != SEDS_OK) {
     seds_router_free(r);
     return result;

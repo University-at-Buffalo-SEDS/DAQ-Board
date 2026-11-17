@@ -222,6 +222,8 @@ static SedsResult ota_stream_init(SedsRouter*r){assert(r);return fail_stage==3?S
 static unsigned sd_stream_binds;static bool sd_stream_bind_fail;
 static SedsResult sd_file_stream_init(SedsRouter*r){assert(r);sd_stream_binds++;return sd_stream_bind_fail?SEDS_ERR:SEDS_OK;}
 void board_recovery_transport_set_router(SedsRouter*r){assert(r);}
+/* A persisted floor stamped in epoch 2 raises the real router's epoch. */
+SedsResult board_recovery_restore_time_epoch(SedsRouter*r){uint16_t epoch=0;assert(r);SedsResult result=seds_router_raise_time_epoch(r,2U,&epoch);assert(result!=SEDS_OK||epoch>=2U);return result;}
 #define telemetry_radio_rx inert_radio_rx
 static __attribute__((unused)) void inert_radio_rx(const uint8_t*p,size_t n,void*u){(void)p;(void)n;(void)u;}
 #define Board_Recovery_handler inert

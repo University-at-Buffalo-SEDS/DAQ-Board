@@ -4,7 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 /* Application NVM only. New five-domain v2 retains the complete original
- * first-leg generation; AB/VB v1 and every network byte remain unchanged. */
+ * first-leg generation; AB/VB v1 and every network byte remain unchanged.
+ * source is the station stamp as a board_stamp key (epoch in its top 16 bits;
+ * a record written before epochs existed reads as epoch 0). */
 #define COMMISSION_RECORD_KEY UINT32_C(0x42525043)
 #define COMMISSION_RECORD_SIZE 40U
 typedef struct {uint8_t state,kind;uint32_t epoch;uint64_t source,nonce,issuer,generation;} CommissionRecord;
