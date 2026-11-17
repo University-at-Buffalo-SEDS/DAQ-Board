@@ -166,6 +166,17 @@ set(SEDSNET_TARGET "thumbv8m.main-none-eabihf" CACHE STRING "" FORCE)
 # The firmware links only SEDSnet's C static archive. Also building the rlib
 # makes Cargo skip the release-embedded LTO, which costs 24-47 KB of flash.
 set(SEDSNET_CRATE_TYPE "staticlib" CACHE STRING "C-only embedded SDK artifact" FORCE)
+# SEDSnet compresses only at zstd level 1, without long-distance matching or a
+# target block size. Let the SDK leave that unreachable zstd code out; frames
+# are byte-identical. SDKs older than 6.0.2 ignore the setting.
+set(SEDSNET_ZSTD_LEAN ON CACHE BOOL
+    "Omit zstd LDM/target-block-size code SEDSnet never uses" FORCE)
+# The SDK compiles zstd as fat LTO objects with this firmware's GCC. The
+# release link has no -flto, but GCC's linker plugin still optimises those
+# objects together at link time; frames are unchanged. SDKs older than 6.0.2
+# ignore the setting.
+set(SEDSNET_ZSTD_LTO ON CACHE BOOL
+    "Compile SEDSnet's zstd for link-time optimisation" FORCE)
 if(ENABLE_TELEMETRY)
     include(cmake/sedsnet_fetch.cmake)
 endif()
