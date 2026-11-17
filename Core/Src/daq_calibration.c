@@ -257,6 +257,18 @@ static SedsResult apply_kg50_input(const SedsPacketView *packet, void *user)
   return SEDS_OK;
 }
 
+/* BOARD_HEALTH word 15 bits (daq_calibration.h). Here, not in the header:
+ * host tests build this file against their own stub header. */
+#define DAQ_CONFIG_FROM_STATION_LOADCELL 0x01U
+#define DAQ_CONFIG_FROM_STATION_KG50 0x02U
+#define DAQ_CONFIG_FROM_STATION_THERMAL 0x04U
+#define DAQ_CONFIG_FROM_STATION_FILTER 0x08U
+#define DAQ_CONFIG_FROM_STATION_INPUT 0x10U
+#define DAQ_CONFIG_RESTORED 0x20U
+#define DAQ_CONFIG_NOT_DURABLE 0x40U
+#define DAQ_CONFIG_INPUT_RESTORED 0x80U
+#define DAQ_CONFIG_INPUT_SHIFT 8U
+
 /* IEEE CRC-32 (launchcore_crc32), bitwise: the identity is computed once per
  * 5 s health report over 68 bytes. */
 static uint32_t identity_crc(uint32_t crc, const void *data, size_t len)

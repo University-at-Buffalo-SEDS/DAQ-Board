@@ -16,7 +16,7 @@ volatile uint32_t g_reliable_refusal_count;
 #define DAQ_KG50_INPUT_PERSIST_KEY 2U
 static int persistent_store_set(uint32_t key,const void*v,size_t n){(void)key;(void)v;(void)n;return LAUNCHCORE_PERSIST_OK;}
 static bool g_persist_ready=true,g_input_network_value_seen;
-static uint8_t g_kg50_input_stored;
+static uint8_t g_kg50_input_stored,g_kg50_input_applied;
 static uint32_t g_daq_calibration_errors,g_daq_kg50_input_persist_writes;
 static uint8_t requested=UINT8_MAX;static unsigned applies;
 static void mcp3564r_request_kg50_input(uint8_t input){requested=input;++applies;}
@@ -43,7 +43,7 @@ int main(int argc,char**argv){
  const uint64_t normal=1794153668825ULL,other=1794220000000ULL;
  deliver(r,sid,0,other);assert(requested==0&&applies==1);
  /* The operator's P6 selection carries its own file's older revision. */
- deliver(r,sid,1,normal);assert(requested==1&&applies==2&&g_kg50_input_stored==1);
+ deliver(r,sid,1,normal);assert(requested==1&&applies==2&&g_kg50_input_stored==1&&g_kg50_input_applied==1);
  /* Each re-send of the same selection still reaches the board, idempotently. */
  deliver(r,sid,1,normal);assert(requested==1&&applies==3&&g_daq_kg50_input_persist_writes==1);
  /* After a station clock step backwards, the next selection still applies. */

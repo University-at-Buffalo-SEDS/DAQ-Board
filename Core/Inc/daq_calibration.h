@@ -37,15 +37,9 @@ SedsResult daq_calibration_poll(SedsRouter *router);
  * values came from the station this boot, whether flash supplied them and the
  * applied 50 kg input. */
 #define DAQ_CONFIG_TAG UINT32_C(0x31474643) /* "CFG1" little-endian */
-#define DAQ_CONFIG_FROM_STATION_LOADCELL 0x01U
-#define DAQ_CONFIG_FROM_STATION_KG50 0x02U
-#define DAQ_CONFIG_FROM_STATION_THERMAL 0x04U
-#define DAQ_CONFIG_FROM_STATION_FILTER 0x08U
-#define DAQ_CONFIG_FROM_STATION_INPUT 0x10U
-#define DAQ_CONFIG_RESTORED 0x20U
-#define DAQ_CONFIG_NOT_DURABLE 0x40U
-#define DAQ_CONFIG_INPUT_RESTORED 0x80U
-#define DAQ_CONFIG_INPUT_SHIFT 8U
+/* Flags: bits 0..4 loadcell, KG50, thermal, filter, input came from a station
+ * this boot; 5 calibration restored from flash; 6 not yet durable; 7 input
+ * restored from flash; bit 8 the applied 50 kg input. */
 uint32_t daq_calibration_identity(uint32_t *flags);
 #endif
 daq_calibration_t daq_calibration_current(void);
