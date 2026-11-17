@@ -19,4 +19,10 @@
 #define FX_MEDIA_STATISTICS_DISABLE
 #define FX_FILE_STATISTICS_DISABLE
 
+/* No FileX clock timer. Its default adds 10 s every 1000 ticks, which assumes
+ * 100 ticks/s; at this board's 1000 ticks/s the FAT clock ran 10x fast (the
+ * 1980 unknown-time sentinel drifted, stamps ran ahead between sets). The SD
+ * writer sets the clock from network time before every create, flush and close. */
+#define FX_NO_TIMER
+
 #endif /* DAQ_FX_USER_H */

@@ -3,7 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 typedef struct { unsigned year, month, day, hour, minute, second; } sd_calendar_t;
-/* FAT stores no timezone and represents years 1980..2107. We write UTC. */
+/* Calendar of a Unix instant for FAT years 1980..2107. FAT stamps convert
+ * UTC to local time first (sd_fat_time.h). */
 static inline bool sd_calendar_from_unix_ms(uint64_t ms, sd_calendar_t *out)
 {
   if (out == 0 || ms < 315532800000ULL || ms >= 4354819200000ULL) return false;

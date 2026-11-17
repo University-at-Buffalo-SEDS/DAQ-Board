@@ -17,6 +17,7 @@
 #include "sd_storage_io.h"
 #include "daq_timestamp.h"
 #include "sd_calendar.h"
+#include "sd_fat_time.h"
 #include "sd_log_path.h"
 #include "sd_file_stream.h"
 
@@ -282,7 +283,7 @@ typedef struct {
   _Alignas(32) UCHAR buffer[16U * 1024U];
   size_t len;
   ULONG retry_offset;
-  uint64_t key;
+  uint64_t key, created_ms; /* created_ms: daq_log_monotonic_ms at creation */
   daq_calibration_t calibration;
   uint8_t open, retry_active, reserve_disabled;
 } sd_log_t;
@@ -870,28 +871,71 @@ static UINT sd_create_log_file(char *filename, size_t filename_size,
 _Static_assert(sizeof("/NO_UTC/DAQ_LAUNCH_18446744073709551615_999.CSV") <= 64U,
                "Log directory plus longest basename must fit FileX and handle storage");
 
-static void sd_update_filesystem_clock(void)
+/* FAT stamps. FileX is built with FX_NO_TIMER, so its clock never advances by
+ * itself and every create, flush and close stamps whatever was last set. The
+ * writer sets it from the network clock (local monotonic plus the newest
+ * network offset, so a sync or SEDSnet time step shows at the next stamp)
+ * immediately before each of those and at the 1 s flush. Until UTC was known
+ * once it stays at the 1980-01-01 sentinel; it is never a guessed date. */
+static int64_t g_sd_fat_applied_offset;
+static int64_t sd_fat_clock_offset(void)
 {
-  sd_calendar_t now;
-  if (sd_calendar_from_unix_ms(daq_log_unix_ms(), &now))
-  {
-    (void)fx_system_date_set(now.year, now.month, now.day);
-    (void)fx_system_time_set(now.hour, now.minute, now.second);
-  }
+  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  const int64_t offset = g_sd_clock_offset;
+  __set_PRIMASK(mask);
+  return offset;
 }
 
+/* First sync, or a step of at least one FAT tick: restamp now, not at 1 s. */
+static uint8_t sd_fat_clock_stepped(void)
+{
+  const int64_t offset = sd_fat_clock_offset(), delta = offset - g_sd_fat_applied_offset;
+  return offset != 0 && (g_sd_fat_applied_offset == 0 || delta >= 2000 || delta <= -2000);
+}
+
+/* Re-derive an open file's creation stamp from its creation instant on the
+ * current network clock: a file created before sync (1980) or before a step
+ * is corrected; FileX writes it with the entry at the next flush or close. */
+static void sd_fat_restamp(sd_log_t *log, int64_t offset, uint16_t today)
+{
+  sd_calendar_t created;
+  FX_DIR_ENTRY *entry = &log->file.fx_file_dir_entry;
+  if (!log->open || !sd_fat_local_calendar((uint64_t)((int64_t)log->created_ms + offset), &created))
+    return;
+  const uint16_t date = sd_fat_pack_date(&created), time = sd_fat_pack_time(&created);
+  if (entry->fx_dir_entry_created_date == date && entry->fx_dir_entry_created_time == time) return;
+  entry->fx_dir_entry_created_date = date; entry->fx_dir_entry_created_time = time;
+  entry->fx_dir_entry_created_time_ms = 0U;
+  entry->fx_dir_entry_last_accessed_date = today;
+  log->file.fx_file_modified = FX_TRUE;
+}
+
+static void sd_update_filesystem_clock_at(uint64_t local_ms)
+{
+  const int64_t offset = sd_fat_clock_offset();
+  sd_calendar_t now;
+  g_sd_fat_applied_offset = offset; /* zero (UTC never known) fails the calendar */
+  if (!sd_fat_local_calendar((uint64_t)((int64_t)local_ms + offset), &now)) return;
+  (void)fx_system_date_set(now.year, now.month, now.day);
+  (void)fx_system_time_set(now.hour, now.minute, now.second);
+  sd_fat_restamp(&g_sd_regular_log, offset, sd_fat_pack_date(&now));
+  sd_fat_restamp(&g_sd_launch_log, offset, sd_fat_pack_date(&now));
+}
+
+static void sd_update_filesystem_clock(void)
+{
+  sd_update_filesystem_clock_at(daq_log_monotonic_ms());
+}
+
+/* Close always rewrites the entry (modified, accessed, size) at the current
+ * clock, even when the last flush already wrote this file's data. */
 static UINT sd_close_file(sd_log_t *log)
 {
   sd_update_filesystem_clock();
   UINT status = sd_release_file_space(&log->file);
   if (status != FX_SUCCESS) return status;
+  log->file.fx_file_modified = FX_TRUE;
   status = fx_file_close(&log->file);
-  sd_calendar_t now;
-  if (status == FX_SUCCESS && sd_calendar_from_unix_ms(daq_log_unix_ms(), &now) &&
-      fx_file_date_time_set(&g_sd_media, log->name, now.year, now.month,
-                           now.day, now.hour, now.minute, now.second) != FX_SUCCESS)
-    g_sd_write_error_count++;
-  /* Timestamp failure must not leave a successfully closed handle marked open. */
   if (status == FX_SUCCESS) log->open = 0U;
   return status;
 }
@@ -926,10 +970,11 @@ static int sd_format_calibration_line(char *line, size_t size, const daq_calibra
  * stay there for their whole session; launch-window files go to /LAUNCH. */
 static UINT sd_open_log(sd_log_t *log, uint64_t key, const daq_calibration_t *calibration)
 {
-  sd_update_filesystem_clock();
+  const uint64_t created = daq_log_monotonic_ms();
+  sd_update_filesystem_clock_at(created);
   const uint64_t stamp = daq_log_unix_ms();
   UINT status = sd_create_log_file(log->name, sizeof(log->name), log == &g_sd_launch_log ? "DAQ_LAUNCH" : "DAQ",
-                                   stamp, daq_log_monotonic_ms());
+                                   stamp, created);
   if (status != FX_SUCCESS) return status;
 
   status = fx_file_open(&g_sd_media, &log->file, log->name, FX_OPEN_FOR_WRITE);
@@ -967,7 +1012,7 @@ static UINT sd_open_log(sd_log_t *log, uint64_t key, const daq_calibration_t *ca
     (void)fx_file_close(&log->file);
     return status;
   }
-  log->open = 1U; log->key = key; log->calibration = *calibration;
+  log->open = 1U; log->key = key; log->calibration = *calibration; log->created_ms = created;
   return FX_SUCCESS;
 }
 
@@ -1975,7 +2020,7 @@ void sd_card_writer_thread_entry(ULONG initial_input)
        * recording shutdown. A startup ADC transient must not stop this run. */
     }
 
-    if ((flags != 0U) ||
+    if ((flags != 0U) || sd_fat_clock_stepped() ||
         ((tx_time_get() - last_flush) >= TX_TIMER_TICKS_PER_SECOND))
     {
       const uint32_t flush_start_ms = HAL_GetTick();

@@ -80,34 +80,11 @@ int main(void) {
             self.assertEqual(result.returncode, 0, result.stderr)
             subprocess.run([str(exe)], check=True)
 
-    def test_calendar_and_close_timestamp_failure(self):
-        source = (ROOT / "Core/Src/sd_card.c").read_text()
-        functions = source[source.index("static void sd_update_filesystem_clock"):
-                           source.index("static int sd_format_calibration_line")]
+    def test_calendar(self):
+        # FAT stamping (sync, steps, close, zone) is covered by test_sd_fat_time.
         self.run_c(r'''
 #include <assert.h>
 #include "sd_calendar.h"
-typedef unsigned UINT;
-typedef unsigned FX_FILE;
-typedef struct { FX_FILE file; char name[64]; unsigned char open; } sd_log_t;
-#define FX_SUCCESS 0U
-static unsigned g_sd_media, g_sd_write_error_count, closes, year, day;
-static uint64_t utc=1790035200000ULL;
-static uint64_t daq_log_unix_ms(void) { return utc; }
-static UINT fx_system_date_set(unsigned y,unsigned m,unsigned d) {
-  year=y; day=d; (void)m; return 0;
-}
-static UINT fx_system_time_set(unsigned h,unsigned m,unsigned s) {
-  (void)h; (void)m; (void)s; return 0;
-}
-static UINT sd_release_file_space(FX_FILE *f) {(void)f;return 0;}
-static UINT fx_file_close(FX_FILE *f) { (void)f; ++closes; return 0; }
-static UINT fx_file_date_time_set(unsigned *media,char *name,unsigned y,unsigned m,
-                                unsigned d,unsigned h,unsigned min,unsigned sec) {
-  (void)media; (void)name; (void)m; (void)h; (void)min; (void)sec;
-  assert(y==2026 && d==22); return 1; /* Timestamp IO failed AFTER close. */
-}
-''' + functions + r'''
 int main(void) {
   sd_calendar_t c;
   assert(!sd_calendar_from_unix_ms(6830679,&c));
@@ -116,10 +93,6 @@ int main(void) {
   assert(c.year==2000 && c.month==2 && c.day==29);
   assert(sd_calendar_from_unix_ms(4107542400000ULL,&c));
   assert(c.year==2100 && c.month==3 && c.day==1);
-  sd_log_t log={0,"DAQ.CSV",1};
-  assert(sd_close_file(&log)==FX_SUCCESS);
-  assert(closes==1 && g_sd_write_error_count==1 && year==2026 && day==22);
-  assert(!log.open); /* A closed handle is never left marked open. */
 }
 ''')
 

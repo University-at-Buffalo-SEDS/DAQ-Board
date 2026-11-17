@@ -175,12 +175,29 @@ Both GroundStation and DAQ require this update for the new cutoff and continued
 ordinary-recording behavior. The chamber-pressure raw and report paths use the
 same admission/file routing and inherit the cutoff without changing their data.
 
-FileX creation/modification timestamps use network UTC when available. Closing a
-file explicitly sets its modification time to the close time. FAT timestamps
-have two-second resolution and no timezone; desktop software may interpret UTC
-as local time. Before UTC is known the filesystem date starts at 1980-01-01,
-not the FileX 2017 default. CSV samples retain local monotonic timestamps before
-network sync, with `time_source=local`. Existing card files are not retimestamped.
+FAT directory stamps (created, modified, accessed) follow the network clock.
+FileX is built without its free-running clock timer (`FX_NO_TIMER`; its default
+ran 10x fast at this board's 1000 ticks/s). The SD writer sets the FileX clock
+from local monotonic time plus the newest network UTC offset immediately before
+each file creation, each 1 s flush and each close, and flushes at once when
+UTC first arrives or the network time steps by two seconds or more. The 1 s
+flush rewrites every written open file's entry (modified time and size), so a
+power cut leaves a modified time within about a second of the last flushed data.
+Each open log remembers its creation instant: when sync arrives, or the network
+time steps, its created stamp is re-derived on the new clock and written at the
+next flush or close. Close always rewrites the entry. Files already closed keep
+the stamps they had; their rows still carry monotonic_ms, record_sequence and
+network UTC, which is what recovery uses.
+
+Until UTC has been known once, stamps stay at the 1980-01-01 00:00 sentinel
+(never the FileX 2017 default and never a guessed date). After that the last
+offset holds through a loss of network time. FAT stores no time zone and
+desktop software shows it as local time, so stamps are written in
+America/New_York with US daylight rules (`Core/Inc/sd_fat_time.h`); build with
+`-DDAQ_SD_FAT_UTC_OFFSET_MIN=0 -DDAQ_SD_FAT_US_DST=0` for UTC, or another
+standard offset in minutes. Two-second FAT resolution applies. File names,
+directories (`/UTC`, `/NO_UTC`) and every CSV timestamp stay UTC. CSV samples
+retain local monotonic timestamps before network sync, with `time_source=local`.
 
 A low-voltage warning requests an immediate flush; it does not permanently
 disable logging. Regular flushes occur once per second. This is **not a guarantee
