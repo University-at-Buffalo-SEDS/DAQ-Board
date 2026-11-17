@@ -312,6 +312,15 @@ static volatile uint32_t g_sd_calibration_generation = 1U;
 static uint8_t g_sd_services_initialized = 0U;
 static uint64_t g_sd_session, g_sd_last_launch_session, g_sd_close_unix_ms;
 static uint64_t g_sd_close_local_ms;
+/* The deadline is mapped once onto the monotonic clock. A network time step
+ * (a new time-base epoch: the leader's step, or a follower re-anchoring to a
+ * source) after that moves the network clock against the monotonic one, so
+ * capture UTCs are translated into the frame the deadline was mapped in:
+ * frame = utc - (current offset - mapped offset), offset = utc - monotonic.
+ * g_sd_close_frame_ms is the deadline in that frame; g_sd_close_unix_ms stays
+ * the received value (reported back in DAQ_LAUNCH_LOG_STATUS). */
+static int64_t g_sd_frame_offset, g_sd_clock_offset;
+static uint64_t g_sd_close_frame_ms;
 static uint8_t g_sd_launch_closed, g_sd_deadline_anchored, g_sd_launch_opened;
 static uint8_t g_sd_launch_flush_pending;
 /* Capture-cohort generations; advanced at every routing transition. */
@@ -358,6 +367,33 @@ static uint64_t sd_launch_key_locked(void)
   return g_sd_launch_closed ? 0U : g_sd_route_key + 1U;
 }
 
+/* Caller holds the IRQ lock. A capture UTC on the current network clock in the
+ * frame the deadline was mapped in. */
+static uint64_t sd_frame_utc_locked(uint64_t utc)
+{
+  const int64_t shift = g_sd_deadline_anchored ? g_sd_clock_offset - g_sd_frame_offset : 0;
+  if (shift >= 0) return utc > (uint64_t)shift ? utc - (uint64_t)shift : 0U;
+  return utc + (uint64_t)(-shift);
+}
+
+/* Map the deadline (caller holds the IRQ lock): utc on the network clock at
+ * monotonic local. */
+static void sd_map_deadline_locked(uint64_t utc, uint64_t local)
+{
+  g_sd_close_local_ms = local + (utc < g_sd_close_unix_ms ? g_sd_close_unix_ms - utc : 0U);
+  g_sd_frame_offset = g_sd_clock_offset = (int64_t)utc - (int64_t)local;
+  g_sd_close_frame_ms = g_sd_close_unix_ms;
+  g_sd_deadline_anchored = 1U;
+}
+
+void sd_card_note_network_time(uint64_t unix_ms, uint64_t local_ms)
+{
+  if (unix_ms < UINT64_C(315532800000) || unix_ms >= UINT64_C(4354819200000)) return;
+  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  g_sd_clock_offset = (int64_t)unix_ms - (int64_t)local_ms;
+  __set_PRIMASK(mask);
+}
+
 /* Caller holds the IRQ lock after sd_route_session_locked. With both clocks
  * known, a row is classified by its capture UTC exactly like VB pressure, so
  * the launch file holds only rows captured in [T0, T+20 s) whatever the batch
@@ -365,11 +401,12 @@ static uint64_t sd_launch_key_locked(void)
 static uint64_t sd_capture_key_locked(uint64_t route, uint64_t capture_unix_ms)
 {
   const uint64_t launch = sd_launch_key_locked();
-  if (launch == 0U || g_sd_close_unix_ms < SD_LAUNCH_WINDOW_MS ||
+  if (launch == 0U || g_sd_close_frame_ms < SD_LAUNCH_WINDOW_MS ||
       capture_unix_ms < UINT64_C(315532800000) || capture_unix_ms >= UINT64_C(4354819200000))
     return route;
-  if (capture_unix_ms >= g_sd_close_unix_ms) return launch + 1U;
-  return capture_unix_ms >= g_sd_close_unix_ms - SD_LAUNCH_WINDOW_MS ? launch : launch - 1U;
+  const uint64_t capture = sd_frame_utc_locked(capture_unix_ms);
+  if (capture >= g_sd_close_frame_ms) return launch + 1U;
+  return capture >= g_sd_close_frame_ms - SD_LAUNCH_WINDOW_MS ? launch : launch - 1U;
 }
 
 static uint64_t sd_run_snapshot(void)
@@ -393,8 +430,7 @@ static uint8_t sd_launch_finished(void)
   const uint64_t local = daq_log_monotonic_ms();
   mask = __get_PRIMASK(); __disable_irq();
   if (g_sd_close_unix_ms != 0U && !g_sd_deadline_anchored && !g_sd_launch_closed && utc != 0U) {
-    g_sd_close_local_ms = local + (utc < g_sd_close_unix_ms ? g_sd_close_unix_ms - utc : 0U);
-    g_sd_deadline_anchored = 1U;
+    sd_map_deadline_locked(utc, local);
     sd_route_epoch_advance();
   }
   (void)sd_route_session_locked(local);
@@ -420,30 +456,35 @@ void sd_card_set_launch_clock(uint64_t session, uint64_t close_unix_ms)
   if (session == 0U) {
     g_sd_session = 0U; g_sd_close_unix_ms = 0U; g_sd_launch_opened = 0U;
     g_sd_close_local_ms = 0U; g_sd_launch_closed = 0U; g_sd_deadline_anchored = 0U;
+    g_sd_close_frame_ms = 0U;
   } else if (session > g_sd_last_launch_session) {
     g_sd_last_launch_session = session; g_sd_launch_opened = 0U;
     g_sd_session = session; g_sd_close_unix_ms = close_unix_ms;
-    g_sd_deadline_anchored = now != 0U;
+    g_sd_deadline_anchored = 0U; g_sd_close_local_ms = 0U; g_sd_close_frame_ms = close_unix_ms;
     g_sd_launch_closed = now != 0U && now >= close_unix_ms;
-    g_sd_close_local_ms = now != 0U ? local + (now < close_unix_ms ? close_unix_ms - now : 0U) : 0U;
+    if (now != 0U) sd_map_deadline_locked(now, local);
   } else if (g_sd_session == session && !g_sd_launch_closed && close_unix_ms != g_sd_close_unix_ms) {
     /* Receiver revision ordering has established a genuinely newer T0. Move
      * the existing monotonic mapping by the absolute delta, never by a fresh
-     * wall/UTC reading. A closed/tombstoned session never enters this branch. */
-    const uint64_t prior = g_sd_close_unix_ms;
+     * wall/UTC reading. The new T0 is on the station's current network clock;
+     * across a network time step since the mapping it is translated into the
+     * mapped frame first. A closed/tombstoned session never enters this branch. */
     g_sd_close_unix_ms = close_unix_ms;
     if (g_sd_deadline_anchored) {
-      if (close_unix_ms < prior) {
-        const uint64_t earlier = prior - close_unix_ms;
+      const uint64_t prior = g_sd_close_frame_ms, next = sd_frame_utc_locked(close_unix_ms);
+      g_sd_close_frame_ms = next;
+      if (next < prior) {
+        const uint64_t earlier = prior - next;
         g_sd_close_local_ms = g_sd_close_local_ms > earlier ? g_sd_close_local_ms - earlier : 0U;
       } else {
-        const uint64_t later = close_unix_ms - prior;
+        const uint64_t later = next - prior;
         if (UINT64_MAX - g_sd_close_local_ms < later) g_sd_launch_closed = 1U;
         else g_sd_close_local_ms += later;
       }
     } else if (now != 0U) {
-      g_sd_close_local_ms = local + (now < close_unix_ms ? close_unix_ms - now : 0U);
-      g_sd_deadline_anchored = 1U;
+      sd_map_deadline_locked(now, local);
+    } else {
+      g_sd_close_frame_ms = close_unix_ms;
     }
   }
   const uint64_t after = sd_route_session_locked(local);
@@ -1246,18 +1287,20 @@ static uint8_t g_sd_raw_pending;
  * Only a valid UTC mapping can split a remote batch across T0/T+20s: bits0-3
  * mark rows inside [T0, T+20s), bits8-11 rows at or after T+20s. */
 static uint32_t sd_pressure_capture_route(const pressure_sd_batch_t *batch,
-    uint64_t session, uint64_t close_utc)
+    uint64_t session, uint64_t close_frame)
 {
   /* Exact sd_calendar FAT UTC range, checked in constant time: the receive
    * callback holds PRIMASK while snapshotting and publishing this owner. */
   if (batch->unix_ms < UINT64_C(315532800000) ||
       batch->unix_ms >= UINT64_C(4354819200000)) return SD_PRESSURE_ROUTE_UNKNOWN_UTC;
-  if (!session || close_utc < SD_LAUNCH_WINDOW_MS) return 0U;
-  const uint64_t start = close_utc - SD_LAUNCH_WINDOW_MS;
+  if (!session || close_frame < SD_LAUNCH_WINDOW_MS) return 0U;
+  const uint64_t start = close_frame - SD_LAUNCH_WINDOW_MS;
   uint32_t bits = 0U;
+  /* VB capture UTC on the current network clock, in the deadline's frame. */
+  const uint64_t first = sd_frame_utc_locked(batch->unix_ms);
   for (unsigned i = 0U; i < PRESSURE_SD_SAMPLES; ++i) {
-    const uint64_t at = batch->unix_ms + i * PRESSURE_SD_PERIOD_MS;
-    if (at >= close_utc) bits |= 1U << (8U + i);
+    const uint64_t at = first + i * PRESSURE_SD_PERIOD_MS;
+    if (at >= close_frame) bits |= 1U << (8U + i);
     else if (at >= start) bits |= 1U << i;
   }
   return bits;
@@ -2244,7 +2287,7 @@ sd_card_status_t sd_card_log_pressure_batch(const pressure_sd_batch_t *batch)
   const uint32_t mask = __get_PRIMASK(); __disable_irq();
   const uint64_t route = sd_run_snapshot();
   const uint64_t launch = sd_launch_key_locked();
-  uint32_t capture = sd_pressure_capture_route(batch, launch, g_sd_close_unix_ms);
+  uint32_t capture = sd_pressure_capture_route(batch, launch, g_sd_close_frame_ms);
   /* Classify by VB capture time when both clocks are known; otherwise use the
    * receive-time route, exactly like DAQ-captured rows. */
   if (launch != 0U && launch <= UINT32_MAX && (capture & SD_PRESSURE_ROUTE_UNKNOWN_UTC) == 0U)

@@ -36,13 +36,18 @@ typedef struct{uint64_t utc;uint32_t tick;}daq_clock_cache_t;static daq_clock_ca
 static uint32_t HAL_GetTick(void){return 7;}
 static uint32_t __get_PRIMASK(void){return 0;}static void __disable_irq(void){}static void __set_PRIMASK(uint32_t m){(void)m;}
 static daq_clock_cache_t daq_clock_cache_make(uint64_t utc,uint32_t tick){last_observed=utc;return (daq_clock_cache_t){utc,tick};}
+/* The SD launch log routes captures in the frame its deadline was mapped in. */
+static uint64_t noted=0,noted_local=0;
+static uint64_t telemetry_now_ms(void){return 4242;}
+static void sd_card_note_network_time(uint64_t utc,uint64_t local){noted=utc;noted_local=local;}
 '''+body+r'''
 int main(void){
  (void)g_acquisition_clock;
  valid=false;telemetry_update_network_health(&router);assert(!g_telemetry_timesync_valid&&!g_telemetry_network_ready&&last_observed==0);
- valid=true;net=1794183600000ULL;telemetry_update_network_health(&router);assert(g_telemetry_timesync_valid&&g_telemetry_network_ready&&last_observed==net);
+ assert(!noted);
+ valid=true;net=1794183600000ULL;telemetry_update_network_health(&router);assert(g_telemetry_timesync_valid&&g_telemetry_network_ready&&last_observed==net&&noted==net&&noted_local==4242);
  /* A clock 4 h behind (a step back) is published as it is. */
- net-=14400000ULL;telemetry_update_network_health(&router);assert(last_observed==net);
+ net-=14400000ULL;telemetry_update_network_health(&router);assert(last_observed==net&&noted==net);
  return 0;}
 '''
   compile_and_run(self,code)

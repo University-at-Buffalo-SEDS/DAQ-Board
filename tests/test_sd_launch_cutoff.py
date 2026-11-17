@@ -76,6 +76,70 @@ int main(void){
 }
 """)
 
+    def test_network_time_step_inside_the_window_keeps_the_monotonic_close(self):
+        """A 4 h step back and a 3.8 h step forward of the network clock inside
+        the launch-log window (a follower re-anchoring to a source, or a leader
+        step outside Armed..Recovery) leave the close time unchanged on the
+        monotonic clock; captures after the step are still routed by the
+        window, and a T0 revision on the new clock moves it by its true delta."""
+        source=(ROOT/'Core/Src/sd_card.c').read_text()
+        body=source[source.index('static uint64_t g_sd_session'):source.index('volatile uint32_t g_sd_line_drop_count')]
+        body=body.replace('static uint64_t g_sd_raw_session, g_sd_telemetry_session;','').replace('static uint8_t g_sd_launch_flush_pending;','')
+        self.execute(r"""
+#include <assert.h>
+#include <stdint.h>
+#include "pressure_sd_wire.h"
+#define SD_PRESSURE_ROUTE_UNKNOWN_UTC 16U
+static uint64_t base=1800000000000ULL,local=1000;static int64_t stepped;
+static uint32_t mask;
+static uint32_t __get_PRIMASK(void){return mask;}
+static void __disable_irq(void){mask=1;}
+static void __set_PRIMASK(uint32_t m){mask=m;}
+static uint64_t utc_now(void){return (uint64_t)((int64_t)(base+local)+stepped);}
+static uint64_t daq_log_unix_ms(void){assert(!mask);return utc_now();}
+static uint64_t daq_log_unix_ms_settled(void){return daq_log_unix_ms();}
+static uint64_t daq_log_monotonic_ms(void){return local;}
+"""+body+route_epoch_support(source)+function(source,'sd_pressure_capture_route')+r"""
+static void tick(uint64_t ms){local+=ms;sd_card_note_network_time(utc_now(),local);}
+static uint32_t pressure_bits(uint64_t at){pressure_sd_batch_t b={.unix_ms=at};mask=1;uint32_t r=sd_pressure_capture_route(&b,sd_launch_key_locked(),g_sd_close_frame_ms);mask=0;return r;}
+static void run(uint64_t session,int64_t step){
+ sd_card_set_launch_clock(0,0);stepped=0;tick(1000);
+ const uint64_t t0=utc_now(),opened=local;
+ const uint64_t key=sd_run_snapshot();
+ /* The window [close-20 s, close) opens 10 s from now. */
+ sd_card_set_launch_clock(session,t0+30000);
+ const uint64_t close=g_sd_close_local_ms;assert(close==opened+30000);
+ tick(15000);const uint64_t launch=sd_run_snapshot();assert(launch==key+1&&sd_launch_key_locked()==launch);
+ /* The network clock steps inside the window. */
+ stepped=step;tick(5);
+ assert(g_sd_close_local_ms==close&&!sd_launch_finished()&&sd_run_snapshot()==launch);
+ /* Captures on the stepped clock are routed by the window, as before it. */
+ mask=1;
+ assert(sd_capture_key_locked(launch,utc_now())==launch);
+ assert(sd_capture_key_locked(launch,utc_now()+14994)==launch);
+ assert(sd_capture_key_locked(launch,utc_now()+14995)==launch+1);
+ assert(sd_capture_key_locked(launch,utc_now()-5006)==launch-1);
+ assert(sd_capture_key_locked(launch,utc_now()-5005)==launch);
+ mask=0;
+ assert(pressure_bits(utc_now())==0xFU);
+ assert(pressure_bits(utc_now()+14995)==0xF00U);
+ /* A T0 revision sent on the stepped clock, 2 s later than the mapped one. */
+ sd_card_set_launch_clock(session,(uint64_t)((int64_t)(t0+32000)+step));
+ assert(g_sd_close_local_ms==close+2000);
+ sd_card_set_launch_clock(session,(uint64_t)((int64_t)(t0+30000)+step));
+ assert(g_sd_close_local_ms==close);
+ /* Close exactly at the monotonic deadline. */
+ local=close-1;assert(sd_run_snapshot()==launch&&!sd_launch_finished());
+ local=close;assert(sd_run_snapshot()==launch+1&&sd_launch_finished());
+ assert(g_sd_close_unix_ms==(uint64_t)((int64_t)(t0+30000)+step));
+}
+int main(void){
+ run(20,-INT64_C(14400000));
+ run(21,INT64_C(13680000));
+ assert(!mask);
+}
+""")
+
     def test_packet_revisions_correct_true_t0_and_reject_frozen_tombstones(self):
         source=(ROOT/'Core/Src/sd_card.c').read_text()
         lifecycle=source[source.index('static uint64_t g_sd_session'):source.index('volatile uint32_t g_sd_line_drop_count')]

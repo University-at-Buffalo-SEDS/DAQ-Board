@@ -529,6 +529,7 @@ static void telemetry_update_network_health(SedsRouter *router) {
   uint64_t network_time_ms = 0ULL;
   if (seds_router_get_network_time_ms(router, &network_time_ms) == SEDS_OK) {
     g_telemetry_timesync_valid = 1U;
+    sd_card_note_network_time(network_time_ms, telemetry_now_ms());
   }
   const daq_clock_cache_t clock = daq_clock_cache_make(network_time_ms, HAL_GetTick());
   const uint32_t mask = __get_PRIMASK();

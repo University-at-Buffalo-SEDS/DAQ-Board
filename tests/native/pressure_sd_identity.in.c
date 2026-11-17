@@ -13,6 +13,9 @@ typedef enum{SD_CARD_STATUS_OK,SD_CARD_STATUS_IO_ERROR,SD_CARD_STATUS_BUSY,SD_CA
 static uint32_t g_sd_pressure_records_enqueued,g_sd_pressure_records_dropped;
 static uint32_t g_pressure_sd_batches_received,g_pressure_sd_invalid_batches,g_reliable_refusal_count;
 static unsigned g_sd_services_initialized=1;static uint64_t g_sd_close_unix_ms=1767225620000ULL;
+#define g_sd_close_frame_ms g_sd_close_unix_ms /* no network time step in this fixture */
+static uint64_t sd_frame_utc_locked(uint64_t utc){return utc;}
+
 static uint32_t g_sd_route_epoch=3;
 #define SD_LAUNCH_WINDOW_MS 20000U
 static unsigned irq;static uint32_t __get_PRIMASK(void){return irq;}static void __disable_irq(void){irq=1;}static void __set_PRIMASK(uint32_t n){irq=n;}

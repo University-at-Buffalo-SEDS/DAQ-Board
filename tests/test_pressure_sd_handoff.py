@@ -51,6 +51,9 @@ static unsigned g_sd_write_error_count,g_sd_csv_rows_written_count;
 static uint64_t sd_run_snapshot(void){return g_sd_launch_closed ? 3 : 1;}
 static uint64_t sd_launch_key_locked(void){return 0;}
 static uint64_t g_sd_close_unix_ms=20000;
+#define g_sd_close_frame_ms g_sd_close_unix_ms /* no network time step in this fixture */
+static uint64_t sd_frame_utc_locked(uint64_t utc){return utc;}
+
 #define SD_LAUNCH_WINDOW_MS 20000U
 
 static unsigned formatting,writing,fail_write,accepted; static char written[12][384];
@@ -128,6 +131,9 @@ static uint64_t sd_run_snapshot(void){assert(mask);return 43;}
 static uint64_t sd_launch_key_locked(void){assert(mask);return 44;}
 static unsigned g_sd_services_initialized=1,g_sd_route_epoch=77;
 static uint64_t g_sd_close_unix_ms=1700000020000ULL;
+#define g_sd_close_frame_ms g_sd_close_unix_ms /* no network time step in this fixture */
+static uint64_t sd_frame_utc_locked(uint64_t utc){return utc;}
+
 #define SD_LAUNCH_WINDOW_MS 20000U
 static unsigned g_sd_pressure_records_dropped,g_sd_pressure_records_enqueued;
 '''+declarations+r'''

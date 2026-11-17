@@ -152,6 +152,9 @@ static UINT sd_write_telemetry_row(const sd_line_slot_t *slot){
 /* Optional-owner scenarios retain their existing telemetry mock; explicit
  * launch routing is covered by the independent actual writer regression. */
 static uint64_t g_sd_close_unix_ms;
+#define g_sd_close_frame_ms g_sd_close_unix_ms /* no network time step in this fixture */
+static uint64_t sd_frame_utc_locked(uint64_t utc){return utc;}
+
 /* No launch window is known to these owner tests: receive-time keys route. */
 static uint64_t sd_launch_key_locked(void){return 0;}
 /* SOURCE_STORAGE *//* SOURCE_FUNCTION:sd_pool_allocate */

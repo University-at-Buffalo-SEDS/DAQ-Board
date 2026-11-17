@@ -95,6 +95,10 @@ void sd_card_set_calibration(const daq_calibration_t *calibration);
 /* Apply only after DAQ_LOG_CLOCK receiver revision validation. Local reset
  * may use (0,0); accepted pre-cutoff T0 revisions can adjust either direction. */
 void sd_card_set_launch_clock(uint64_t session, uint64_t close_unix_ms);
+/* Router owner: the network clock read at monotonic local_ms
+ * (daq_log_monotonic_ms). Captures after a network time step are routed in
+ * the frame the launch deadline was mapped in. */
+void sd_card_note_network_time(uint64_t unix_ms, uint64_t local_ms);
 
 #ifdef __cplusplus
 }
