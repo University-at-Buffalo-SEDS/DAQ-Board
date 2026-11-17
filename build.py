@@ -430,7 +430,7 @@ class BuildConfig:
 
     allocator: str = "tlsf"
     packet_store: str = "compact"
-    sedsnet_ref: str = "main"
+    sedsnet_ref: str = "dev"
     watchdog: bool = True
     network_rate_hz: Optional[int] = None
 
@@ -989,7 +989,7 @@ def make_parser() -> argparse.ArgumentParser:
         sp.add_argument("--allocator", choices=["threadx", "tlsf"], default="tlsf",
                         help="SEDSnet allocator (default: tlsf); scheduling remains ThreadX.")
         sp.add_argument("--packet-store", choices=["heap", "compact"], default="compact",
-                        help="Compact packet arena (default); uses main unless --sedsnet-ref is explicit.")
+                        help="Compact packet arena (default); uses dev unless --sedsnet-ref is explicit.")
         sp.add_argument("--sedsnet-ref", choices=["main", "dev"], default=None,
                         help="SEDSnet branch; current remote commit is fetched, with offline fallback.")
         sp.add_argument("--no-telemetry", action="store_true", help="Configure with -DENABLE_TELEMETRY=OFF")
@@ -1085,7 +1085,7 @@ def build_cfg_from_args(ui: UI, args: argparse.Namespace) -> BuildConfig:
         network_rate_hz=args.network_rate_hz,
         allocator=args.allocator,
         packet_store=args.packet_store,
-        sedsnet_ref=args.sedsnet_ref or "main",
+        sedsnet_ref=args.sedsnet_ref or "dev",
         generator=args.generator,
         toolchain_file=toolchain,
         build_subdir=build_subdir,

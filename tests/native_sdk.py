@@ -223,7 +223,7 @@ def select_source(root, cache, env):
     match = re.search(r'set\(SEDSNET_REPOSITORY\s+"([^"]+)"', module)
     if not match or not selector.is_file():
         raise RuntimeError('The project SDK source selector is missing; restore cmake/sedsnet_source.py.')
-    ref = configured.get('SEDSNET_GIT_REF', 'main')
+    ref = configured.get('SEDSNET_GIT_REF', 'dev')
     if ref not in ('main', 'dev'):
         raise RuntimeError('Configured SEDSNET_GIT_REF must be main or dev.')
     repository = configured.get('SEDSNET_REPOSITORY', match[1])
