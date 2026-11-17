@@ -185,7 +185,7 @@ def f32(value):
 
 
 def convert(code, channel, calibration, temperature=math.nan):
-    """Raw input scales from mcp3564r_board_config.h; never reuse P8 on P6.
+    """Calibration inputs from mcp3564r_board_config.h (CH0/CH1 in ADC-pin volts); never reuse P8 on P6.
 
     Converted values are unsmoothed. P6 calibration lives in GroundStation and
     is unavailable over this firmware's SWD symbols, so its mass is absent.
@@ -197,7 +197,7 @@ def convert(code, channel, calibration, temperature=math.nan):
     if channel >= 2:
         connector = f32(voltage * 11) if channel in (6, 7) else voltage
         return voltage, connector, f32(connector * 200) if channel == 6 else connector
-    raw = f32(f32(f32(f32(float(code)) * f32(2.2104)) / 16777216) * 2) / 16
+    raw = voltage  # KG1000/KG50 calibration input is ADC-pin volts; slopes are kg/V
     corrected = raw
     if len(calibration) >= 15:
         reference, slope = calibration[11 + channel * 2:13 + channel * 2]
@@ -444,7 +444,7 @@ canvas{width:100%;height:300px;display:block;margin-top:12px}small{color:#a6b3c8
 </style><h1>DAQ sensor monitor</h1>
 <p>Apply a load, hold it, then release it. Watch the selected channel change and return toward its starting value.</p>
 <div id="status">Connecting…</div>
-<div class="controls"><label>Values <select id="units"><option value="4">Raw ADC counts</option><option value="5">ADC voltage (V)</option><option value="6">Raw telemetry value</option><option value="7">Converted (kg / psi / V)</option><option value="8">ADC temperature (°C)</option></select></label>
+<div class="controls"><label>Values <select id="units"><option value="4">Raw ADC counts</option><option value="5">ADC voltage (V)</option><option value="6">Calibration input (V)</option><option value="7">Converted (kg / psi / V)</option><option value="8">ADC temperature (°C)</option></select></label>
 <label>History <select id="window"><option value="15">15 seconds</option><option value="60" selected>60 seconds</option><option value="120">2 minutes</option></select></label>
 <button id="baseline">Set plot baseline</button><button id="absolute">Show absolute values</button><button id="pause">Pause plot</button>
 <button id="download">Download visible CSV</button></div>

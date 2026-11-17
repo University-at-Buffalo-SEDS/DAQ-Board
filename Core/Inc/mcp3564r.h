@@ -32,7 +32,7 @@ typedef struct
   uint64_t monotonic_ms;
   int32_t code;
   float voltage_v; /* ADC-pin voltage, using the nominal internal reference. */
-  float raw_value; /* CH0/1 historical calibration input; CH2..7/9 input volts (CH9 divided by PGA gain). */
+  float raw_value; /* Calibration input: ADC-pin volts on every channel (CH9 divided by PGA gain). */
   float temperature_c;
   int32_t temperature_code; /* Uncorrected TEMP conversion, valid when temperature_c is finite. */
   uint32_t overrun_count;

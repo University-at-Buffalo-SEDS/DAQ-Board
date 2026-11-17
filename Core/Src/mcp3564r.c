@@ -696,7 +696,8 @@ UINT mcp3564r_get_sample(mcp3564r_sample_t *sample)
   sample->code = code;
   sample->voltage_v = mcp3564r_code_to_voltage(code) /
       (sample->channel == 9U ? MCP3564R_P6_GAIN : 1.0f);
-  sample->raw_value = sample->channel < 2U ? mcp3564r_code_to_raw_value(code) : sample->voltage_v;
+  /* Every channel, KG1000 and KG50 included, reports ADC-pin volts. */
+  sample->raw_value = sample->voltage_v;
 
 
   return TX_SUCCESS;

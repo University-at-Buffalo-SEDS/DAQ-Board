@@ -229,8 +229,8 @@ static void test_equal_input_response(void) {
     const mcp3564r_sample_t ch1 = take(1, codes[i]);
     const mcp3564r_sample_t ch0 = take(0, codes[i]);
     assert(ch0.raw_value == ch1.raw_value && ch0.voltage_v == ch1.voltage_v);
-    const float legacy = (((float)codes[i] * 2.2104f) / 16777216.0f) * 2 / 16;
-    assert(ch1.raw_value == legacy);
+    /* Load cells report ADC-pin volts, identical to the voltage field. */
+    assert(ch1.raw_value == ch1.voltage_v && ch1.raw_value == mcp3564r_code_to_voltage(codes[i]));
   }
   /* Move only CH1 through enough frames to wrap the ring buffer indices. */
   float previous = -1;
@@ -347,7 +347,8 @@ static void test_auxiliary_pass(void) {
   }
   assert(!timer_running);
   assert(mcp3564r_start_dma()==HAL_OK && registers[7]==3);
-  receive(1,2097152); assert(take(1,2097152).raw_value!=0.6f);
+  /* The load cell resumes, now on the same ADC-pin volts scale. */
+  receive(1,2097152); assert(take(1,2097152).raw_value==0.6f);
   /* Incomplete aux scan times out and returns to load cells. */
   tick+=100;
   assert(mcp3564r_start_dma()==HAL_OK);receive(12,305656);

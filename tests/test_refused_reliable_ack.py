@@ -21,6 +21,7 @@ SOURCES = [
     ('calibration_valid', 'Core/Src/daq_calibration.c'),
     ('daq_calibration_current', 'Core/Src/daq_calibration.c'),
     ('refuse_calibration', 'Core/Src/daq_calibration.c'),
+    ('persist_record', 'Core/Src/daq_calibration.c'),
     ('persist_calibration', 'Core/Src/daq_calibration.c'),
     ('apply_calibration', 'Core/Src/daq_calibration.c'),
     ('read_u64', 'Core/Src/daq_log_clock.c'),

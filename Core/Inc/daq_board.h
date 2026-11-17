@@ -28,7 +28,7 @@ typedef struct
   uint64_t ext_adc_monotonic_ms;
   int32_t ext_adc_code;
   float ext_adc_voltage_v;
-  float ext_adc_loadcell_kg1000;
+  float ext_adc_loadcell_kg1000; /* Uncalibrated KG1000 input, ADC-pin volts (not kg). */
   float ext_adc_temp_c;
   int32_t ext_adc_temp_code;
 } daq_snapshot_t;

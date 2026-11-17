@@ -55,6 +55,7 @@ static uint32_t tick;
 static int fail_write, store_ready=1;
 static unsigned writes, clears, requests, sd_sets;
 static daq_calibration_t stored;
+static uint32_t stored_units;
 static SedsResult (*callbacks[6])(const SedsPacketView*,void*);
 uint32_t HAL_GetTick(void){return tick;}
 void mcp3564r_request_kg50_input(uint8_t input){(void)input;}
@@ -63,7 +64,8 @@ int persistent_store_init(void){return store_ready?0:2;}
 int persistent_store_get(uint32_t k,void*v,size_t*n){(void)k;(void)v;(void)n;return 1;}
 int persistent_store_set(uint32_t k,const void*v,size_t n){
  ++writes;if(fail_write)return 2;
- if(k==0x44414341u){assert(n==sizeof stored);memcpy(&stored,v,n);}return 0;
+ /* Volts-scale record: the calibration, then the 'VLTV' units mark. */
+ if(k==0x44414341u){assert(n==sizeof stored+4);memcpy(&stored,v,sizeof stored);memcpy(&stored_units,(const char*)v+sizeof stored,4);assert(stored_units==0x56544C56u);}return 0;
 }
 SedsResult seds_router_enable_network_variable(SedsRouter*r,uint32_t t,bool a,bool b){(void)r;(void)t;(void)a;(void)b;return 0;}
 SedsResult seds_router_on_network_variable_update(SedsRouter*r,uint32_t t,SedsResult(*cb)(const SedsPacketView*,void*),void*u){(void)r;(void)u;callbacks[t]=cb;return 0;}

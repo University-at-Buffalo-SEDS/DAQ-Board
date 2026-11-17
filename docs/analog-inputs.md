@@ -3,7 +3,7 @@
 Source: `Schematic PDF_[No Variations] (2).pdf`, revision A, sheets 1–3 and
 7–10. All exposed inputs below are independent, ground-referenced signals.
 The existing load-cell connectors P7/P8 remain MCP CH0/CH1, with unchanged
-KG1000/KG50 raw calibration coordinates and gain/filter settings.
+gain/filter settings; they report ADC-pin volts like CH2–5.
 
 ## Connector map
 
@@ -73,7 +73,8 @@ conversion time with load cells; their achieved rate must be measured again.
 A 25 ms auxiliary timeout restores the normal scan if a conversion is missing.
 `MCP3564R_AUX_SCAN` in `mcp3564r_board_config.h` can mask individual CH2–7 inputs
 or be zero to disable the auxiliary pass. Unread/stale fields report NaN after
-300 ms. The unchanged load-cell raw encoding preserves saved calibrations.
+300 ms. Load cells use the same ADC-pin volts scale (see
+[load-cell inputs](loadcell-inputs.md) for the legacy raw scale).
 
 Each drained MCP sample is offered to SD with its channel and original timestamp:
 CH0 `mcp3564r_raw`, CH1 `kg50_raw`, CH2–7 `mcp3564r_chN_raw`. Internal analog

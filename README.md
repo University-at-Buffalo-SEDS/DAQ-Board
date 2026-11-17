@@ -294,10 +294,12 @@ explains that DCACHE1 bypasses internal SRAM on this device. The ADC driver
 therefore uses memory barriers before DMA launch and before consuming its
 completed data, and performs no polling DCACHE maintenance in interrupts.
 
-SD raw records identify CH1 as `kg50_raw` and retain its ADC code, historical
-raw calibration value, calibrated kg, and acquisition timestamp. CH0 retains
-the `mcp3564r_raw` name. Raw calibration values preserve the existing scaling;
-they are not ADC-pin volts. Separate slow diagnostic rows `mcp3564r_voltage_v`
+SD raw records identify CH1 as `kg50_raw` and retain its ADC code, ADC-pin
+volts (the calibration input), calibrated kg, and acquisition timestamp. CH0
+retains the `mcp3564r_raw` name. KG1000/KG50 telemetry and SD values are
+ADC-pin volts; firmware before this change used a historical raw scale (one
+raw unit is 16000/921 V) and stored calibrations are converted once at boot
+(see [load-cell inputs](docs/loadcell-inputs.md)). Separate slow diagnostic rows `mcp3564r_voltage_v`
 (CH0) and `mcp3564r_ch1_voltage_v` (CH1) use the nominal internal 2.4 V reference
 and the configured ADC gain of 1.
 The replay file records `kg50_network`, identical to the raw `KG50` payload.
@@ -307,14 +309,14 @@ tare offset; calibration changes rotate files as for the original channel.
 GroundStation has a separate **50kg** load-cell tab and calibration sensor.
 With the cell unloaded, capture zero; then capture one or more known masses
 in kg, fit the calibration, and save it. Confirm zero and a known mass again.
-Until calibrated, the identity defaults are raw values, not measured kg.
+Until calibrated, the identity defaults are volts, not measured kg.
 GroundStation records `KG50` and `LOADCELL_50_WEIGHT_KG` separately, and test-fire
 CSV exports include timestamped 50 kg raw/calibrated rows. This channel does
 not change the existing 1000 kg fill-control input.
 
 `DAQ_KG50_CALIBRATION` (ID 138) carries seven float32 values
 `[c0,c1,c2,c3,c4,x0,tare]`, evaluated as
-`c0+c1*x+c2*x^2+c3*x^3+c4*x^4-tare`, where `x=raw-x0`.
+`c0+c1*x+c2*x^2+c3*x^3+c4*x^4-tare`, where `x=volts-x0`.
 GroundStation publishes this managed variable on save and serves it after
 reconnect. DAQ persists it alongside the original calibration, migrating older
 four-float stored records without changing their coefficients. The existing

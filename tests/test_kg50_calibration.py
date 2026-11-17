@@ -24,6 +24,7 @@ typedef unsigned SedsRouter;
 typedef unsigned launchcore_persist_status_t;
 typedef struct { unsigned ty; const void *payload; size_t payload_len; } SedsPacketView;
 typedef struct { float kg1000_slope, kg1000_intercept, iadc_slope, iadc_intercept, kg50[7], thermal[4], filter_tau_ms[2]; } daq_calibration_t;
+#define MCP3564R_LEGACY_RAW_TO_VOLTS (16000.0 / 921.0)
 #define SEDS_DT_DAQ_LOADCELL_CALIBRATION 137
 #define SEDS_DT_DAQ_KG50_CALIBRATION 138
 #define SEDS_DT_DAQ_THERMAL_CALIBRATION 141
@@ -39,7 +40,7 @@ static void mcp3564r_request_kg50_input(uint8_t input) { requested_input=input; 
 volatile uint32_t g_telemetry_discovery_seen=1, g_reliable_refusal_count;
 static unsigned ticks, fail_persist, requests[11], rotations, invalidations;
 static int seds_router_invalidate_network_variable_cache(SedsRouter *r,unsigned ty,bool *out){(void)r;(void)ty;assert(!out);++invalidations;return 0;}
-static unsigned char persisted[sizeof(daq_calibration_t)];
+static unsigned char persisted[sizeof(daq_calibration_t) + 4];
 static size_t persisted_len;
 static daq_calibration_t sd_calibration;
 static uint32_t __get_PRIMASK(void) { return 0; }
@@ -81,9 +82,14 @@ int main(void) {
   memcpy(persisted,legacy,sizeof(legacy)); persisted_len=sizeof(legacy);
   SedsRouter router=0;
   assert(daq_calibration_init(&router)==SEDS_OK);
-  assert(g_daq_calibration_restores==1 && g_calibration.kg1000_slope==2);
+  /* A legacy raw-scale record is converted to volts and stored again. */
+  const float k=(float)MCP3564R_LEGACY_RAW_TO_VOLTS;
+  assert(g_daq_calibration_restores==1 && fabsf(g_calibration.kg1000_slope*k-2)<1e-6f);
+  assert(g_calibration.kg1000_intercept==3 && g_calibration.iadc_slope==4 && g_calibration.iadc_intercept==5);
+  assert(g_daq_calibration_migrations==1 && persisted_len==sizeof(daq_calibration_t)+4);
   assert(requested_input==0 && g_daq_kg50_input_restores==0); /* Blank board stays on AMP2. */
-  assert(g_calibration.kg50[1]==1 && daq_calibration_apply_kg50(&g_calibration,5)==5);
+  /* The identity default was raw-identity; it stays kg-identical in volts. */
+  assert(fabsf(daq_calibration_apply_kg50(&g_calibration,5*k)-5)<1e-5f);
   ticks=500; assert(daq_calibration_poll(&router)==0);
   assert(requests[10]==1);
   uint8_t input=1;
@@ -124,9 +130,9 @@ int main(void) {
   assert(sd_calibration.kg50[1]==2 && rotations==2);
   fail_persist=0;
   assert(apply_calibration(&packet,NULL)==SEDS_OK && rotations==2);
-  assert(g_calibration.kg1000_slope==2 && g_calibration.iadc_slope==4);
+  assert(fabsf(g_calibration.kg1000_slope*k-2)<1e-6f && g_calibration.iadc_slope==4);
   assert(g_calibration.kg50[2]==3 && sd_calibration.kg50[2]==3);
-  assert(persisted_len==sizeof(daq_calibration_t));
+  assert(persisted_len==sizeof(daq_calibration_t)+4);
   assert(daq_calibration_apply_kg50(&g_calibration,3)==11);
   float thermal[4]={20,0.2f,25,-0.5f};
   packet=(SedsPacketView){141,thermal,sizeof(thermal)};
@@ -158,14 +164,22 @@ int main(void) {
   assert(g_calibration.kg1000_slope==7 && g_calibration.kg50[2]==3);
   assert(g_calibration.thermal[1]==0.2f);
   assert(g_calibration.filter_tau_ms[1]==200);
+  /* Older raw-scale record sizes: the stored prefix is converted. */
+  daq_calibration_t volts=g_calibration;
   persisted_len=15*sizeof(float); /* Thermal record predating filters. */
   memset(&g_calibration,0,sizeof(g_calibration)); g_restore_attempted=false;
   daq_calibration_restore();
-  assert(g_calibration.thermal[1]==0.2f && g_calibration.filter_tau_ms[1]==0);
+  assert(fabsf(g_calibration.thermal[1]-0.2f*k)<1e-6f && g_calibration.filter_tau_ms[1]==0);
+  assert(fabsf(g_calibration.kg50[2]*k*k-3)<1e-5f && persisted_len==sizeof(daq_calibration_t)+4);
+  memcpy(persisted,&volts,sizeof(volts)); /* rewrite the raw prefix */
   persisted_len=11*sizeof(float); /* Previous KG50 format without thermal fields. */
   memset(&g_calibration,0,sizeof(g_calibration)); g_restore_attempted=false;
   daq_calibration_restore();
-  assert(g_calibration.kg50[2]==3 && g_calibration.thermal[1]==0);
+  assert(fabsf(g_calibration.kg50[2]*k*k-volts.kg50[2])<1e-5f && g_calibration.thermal[1]==0);
+  /* An unknown record size is refused, not guessed. */
+  persisted_len=13*sizeof(float); errors=g_daq_calibration_errors; g_restore_attempted=false;
+  daq_calibration_restore();
+  assert(g_daq_calibration_errors==errors+1);
 }
 '''
         with tempfile.TemporaryDirectory() as tmp:

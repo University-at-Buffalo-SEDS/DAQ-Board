@@ -36,12 +36,15 @@ static daq_calibration_t g_calibration={1.0f,0.0f,1.0f,0.0f,{0},{0},{0.0f,1.0f}}
 static bool g_persist_ready=true,g_network_value_seen,g_kg50_network_value_seen,g_thermal_network_value_seen,g_filter_network_value_seen;
 static uint32_t g_daq_calibration_errors,g_daq_calibration_persist_writes,g_daq_calibration_updates;
 #define DAQ_CALIBRATION_PERSIST_KEY 1U
+#define DAQ_CALIBRATION_VOLTS_MARK 0x56544C56u
+typedef struct{daq_calibration_t calibration;uint32_t units;}daq_calibration_record_t;
 static unsigned calibration_sets;static void sd_card_set_calibration(const daq_calibration_t*c){(void)c;++calibration_sets;}
 static uint8_t g_calibration_persist_pending;
 static int persistent_store_init(void){return LAUNCHCORE_PERSIST_OK;}
 /* SOURCE_FUNCTION:calibration_valid */
 /* SOURCE_FUNCTION:daq_calibration_current */
 /* SOURCE_FUNCTION:refuse_calibration */
+/* SOURCE_FUNCTION:persist_record */
 /* SOURCE_FUNCTION:persist_calibration */
 /* SOURCE_FUNCTION:apply_calibration */
 

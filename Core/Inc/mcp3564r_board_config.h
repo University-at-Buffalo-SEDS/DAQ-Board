@@ -56,10 +56,22 @@ static inline float mcp3564r_code_to_temperature(int32_t code)
   return 0.00040096f * (float)code * MCP3564R_NOMINAL_VREF_V - 269.13f;
 }
 
-/* Preserve the existing KG1000/KG50 calibration input exactly. This historical
- * scale is neither ADC-pin volts nor kg. Changing it would invalidate saved
- * GroundStation/DAQ calibration coefficients and previously captured points. */
-static inline float mcp3564r_code_to_raw_value(int32_t code)
+/* KG1000 (CH0) and KG50 AMP2 (CH1) are reported in ADC-pin volts, the same
+ * mcp3564r_code_to_voltage() scale as every other channel.
+ *
+ * Firmware before this change reported them on a historical "raw" scale,
+ * code * 2.2104 / 2^24 * 2 / 16 = code * 2.2104 / 2^27, which is neither
+ * volts nor kg. Saved calibrations and recordings use that scale. One legacy
+ * raw unit is
+ *   volts / raw = (2.4 / 2^23) / (2.2104 / 2^27) = 2.4 * 16 / 2.2104
+ *               = 38.4 / 2.2104 = 16000 / 921  (~17.3724213)
+ * volts, exactly. Convert a legacy value with volts = raw * k; a legacy
+ * kg-per-raw slope with kg/V = (kg/raw) / k. */
+#define MCP3564R_LEGACY_RAW_TO_VOLTS (16000.0 / 921.0)
+
+/* The pre-volts KG1000/KG50 scale. Only calibration migration and its tests
+ * use it; acquisition never reports it. */
+static inline float mcp3564r_code_to_legacy_raw_value(int32_t code)
 {
   return (((float)code * 2.2104f) / 16777216.0f) * 2.0f / 16.0f;
 }

@@ -117,9 +117,22 @@ two inputs share the available conversion rate.
 
 The previous voltage calculation included a divide by 16 despite configuring
 gain 1, and used 2.2104 V rather than the nominal internal reference voltage.
-Firmware now uses the corrected formula for voltage diagnostics. It retains
-the historical raw scale for KG1000, KG50, GS calibration, and SD raw values
-so saved coefficients and captured calibration points remain compatible.
+Firmware now uses the corrected formula everywhere: KG1000, KG50, GS
+calibration and SD raw values are ADC-pin volts, `code * 2.4 / 2^23`.
+
+Earlier firmware reported KG1000/KG50 on a historical raw scale,
+`code * 2.2104 / 2^27`, which is neither volts nor kg. One raw unit is exactly
+`k = (2.4 / 2^23) / (2.2104 / 2^27) = 16000 / 921` (about 17.3724) volts
+(`MCP3564R_LEGACY_RAW_TO_VOLTS`). The DAQ converts a stored raw-scale
+calibration once at boot, so the same ADC code gives the same on-board kg:
+KG1000 slope / k (intercept unchanged); KG50 `x0 * k`, `c_i / k^i` for
+i = 1..4 (`c0` and tare unchanged); thermal raw/C terms * k (reference
+temperatures unchanged); IADC and filter settings unchanged. The converted
+record is stored again with a trailing volts mark (72 bytes, same key); a
+record without it (16, 44, 60 or 68 bytes) is treated as raw scale.
+`g_daq_calibration_migrations` counts completed conversions. SD files declare
+the volts scale with `loadcell_input=adc_volts` at the end of each
+`# calibration` line; files without it use the raw scale.
 SD diagnostic rows are `mcp3564r_voltage_v` for CH0 and
 `mcp3564r_ch1_voltage_v` for CH1.
 

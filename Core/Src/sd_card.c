@@ -896,6 +896,9 @@ static UINT sd_close_file(sd_log_t *log)
   return status;
 }
 
+/* loadcell_input=adc_volts marks files whose KG1000/KG50 values, slopes (kg/V),
+ * kg50_x0 and *_raw_per_c (V/C) use ADC-pin volts. Older files lack it and
+ * use the legacy raw scale (volts = raw * 16000/921). */
 static int sd_format_calibration_line(char *line, size_t size, const daq_calibration_t *calibration)
 {
   char coefficients[17][24];
@@ -911,7 +914,7 @@ static int sd_format_calibration_line(char *line, size_t size, const daq_calibra
   sd_format_float(coefficients[16], calibration->filter_tau_ms[1]);
   const int len = snprintf(
       line, size,
-      "# calibration,kg1000_slope=%s,kg1000_intercept=%s,iadc_slope=%s,iadc_intercept=%s,kg50_c0=%s,kg50_c1=%s,kg50_c2=%s,kg50_c3=%s,kg50_c4=%s,kg50_x0=%s,kg50_tare=%s,kg1000_temp_ref=%s,kg1000_raw_per_c=%s,kg50_temp_ref=%s,kg50_raw_per_c=%s,kg1000_filter_tau_ms=%s,kg50_filter_tau_ms=%s\r\n",
+      "# calibration,kg1000_slope=%s,kg1000_intercept=%s,iadc_slope=%s,iadc_intercept=%s,kg50_c0=%s,kg50_c1=%s,kg50_c2=%s,kg50_c3=%s,kg50_c4=%s,kg50_x0=%s,kg50_tare=%s,kg1000_temp_ref=%s,kg1000_raw_per_c=%s,kg50_temp_ref=%s,kg50_raw_per_c=%s,kg1000_filter_tau_ms=%s,kg50_filter_tau_ms=%s,loadcell_input=adc_volts\r\n",
       coefficients[0], coefficients[1], coefficients[2], coefficients[3],
       coefficients[4], coefficients[5], coefficients[6], coefficients[7],
       coefficients[8], coefficients[9], coefficients[10],

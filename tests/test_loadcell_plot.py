@@ -48,14 +48,14 @@ class LoadcellPlotTests(unittest.TestCase):
                          [(5, 0xFFFFFFFE, 1, 2097152, 25.0)])
 
     def test_voltage_and_independent_calibration(self):
-        calibration = [2., 3., 1., 0., 4., 5., 6., 0., 0., 0.01, 7.]
+        calibration = [2., 3., 1., 0., 4., 5., 6., 0., 0., 0.2, 7.]
         volts, raw, kg0 = plot.convert(2097152, 0, calibration)
         self.assertAlmostEqual(volts, 0.6, places=7)
-        self.assertAlmostEqual(raw, 0.0345375, places=8)
+        self.assertEqual(raw, volts)  # load-cell calibration input is ADC-pin volts
         _, raw1, kg1 = plot.convert(2097152, 1, calibration)
         self.assertEqual(raw, raw1)
         self.assertAlmostEqual(kg0, 2 * raw + 3, places=6)
-        x = raw - .01
+        x = raw - .2
         self.assertAlmostEqual(kg1, 4 + 5*x + 6*x*x - 7, places=6)
 
     def test_capture_csv_and_incremental_browser_response(self):

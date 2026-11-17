@@ -2,6 +2,7 @@
 
 #include "main.h"
 #include "mcp3564r.h"
+#include "mcp3564r_board_config.h"
 #include "persistent_store.h"
 #include "sd_card.h"
 #include "sedsnet_config.h"
@@ -19,6 +20,15 @@ extern volatile uint32_t g_telemetry_discovery_seen;
 #define DAQ_CALIBRATION_PERSIST_KEY 0x44414341u
 #define DAQ_KG50_INPUT_PERSIST_KEY 0x4441494Eu
 #define DAQ_CALIBRATION_RETRY_MS 500U
+/* Trails a calibration stored in ADC-pin volts. Records without it (4, 11,
+ * 15 or 17 floats) predate volts and use the legacy raw scale. */
+#define DAQ_CALIBRATION_VOLTS_MARK 0x56544C56u
+
+typedef struct
+{
+  daq_calibration_t calibration;
+  uint32_t units;
+} daq_calibration_record_t;
 
 static daq_calibration_t g_calibration = {1.0f, 0.0f, 1.0f, 0.0f, {0.0f, 1.0f}, {0}, {0}};
 static bool g_restore_attempted;
@@ -42,6 +52,7 @@ volatile uint32_t g_daq_calibration_persist_writes __attribute__((used, external
 volatile uint32_t g_daq_calibration_errors __attribute__((used, externally_visible));
 volatile uint32_t g_daq_kg50_input_restores __attribute__((used, externally_visible));
 volatile uint32_t g_daq_kg50_input_persist_writes __attribute__((used, externally_visible));
+volatile uint32_t g_daq_calibration_migrations __attribute__((used, externally_visible));
 
 static bool calibration_valid(const daq_calibration_t *value)
 {
@@ -81,6 +92,30 @@ static void kg50_input_restore(void)
 #endif
 }
 
+void daq_calibration_from_legacy_raw(daq_calibration_t *calibration)
+{
+  /* kg = f(raw) and raw = volts / k, so every coefficient of the input
+   * moves by k while kg for the same ADC code stays the same. */
+  const double k = MCP3564R_LEGACY_RAW_TO_VOLTS;
+  calibration->kg1000_slope = (float)((double)calibration->kg1000_slope / k);
+  double scale = 1.0;
+  for (unsigned i = 1U; i <= 4U; ++i)
+  {
+    scale *= k;
+    calibration->kg50[i] = (float)((double)calibration->kg50[i] / scale);
+  }
+  calibration->kg50[5] = (float)((double)calibration->kg50[5] * k); /* x0 */
+  calibration->thermal[1] = (float)((double)calibration->thermal[1] * k);
+  calibration->thermal[3] = (float)((double)calibration->thermal[3] * k);
+}
+
+static bool persist_record(const daq_calibration_t *calibration)
+{
+  const daq_calibration_record_t record = {*calibration, DAQ_CALIBRATION_VOLTS_MARK};
+  return persistent_store_set(DAQ_CALIBRATION_PERSIST_KEY, &record, sizeof(record)) ==
+         LAUNCHCORE_PERSIST_OK;
+}
+
 void daq_calibration_restore(void)
 {
   if (g_restore_attempted) return;
@@ -92,19 +127,35 @@ void daq_calibration_restore(void)
   }
   g_persist_ready = true;
   kg50_input_restore();
-  daq_calibration_t stored = g_calibration;
-  size_t size = sizeof(stored);
+  daq_calibration_record_t record = {g_calibration, 0U};
+  size_t size = sizeof(record);
   const launchcore_persist_status_t status = persistent_store_get(
-      DAQ_CALIBRATION_PERSIST_KEY, &stored, &size);
+      DAQ_CALIBRATION_PERSIST_KEY, &record, &size);
   if (status == LAUNCHCORE_PERSIST_NOT_FOUND) return;
-  if (status != LAUNCHCORE_PERSIST_OK || (size != sizeof(stored) && size != 4U * sizeof(float) && size != 11U * sizeof(float) && size != 15U * sizeof(float)) ||
-      !calibration_valid(&stored))
+  const bool volts = size == sizeof(record) && record.units == DAQ_CALIBRATION_VOLTS_MARK;
+  const bool legacy = size == sizeof(daq_calibration_t) || size == 4U * sizeof(float) ||
+                      size == 11U * sizeof(float) || size == 15U * sizeof(float);
+  if (status != LAUNCHCORE_PERSIST_OK || (!volts && !legacy))
   {
     g_daq_calibration_errors++;
     return;
   }
-  g_calibration = stored;
+  /* One-time migration: a record from raw-scale firmware is converted and
+   * stored again in volts. Until that write succeeds the legacy record stays
+   * and is converted again at the next boot. */
+  if (legacy) daq_calibration_from_legacy_raw(&record.calibration);
+  if (!calibration_valid(&record.calibration))
+  {
+    g_daq_calibration_errors++;
+    return;
+  }
+  g_calibration = record.calibration;
   g_daq_calibration_restores++;
+  if (legacy)
+  {
+    if (persist_record(&g_calibration)) g_daq_calibration_migrations++;
+    else g_daq_calibration_errors++;
+  }
 }
 
 #ifdef TELEMETRY_ENABLED
@@ -123,9 +174,7 @@ static void persist_calibration(void)
 {
   if (!g_persist_ready) g_persist_ready = persistent_store_init() == LAUNCHCORE_PERSIST_OK;
   const daq_calibration_t current = daq_calibration_current();
-  if (!g_persist_ready ||
-      persistent_store_set(DAQ_CALIBRATION_PERSIST_KEY, &current, sizeof(current)) !=
-          LAUNCHCORE_PERSIST_OK)
+  if (!g_persist_ready || !persist_record(&current))
   {
     g_daq_calibration_errors++;
     return;

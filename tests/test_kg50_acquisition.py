@@ -133,7 +133,7 @@ int main(void) {
             self.assertEqual(result.returncode, 0, result.stderr)
             subprocess.run([str(binary)], check=True)
 
-    def test_board_voltage_scale_preserves_existing_calibration_inputs(self):
+    def test_board_voltage_scale_and_legacy_raw_formula(self):
         harness = r'''
 #include <assert.h>
 #include <math.h>
@@ -150,8 +150,9 @@ int main(void) {
   assert(mcp3564r_code_to_voltage(-8388608) == -2.4f);
   const int32_t codes[] = {0, 1, -1, 790001, 2097152, 8388607, -8388608, 16777215};
   for (unsigned i = 0; i < sizeof(codes) / sizeof(codes[0]); ++i) {
+    /* The legacy formula is kept bit-exact for calibration migration. */
     const float historical = (((float)codes[i] * 2.2104f) / 16777216.0f) * 2.0f / 16.0f;
-    const float current = mcp3564r_code_to_raw_value(codes[i]);
+    const float current = mcp3564r_code_to_legacy_raw_value(codes[i]);
     assert(memcmp(&historical, &current, sizeof(float)) == 0);
   }
 }
