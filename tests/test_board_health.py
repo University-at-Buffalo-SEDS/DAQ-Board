@@ -44,6 +44,8 @@ void __set_PRIMASK(uint32_t value){mask=value;}
 uint32_t board_health_can_rx_drops(void){return 31;}
 uint32_t board_health_uart_rx_drops(void){return 32;}
 uint32_t board_health_adc_overruns(void){return 33;}
+#define DAQ_CONFIG_TAG UINT32_C(0x31474643)
+uint32_t daq_calibration_identity(uint32_t *flags){*flags=0x11fU;return 0xabcdef01U;}
 size_t seds_memory_admission_rejected(void){return 34;}
 void telemetry_lock(void){assert(!mask);++lock_depth;}
 void telemetry_unlock(void){assert(lock_depth==1);--lock_depth;}
@@ -70,6 +72,9 @@ int main(void){
  assert((captured[1]&0xffffff00U)==0x17bd0100U);
  assert(calls==2&&captured[23]==1&&captured[0]==1&&captured[4]==1000);
  assert(captured[5]==123&&captured[6]==5&&captured[11]==34&&captured[12]==31);
+ /* Config identity: tag, CRC, flags; the generic word-13..15 flags stay clear. */
+ assert(captured[13]==0x31474643U&&captured[14]==0xabcdef01U&&captured[15]==0x11fU);
+ assert(!(captured[1]&(4U|8U|64U)));
 #ifdef TELEMETRY_USE_TLSF
  assert((captured[1]&1)&&captured[7]==100&&captured[8]==200&&captured[9]==4096&&captured[10]==7);
 #else

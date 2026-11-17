@@ -2,6 +2,7 @@
 #include "board_temperature.h"
 #include "board_uptime.h"
 #include "board_watchdog.h"
+#include "daq_calibration.h"
 #include "telemetry.h"
 #include "main.h"
 #include "sd_card.h"
@@ -63,6 +64,9 @@ void board_health_poll(SedsRouter *router)
   words[1] |= 32U; words[22] = board_health_adc_overruns();
   __set_PRIMASK(saved);
   words[11] = (uint32_t)seds_memory_admission_rejected();
+  /* Config identity (flags 4/8/64 stay clear: these are not the generic
+   * CAN TX / UART / queue words). */
+  words[13] = DAQ_CONFIG_TAG; words[14] = daq_calibration_identity(&words[15]);
   words[23] = failures;
   words[1] |= board_temperature_health_flags();
   if (!telemetry_router_enter()) { ++failures; return; }

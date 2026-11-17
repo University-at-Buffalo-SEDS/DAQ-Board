@@ -40,6 +40,8 @@ static bool g_kg50_network_value_seen;
 static bool g_thermal_network_value_seen;
 static bool g_filter_network_value_seen;
 static bool g_input_network_value_seen;
+static bool g_kg50_input_restored;
+static uint8_t g_kg50_input_applied;
 /* Nonzero while the applied calibration is not durable. The 500 ms poll
  * counts it 1, 2: the retry runs on every second tick (once per second). */
 static uint8_t g_calibration_persist_pending;
@@ -87,6 +89,8 @@ static void kg50_input_restore(void)
     return;
   }
   g_kg50_input_stored = stored;
+  g_kg50_input_applied = stored;
+  g_kg50_input_restored = true;
   mcp3564r_request_kg50_input(stored);
   g_daq_kg50_input_restores++;
 #endif
@@ -240,6 +244,7 @@ static SedsResult apply_kg50_input(const SedsPacketView *packet, void *user)
     }
   }
   mcp3564r_request_kg50_input(input);
+  g_kg50_input_applied = input;
   g_input_network_value_seen = true;
   /* The station owns this selection and re-sends it while this board reports
    * another input. Its revision stamps are per calibration file (one per
@@ -250,6 +255,47 @@ static SedsResult apply_kg50_input(const SedsPacketView *packet, void *user)
   if (user != NULL)
     (void)seds_router_invalidate_network_variable_cache((SedsRouter *)user, packet->ty, NULL);
   return SEDS_OK;
+}
+
+/* IEEE CRC-32 (launchcore_crc32), bitwise: the identity is computed once per
+ * 5 s health report over 68 bytes. */
+static uint32_t identity_crc(uint32_t crc, const void *data, size_t len)
+{
+  const uint8_t *bytes = (const uint8_t *)data;
+  crc = ~crc;
+  while (len--)
+  {
+    crc ^= *bytes++;
+    for (unsigned bit = 0; bit < 8U; ++bit) crc = (crc >> 1) ^ (0xEDB88320u & (0U - (crc & 1U)));
+  }
+  return ~crc;
+}
+
+uint32_t daq_calibration_identity(uint32_t *flags)
+{
+  const daq_calibration_t c = daq_calibration_current();
+  /* Station payload order, field by field: the station hashes the bytes it
+   * sends, so the identity does not depend on units or struct padding. */
+  uint32_t crc = identity_crc(0U, &c.kg1000_slope, sizeof c.kg1000_slope);
+  crc = identity_crc(crc, &c.kg1000_intercept, sizeof c.kg1000_intercept);
+  crc = identity_crc(crc, &c.iadc_slope, sizeof c.iadc_slope);
+  crc = identity_crc(crc, &c.iadc_intercept, sizeof c.iadc_intercept);
+  crc = identity_crc(crc, c.kg50, sizeof c.kg50);
+  crc = identity_crc(crc, c.thermal, sizeof c.thermal);
+  crc = identity_crc(crc, c.filter_tau_ms, sizeof c.filter_tau_ms);
+  if (flags != NULL)
+  {
+    *flags = (g_network_value_seen ? DAQ_CONFIG_FROM_STATION_LOADCELL : 0U) |
+             (g_kg50_network_value_seen ? DAQ_CONFIG_FROM_STATION_KG50 : 0U) |
+             (g_thermal_network_value_seen ? DAQ_CONFIG_FROM_STATION_THERMAL : 0U) |
+             (g_filter_network_value_seen ? DAQ_CONFIG_FROM_STATION_FILTER : 0U) |
+             (g_input_network_value_seen ? DAQ_CONFIG_FROM_STATION_INPUT : 0U) |
+             (g_daq_calibration_restores != 0U ? DAQ_CONFIG_RESTORED : 0U) |
+             (g_calibration_persist_pending != 0U ? DAQ_CONFIG_NOT_DURABLE : 0U) |
+             (g_kg50_input_restored ? DAQ_CONFIG_INPUT_RESTORED : 0U) |
+             ((uint32_t)(g_kg50_input_applied & 1U) << DAQ_CONFIG_INPUT_SHIFT);
+  }
+  return crc;
 }
 
 SedsResult daq_calibration_init(SedsRouter *router)
