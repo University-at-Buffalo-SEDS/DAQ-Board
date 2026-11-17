@@ -43,7 +43,7 @@ static UINT fx_file_write(FX_FILE *f, void *p, ULONG bytes) {
 }
 ''' + helpers + r'''
 int main(void) {
-  const char row[]="12345,12345,kg50_network,3.0,,,,local,,\r\n";
+  const char row[]="12345,12345,kg50_window_v,3.0,,,,local,,\r\n";
   for(unsigned i=0;i<400;++i) assert(sd_log_write(&g_log,row,sizeof(row)-1)==0);
   assert(calls<8); /* Not one file write per row. */
   assert(written+g_log.len==400*(sizeof(row)-1));

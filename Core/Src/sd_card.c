@@ -150,7 +150,7 @@ _Static_assert(offsetof(sd_scalar_slot_t, count) == offsetof(sd_line_slot_t, lin
 #define SD_OPTIONAL_SNAPSHOT_TAG (UINT16_MAX - 1U)
 #define SD_OPTIONAL_SNAPSHOT_SLOTS 3U
 #ifndef SD_OPTIONAL_SNAPSHOT_ROWS
-#define SD_OPTIONAL_SNAPSHOT_ROWS 24U
+#define SD_OPTIONAL_SNAPSHOT_ROWS 22U
 #endif
 typedef struct {
   uint16_t len;
@@ -166,7 +166,7 @@ _Static_assert(offsetof(sd_optional_snapshot_t, values) == offsetof(sd_line_slot
 _Static_assert(offsetof(sd_line_slot_t, line) == 88U, "Capture lease fills line padding");
 _Static_assert(offsetof(sd_raw_slot_t, samples) == 96U, "Capture lease fills raw padding");
 _Static_assert(offsetof(sd_scalar_slot_t, records) == 112U, "Capture lease fills scalar padding");
-_Static_assert(sizeof(sd_optional_snapshot_t) == 208U, "Capture lease fills snapshot padding");
+_Static_assert(sizeof(sd_optional_snapshot_t) == 200U, "Capture lease fills snapshot padding");
 _Static_assert(sizeof(sd_optional_snapshot_t) * SD_OPTIONAL_SNAPSHOT_SLOTS + 64U < 1024U,
                "SD-only optional retention must remain below one KiB");
 
@@ -178,11 +178,9 @@ static ULONG g_sd_raw_queue_storage[SD_RAW_QUEUE_DEPTH];
  * atomically when it removes that exact slot from the queue. */
 static sd_raw_slot_t *g_sd_raw_append_tail;
 static sd_scalar_slot_t *g_sd_scalar_append_tail;
+/* SD sensor names are <sensor>_<unit> (see README "SD sensor names"). */
 static const char *const g_sd_scalar_sensors[] = {
-  "kg1000_network", "kg50_network", "kg50_p6_network_volts",
-  "chamber_pressure_raw_volts_psi", "valve_pressure_psi",
-  "input_voltage_v",
-  "input_current_a",
+  "chamber_pressure_v", "valve_pressure_psi",
   "adc1_aux_v",
   "analog_in_1_v",
   "analog_in_2_v",
@@ -200,13 +198,13 @@ static const char *const g_sd_scalar_sensors[] = {
   "imon_v",
   "analog_out_1_v",
   "analog_out_2_v",
-  "mcp3564r_code",
-  "mcp3564r_voltage_v",
-  "kg1000_raw_window_average",
+  "kg1000_window_code",
+  "kg1000_window_v",
+  "kg1000_window_input_v",
   "mcp3564r_temp_c",
-  "mcp3564r_ch1_voltage_v"
+  "kg50_window_v"
 };
-#define SD_REQUIRED_SCALAR_SENSORS 5U
+#define SD_REQUIRED_SCALAR_SENSORS 2U
 _Static_assert(sizeof(g_sd_scalar_sensors) / sizeof(g_sd_scalar_sensors[0]) ==
     SD_REQUIRED_SCALAR_SENSORS + SD_OPTIONAL_SNAPSHOT_ROWS,
     "Snapshot field order must match the existing optional sensor names");
@@ -408,6 +406,19 @@ static uint64_t sd_capture_key_locked(uint64_t route, uint64_t capture_unix_ms)
   const uint64_t capture = sd_frame_utc_locked(capture_unix_ms);
   if (capture >= g_sd_close_frame_ms) return launch + 1U;
   return capture >= g_sd_close_frame_ms - SD_LAUNCH_WINDOW_MS ? launch : launch - 1U;
+}
+
+#define SD_LAUNCH_SUPPLY_LEAD_MS 500U
+uint8_t sd_card_launch_window_active(void)
+{
+  const uint64_t local = daq_log_monotonic_ms();
+  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  (void)sd_route_session_locked(local);
+  const uint8_t active = g_sd_deadline_anchored && !g_sd_launch_closed &&
+      (g_sd_launch_opened || (local < g_sd_close_local_ms &&
+       g_sd_close_local_ms - local <= SD_LAUNCH_WINDOW_MS + SD_LAUNCH_SUPPLY_LEAD_MS));
+  __set_PRIMASK(mask);
+  return active;
 }
 
 static uint64_t sd_run_snapshot(void)
@@ -942,7 +953,9 @@ static UINT sd_close_file(sd_log_t *log)
 
 /* loadcell_input=adc_volts marks files whose KG1000/KG50 values, slopes (kg/V),
  * kg50_x0 and *_raw_per_c (V/C) use ADC-pin volts. Older files lack it and
- * use the legacy raw scale (volts = raw * 16000/921). */
+ * use the legacy raw scale (volts = raw * 16000/921). loadcell_boxcar_ms is
+ * the bin width of the KG1000/KG50 network boxcar (daq_bin_average_add), so a
+ * reader can rebuild that stream from the raw records. */
 static int sd_format_calibration_line(char *line, size_t size, const daq_calibration_t *calibration)
 {
   char coefficients[17][24];
@@ -958,11 +971,12 @@ static int sd_format_calibration_line(char *line, size_t size, const daq_calibra
   sd_format_float(coefficients[16], calibration->filter_tau_ms[1]);
   const int len = snprintf(
       line, size,
-      "# calibration,kg1000_slope=%s,kg1000_intercept=%s,iadc_slope=%s,iadc_intercept=%s,kg50_c0=%s,kg50_c1=%s,kg50_c2=%s,kg50_c3=%s,kg50_c4=%s,kg50_x0=%s,kg50_tare=%s,kg1000_temp_ref=%s,kg1000_raw_per_c=%s,kg50_temp_ref=%s,kg50_raw_per_c=%s,kg1000_filter_tau_ms=%s,kg50_filter_tau_ms=%s,loadcell_input=adc_volts\r\n",
+      "# calibration,kg1000_slope=%s,kg1000_intercept=%s,iadc_slope=%s,iadc_intercept=%s,kg50_c0=%s,kg50_c1=%s,kg50_c2=%s,kg50_c3=%s,kg50_c4=%s,kg50_x0=%s,kg50_tare=%s,kg1000_temp_ref=%s,kg1000_raw_per_c=%s,kg50_temp_ref=%s,kg50_raw_per_c=%s,kg1000_filter_tau_ms=%s,kg50_filter_tau_ms=%s,loadcell_input=adc_volts,loadcell_boxcar_ms=%u\r\n",
       coefficients[0], coefficients[1], coefficients[2], coefficients[3],
       coefficients[4], coefficients[5], coefficients[6], coefficients[7],
       coefficients[8], coefficients[9], coefficients[10],
-      coefficients[11], coefficients[12], coefficients[13], coefficients[14], coefficients[15], coefficients[16]);
+      coefficients[11], coefficients[12], coefficients[13], coefficients[14], coefficients[15], coefficients[16],
+      (unsigned)DAQ_BROADCAST_PERIOD_MS);
   return len > 0 && (size_t)len < size ? len : -1;
 }
 
@@ -1978,10 +1992,12 @@ void sd_card_writer_thread_entry(ULONG initial_input)
         {
           const sd_raw_adc_record_t *sample = &slot->samples[i];
           const uint64_t captured_uptime = board_uptime_project(slot->uptime_reference, sample->monotonic_ms);
-          const char *sensor = daq_chamber_is_channel(sample->channel) ? "chamber_pressure_raw_volts_psi" : sample->channel < 8U ? (const char *const[]){
-              "mcp3564r_raw", "kg50_raw", "mcp3564r_ch2_raw", "mcp3564r_ch3_raw",
-              "mcp3564r_ch4_raw", "mcp3564r_ch5_raw", "mcp3564r_ch6_raw", "mcp3564r_ch7_raw"
-          }[sample->channel] : sample->channel == 9U ? "mcp3564r_ch2_ch3_gain16_raw" : "invalid_adc_channel";
+          const char *sensor = daq_chamber_is_channel(sample->channel) ? "chamber_pressure_v" : sample->channel < 8U ? (const char *const[]){
+              "kg1000_v", "kg50_v", "mcp3564r_ch2_v", "mcp3564r_ch3_v",
+              "mcp3564r_ch4_v", "mcp3564r_ch5_v", "mcp3564r_ch6_v", "mcp3564r_ch7_v"
+          }[sample->channel] : sample->channel == 9U ? "kg50_p6_v" :
+              sample->channel == SD_RAW_CHANNEL_INPUT_VOLTAGE ? "input_voltage_v" :
+              sample->channel == SD_RAW_CHANNEL_INPUT_CURRENT ? "input_current_a" : "invalid_adc_channel";
           const int len = sd_format_csv_raw_record(line, sizeof(line),
               sample->network_unix_ms, captured_uptime, sensor, sample->raw_adc_code,
               sample->raw_value, sample->calibrated_value, sample->adc_temperature_c,
@@ -2133,6 +2149,7 @@ static sd_card_status_t sd_enqueue_line(sd_line_slot_t *slot, uint64_t capture_u
 static uint8_t sd_raw_is_essential(const sd_raw_adc_record_t *sample)
 {
   return sample->channel == 0U || sample->channel == 1U || sample->channel == 9U ||
+      sample->channel == SD_RAW_CHANNEL_INPUT_VOLTAGE || sample->channel == SD_RAW_CHANNEL_INPUT_CURRENT ||
       daq_chamber_is_channel(sample->channel);
 }
 
@@ -2207,9 +2224,7 @@ static void sd_release_telemetry_owner(sd_line_slot_t *owner)
 
 static uint8_t sd_required_sensor_name(const char *name)
 {
-  return strcmp(name, "kg1000_network") == 0 || strcmp(name, "kg50_network") == 0 ||
-      strcmp(name, "kg50_p6_network_volts") == 0 ||
-      strcmp(name, "chamber_pressure_raw_volts_psi") == 0 || strcmp(name, "valve_pressure_psi") == 0;
+  return strcmp(name, "chamber_pressure_v") == 0 || strcmp(name, "valve_pressure_psi") == 0;
 }
 
 static uint64_t sd_row_sequence;

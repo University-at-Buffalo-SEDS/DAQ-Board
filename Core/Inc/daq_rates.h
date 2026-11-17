@@ -35,6 +35,15 @@
 #error "Chamber fast scan requires DAQ_ADC_READ_RATE_HZ>=5556 and a compatible OSR; current settings would slow load cells"
 #endif
 #define DAQ_ADC_MCLK_HZ 16000000U
+/* Board supply (VMAIN/IMON on ADC1) logging period inside the launch window;
+ * outside it the supply follows DAQ_ANALOG_REPORT_PERIOD_MS. Two polled
+ * conversions (~60 us) per period; 4 ms resolves sub-100 ms supply dips. */
+#ifndef DAQ_SUPPLY_LAUNCH_PERIOD_MS
+#define DAQ_SUPPLY_LAUNCH_PERIOD_MS (DAQ_ACQUISITION_PERIOD_MS > 4U ? DAQ_ACQUISITION_PERIOD_MS : 4U)
+#endif
+#if DAQ_SUPPLY_LAUNCH_PERIOD_MS < DAQ_ACQUISITION_PERIOD_MS || DAQ_SUPPLY_LAUNCH_PERIOD_MS > 10U
+#error "Launch supply period must be from one acquisition period to 10 ms (100 Hz)"
+#endif
 /* Temperature must refresh independently of acquisition-loop overruns. */
 #define DAQ_TEMPERATURE_REPORT_PERIOD_MS 100U
 /* Auxiliary channels run at 10 Hz; they do not need the load-cell cadence. */

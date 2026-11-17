@@ -80,7 +80,7 @@ static UINT sd_write_optional_snapshot_item(const sd_line_slot_t*s,uint16_t*i,ui
         code+=r'''
 static sd_line_slot_t *take(void){ULONG m;assert(!sd_take_line_message(&m));return(sd_line_slot_t*)(uintptr_t)m;}
 static void enqueue(unsigned i,daq_calibration_t *cal){
- const unsigned sensor=i%5;const float edge[]={NAN,INFINITY,-INFINITY,-0.0f,FLT_MAX,FLT_MIN};
+ const unsigned sensor=i%SD_REQUIRED_SCALAR_SENSORS;const float edge[]={NAN,INFINITY,-INFINITY,-0.0f,FLT_MAX,FLT_MIN};
  const float value=i%11<6?edge[i%11]:(float)i/7;
  uint64_t network=i%11?1700000000000ULL+i:0;
  char text[24];sd_format_float(text,value);

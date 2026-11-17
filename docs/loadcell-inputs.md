@@ -133,8 +133,8 @@ record without it (16, 44, 60 or 68 bytes) is treated as raw scale.
 `g_daq_calibration_migrations` counts completed conversions. SD files declare
 the volts scale with `loadcell_input=adc_volts` at the end of each
 `# calibration` line; files without it use the raw scale.
-SD diagnostic rows are `mcp3564r_voltage_v` for CH0 and
-`mcp3564r_ch1_voltage_v` for CH1.
+SD diagnostic rows are `kg1000_window_v` for CH0 and
+`kg50_window_v` for CH1.
 
 The register definitions and code scaling are described in the
 [Microchip MCP3561/2/4R datasheet](https://www.microchip.com/content/dam/mchp/documents/APID/ProductDocuments/DataSheets/MCP3561_2_4R-Data-Sheet-DS200006391C.pdf),

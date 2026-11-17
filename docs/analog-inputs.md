@@ -77,8 +77,9 @@ or be zero to disable the auxiliary pass. Unread/stale fields report NaN after
 [load-cell inputs](loadcell-inputs.md) for the legacy raw scale).
 
 Each drained MCP sample is offered to SD with its channel and original timestamp:
-CH0 `mcp3564r_raw`, CH1 `kg50_raw`, CH2–7 `mcp3564r_chN_raw`. Internal analog
-voltage/current rows are captured at 10 Hz. A bounded, time-sliced worker
+CH0 `kg1000_v`, CH1 `kg50_v`, CH2–7 `mcp3564r_chN_v`. Internal analog
+voltage/current rows are captured at 10 Hz; the board supply (`input_voltage_v`,
+`input_current_a`) is a raw record, every 4 ms during the launch window. A bounded, time-sliced worker
 publishes analog telemetry and formats these rows with the original capture
 timestamp, outside the load-cell acquisition loop. `g_daq_analog_work_drop_count`
 counts snapshots rejected if all three worker slots are occupied. The worker
@@ -195,21 +196,17 @@ a 4 ms downsampling window. `Core/Inc/daq_network_config.h` sets an independent
 **100-packet/s aggregate live sensor cap** and editable stream weights. Both
 loadcells have equal top priority: 40 packets/s each at default weights; the
 five auxiliary streams each get 4 packets/s. One latest NETWORK sample per
-stream is coalesced between sends. ADC acquisition, raw/calibrated SD records
-and loadcell SD mirrors are unchanged. `--network-rate-hz` optionally overrides
+stream is coalesced between sends. ADC acquisition and raw/calibrated SD
+records are unchanged. `--network-rate-hz` optionally overrides
 the total; normal builds use the header. Heartbeats/ACKs/control/discovery are
 outside this sensor scheduler.
 
 `cmake -S . -B build/Release_Script -DDAQ_BROADCAST_RATE_HZ=500` enables an
 explicit 500 Hz-per-channel test; use `250` to restore the normal setting.
 
-Loadcell and temperature publication now runs in a separate worker with 16
-bounded report slots. Acquisition submits without waiting. Reports retain the
-captured values, calibration and time; network timestamps subtract queue age.
-`g_daq_report_drop_count` counts rejected work items (which may contain both
-loadcells), and `g_daq_report_max_age_ms` records the maximum worker delay.
-These counters are independent of raw ADC/SD loss counters. No new hardware
-throughput qualification has been performed for this worker.
+Acquisition offers loadcell and temperature values straight to the network
+worker's latest-value slots; there is no separate SD report path (the raw
+records are the SD copy). Network timestamps subtract the age since capture.
 
 Append-only SEDSnet IDs (existing IDs unchanged):
 

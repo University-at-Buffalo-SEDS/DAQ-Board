@@ -136,8 +136,6 @@
       {"name": "loadcell_network_failures", "symbol": "g_daq_loadcell_publish_fail_count", "maximum": 0},
       {"name": "loadcell_nonzero_samples", "symbol": "g_daq_nonzero_raw_sample_count", "minimum": 1},
       {"name": "loadcell_raw_samples", "symbol": "g_daq_raw_samples_drained_count", "minimum": 1, "minimum_interval_gain": 1},
-      {"name": "sd_network_rows", "symbol": "g_daq_sd_network_row_ok_count", "minimum": 1},
-      {"name": "sd_network_row_failures", "symbol": "g_daq_sd_network_row_fail_count", "maximum": 0},
       {"name": "sd_ready", "symbol": "g_sd_ready", "minimum": 1},
       {"name": "sd_init_stage", "symbol": "g_sd_init_stage"},
       {"name": "sd_writer_thread_create_status", "symbol": "g_sd_writer_thread_create_status"},

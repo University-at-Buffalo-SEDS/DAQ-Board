@@ -46,6 +46,12 @@ typedef struct
   int32_t adc_temperature_code;
   uint8_t channel;
 } sd_raw_adc_record_t;
+/* Raw-record channels beyond the MCP3564R (0..7, 9): the board supply from
+ * ADC1, in the same record stream, clock and sequence as the load cells.
+ * raw_adc_code/raw_value are the ADC1 code and pin volts; calibrated_value
+ * is the board input voltage (V) or current (A). */
+#define SD_RAW_CHANNEL_INPUT_VOLTAGE 10U
+#define SD_RAW_CHANNEL_INPUT_CURRENT 11U
 
 UINT sd_card_init(TX_BYTE_POOL *byte_pool);
 void sd_card_set_hardware_ready(uint8_t ready);
@@ -60,10 +66,10 @@ sd_card_status_t sd_card_enqueue_csv_row(const char *sensor_name,
                                          uint64_t timestamp_ms,
                                          float value,
                                          const daq_calibration_t *calibration);
-/* Nonblocking, bounded SD-only ownership of all24 optional snapshot rows.
+/* Nonblocking, bounded SD-only ownership of all22 optional snapshot rows (the supply is in the raw records).
  * Capture clocks/calibration/session/sequence once. OK means retained, not
  * persisted. A full ring refuses/counts24 rows once; network owners are free. */
-#define SD_OPTIONAL_SNAPSHOT_ROWS 24U
+#define SD_OPTIONAL_SNAPSHOT_ROWS 22U
 sd_card_status_t sd_card_enqueue_optional_snapshot(
     const float values[SD_OPTIONAL_SNAPSHOT_ROWS], uint64_t timestamp_ms,
     const daq_calibration_t *calibration);
@@ -99,6 +105,9 @@ void sd_card_set_launch_clock(uint64_t session, uint64_t close_unix_ms);
  * (daq_log_monotonic_ms). Captures after a network time step are routed in
  * the frame the launch deadline was mapped in. */
 void sd_card_note_network_time(uint64_t unix_ms, uint64_t local_ms);
+/* Nonzero from SD_LAUNCH_SUPPLY_LEAD_MS before the launch window opens until
+ * it closes: acquisition then logs the board supply at the launch rate. */
+uint8_t sd_card_launch_window_active(void);
 
 #ifdef __cplusplus
 }

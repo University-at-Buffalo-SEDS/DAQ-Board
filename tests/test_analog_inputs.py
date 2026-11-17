@@ -82,6 +82,13 @@ int main(void) {
  assert(fabsf(a.current_sense_a[0])<0.003f);
  assert(fabsf(a.input_voltage_v-5500*3.3f/16383*11)<1e-5f);
  assert(fabsf(a.input_current_a-1000*3.3f/16383/(0.00007828f*6200))<1e-5f);
+ assert(a.power_monitor_code[0]==5500 && a.power_monitor_code[1]==1000);
+ /* The launch-window supply read converts only VMON (17) and IMON (16). */
+ calls=0;a.sar_inputs_v[0]=-1;samples[17]=4000;
+ assert(daq_adc1_sample_supply(&a)==TX_SUCCESS && calls==2 && a.sar_inputs_v[0]==-1);
+ assert(a.power_monitor_code[0]==4000 && fabsf(a.input_voltage_v-4000*3.3f/16383*11)<1e-5f);
+ fail_channel=17;assert(daq_adc1_sample_supply(&a)==TX_NOT_DONE && isnan(a.input_voltage_v) && a.power_monitor_code[0]==-1);
+ samples[17]=5500;
  fail_channel=6;
  assert(daq_adc1_sample(&a)==TX_NOT_DONE && isnan(a.sar_inputs_v[1]));
  assert(isfinite(a.sar_inputs_v[2]) && isfinite(a.input_voltage_v));
@@ -123,7 +130,7 @@ class AnalogInputTests(unittest.TestCase):
     def test_publication_preserves_units_and_expires_missing_auxiliary_inputs(self):
         source = (ROOT/'Core/Src/daq_thread.c').read_text()
         publish = source[source.index('\nvolatile uint32_t g_daq_analog_publish_ok_count;') + 1:
-                         source.index('static void daq_publish_loadcell(')]
+                         source.index('/* One acquisition cycle\'s live values.')]
         harness = r'''
 #include <assert.h>
 #include <math.h>
@@ -201,7 +208,7 @@ int main(void) {
 #include <math.h>
 #include <string.h>
 #define DISABLE_SD_CARD 0
-#define SD_OPTIONAL_SNAPSHOT_ROWS 24U
+#define SD_OPTIONAL_SNAPSHOT_ROWS 22U
 #define SD_CARD_STATUS_OK 0
 ''' + SNAPSHOT_TYPE + r'''
 typedef uint32_t sd_capture_t;
@@ -228,7 +235,7 @@ static unsigned calls, refuse;
 static void sd_card_capture_fault(sd_capture_t c){assert(c==0);}
 static int sd_card_enqueue_optional_snapshot_captured(const float *values,uint64_t ms,const daq_calibration_t *cal,sd_capture_t capture) {
  assert(capture==0);
- assert(ms==123 && cal->kg1000_slope==42 && values[10]==8 && values[23]==3);
+ assert(ms==123 && cal->kg1000_slope==42 && values[8]==8 && values[21]==3);
  calls++;return refuse?2:0;
 }
 ''' + code + r'''
@@ -238,7 +245,7 @@ int main(void) {
  daq_store_snapshot_csv(&s,&c,&w,0);assert(calls==1 && !g_daq_sd_snapshot_row_drop_count);
  s.analog_sample_fresh=0;daq_store_snapshot_csv(&s,&c,&w,0);assert(calls==1);
  s.analog_sample_fresh=1;refuse=1;daq_store_snapshot_csv(&s,&c,&w,0);
- assert(calls==2 && g_daq_sd_snapshot_row_drop_count==24);
+ assert(calls==2 && g_daq_sd_snapshot_row_drop_count==22);
 }
 '''
         with tempfile.TemporaryDirectory() as tmp:
@@ -332,11 +339,8 @@ typedef int TX_THREAD;
 #define TX_AUTO_START 1U
 #define TX_NO_TIME_SLICE 0U
 #define TX_TIMER_TICKS_PER_SECOND 1000U
-static TX_THREAD g_analog_thread,daq_thread,sd_writer_thread,g_report_thread,g_network_thread;
-static int g_report_pool,g_report_queue;
-static ULONG g_report_pool_storage[64],g_report_queue_storage[16],g_report_stack[2048],g_network_stack[2048];
-typedef struct {unsigned x;} daq_report_t;
-static void daq_report_thread_entry(ULONG x){(void)x;}
+static TX_THREAD g_analog_thread,daq_thread,sd_writer_thread,g_network_thread;
+static ULONG g_network_stack[2048];
 static void daq_network_thread_entry(ULONG x){(void)x;}
 static int g_analog_pool,g_analog_queue;
 static ULONG g_analog_pool_storage[64],g_analog_queue_storage[3],g_analog_stack[1024],g_daq_thread_stack[1024],g_sd_writer_thread_stack[1024];
@@ -345,23 +349,23 @@ typedef struct {unsigned x;} daq_analog_work_t;
 static void daq_analog_thread_entry(ULONG x){(void)x;}
 static void daq_thread_entry(ULONG x){(void)x;}
 static void sd_writer_thread_entry(ULONG x){(void)x;}
-static UINT priorities[5],thresholds[5];static ULONG slices[5];
+static UINT priorities[4],thresholds[4];static ULONG slices[4];
 static UINT tx_block_pool_create(int *p,char *n,unsigned block,void *buf,unsigned size){(void)p;(void)n;(void)block;(void)buf;(void)size;return 0;}
 static UINT tx_queue_create(int *p,char *n,unsigned words,void *buf,unsigned size){(void)p;(void)n;(void)words;(void)buf;(void)size;return 0;}
 static UINT tx_thread_create(TX_THREAD *p,char *n,void (*entry)(ULONG),ULONG arg,void *stack,ULONG size,UINT priority,UINT threshold,ULONG slice,UINT start){
  (void)n;(void)entry;(void)arg;(void)stack;(void)size;(void)start;
- unsigned i=p==&g_analog_thread?0:p==&daq_thread?1:p==&g_report_thread?3:p==&g_network_thread?4:2;
+ unsigned i=p==&g_analog_thread?0:p==&daq_thread?1:p==&g_network_thread?3:2;
  priorities[i]=priority;thresholds[i]=threshold;slices[i]=slice;return 0;
 }
 UINT create_daq_thread(void)
 '''+daq+'\nUINT create_sd_writer_thread(void)\n'+sd+r'''
 int main(void){
  assert(create_daq_thread()==TX_SUCCESS && create_sd_writer_thread()==TX_SUCCESS);
- /* Acquisition must preempt backlogged I/O; SD cannot starve analog/report
+ /* Acquisition must preempt backlogged I/O; SD cannot starve analog/network
   * peers. ThreadX uses smaller numbers for higher priorities. */
  assert(priorities[1]<priorities[0]);
- assert(priorities[0]<priorities[2] && priorities[0]==priorities[3] && priorities[0]==priorities[4]);
- for(unsigned i=0;i<5;i++){
+ assert(priorities[0]<priorities[2] && priorities[0]==priorities[3]);
+ for(unsigned i=0;i<4;i++){
   assert(thresholds[i]==priorities[i]);
   assert(slices[i]>0 && slices[i]<=TX_TIMER_TICKS_PER_SECOND/1000U);
  }

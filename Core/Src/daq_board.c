@@ -46,9 +46,39 @@ UINT daq_board_init(void)
   return TX_SUCCESS;
 }
 
+static daq_adc1_sample_t adc1_sample;
+static daq_supply_sample_t g_supply;
+static uint8_t g_supply_fresh;
+
+static void daq_board_note_supply(void)
+{
+  g_supply = (daq_supply_sample_t){
+    .monotonic_ms = HAL_GetTick(),
+    .input_voltage_v = adc1_sample.input_voltage_v,
+    .input_current_a = adc1_sample.input_current_a,
+    .pin_v = {adc1_sample.power_monitor_v[0], adc1_sample.power_monitor_v[1]},
+    .code = {adc1_sample.power_monitor_code[0], adc1_sample.power_monitor_code[1]},
+  };
+  g_supply_fresh = 1U;
+}
+
+UINT daq_board_sample_supply(void)
+{
+  const UINT status = daq_adc1_sample_supply(&adc1_sample);
+  daq_board_note_supply();
+  return status;
+}
+
+uint8_t daq_board_take_supply(daq_supply_sample_t *supply)
+{
+  if (!g_supply_fresh || supply == NULL) return 0U;
+  *supply = g_supply;
+  g_supply_fresh = 0U;
+  return 1U;
+}
+
 UINT daq_board_sample(daq_snapshot_t *snapshot)
 {
-  static daq_adc1_sample_t adc1_sample;
   static daq_adc4_sample_t adc4_sample;
   static uint32_t last_analog_ms;
   static uint8_t analog_started;
@@ -73,6 +103,7 @@ UINT daq_board_sample(daq_snapshot_t *snapshot)
     g_daq_board_sample_status = adc1_status != TX_SUCCESS ? 1U : adc4_status != TX_SUCCESS ? 2U : 0U;
     last_analog_ms = (uint32_t)snapshot->monotonic_ms;
     analog_started = 1U;
+    daq_board_note_supply();
     snapshot->analog_sample_fresh = 1U;
   }
 

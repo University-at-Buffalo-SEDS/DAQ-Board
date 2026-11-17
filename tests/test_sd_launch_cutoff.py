@@ -76,6 +76,39 @@ int main(void){
 }
 """)
 
+    def test_supply_logging_follows_the_launch_window_with_a_short_lead(self):
+        source=(ROOT/'Core/Src/sd_card.c').read_text()
+        body=source[source.index('static uint64_t g_sd_session'):source.index('volatile uint32_t g_sd_line_drop_count')]
+        body=body.replace('static uint64_t g_sd_raw_session, g_sd_telemetry_session;','').replace('static uint8_t g_sd_launch_flush_pending;','')
+        self.execute(r"""
+#include <assert.h>
+#include <stdint.h>
+#define sd_media_flush() fx_media_flush(&g_sd_media)
+#include "board_uptime.h"
+static uint64_t utc=1800000000000ULL;
+static uint32_t raw=1000,mask;
+static board_uptime_state uptime;
+static uint32_t __get_PRIMASK(void){return mask;}
+static void __disable_irq(void){mask=1;}
+static void __set_PRIMASK(uint32_t m){mask=m;}
+static uint64_t daq_log_unix_ms(void){assert(!mask);return utc;}
+static uint64_t daq_log_unix_ms_settled(void){return daq_log_unix_ms();}
+static uint64_t daq_log_monotonic_ms(void){return board_uptime_extend(&uptime,raw);}
+"""+body+route_epoch_support(source)+r"""
+int main(void){
+ (void)sd_launch_finished;(void)sd_capture_key_locked;
+ assert(!sd_card_launch_window_active()); /* no launch session */
+ sd_card_set_launch_clock(10,utc+30000);   /* T0 = deadline - 20 s = now + 10 s */
+ raw+=9499;assert(!sd_card_launch_window_active());
+ raw+=1;assert(sd_card_launch_window_active()); /* SD_LAUNCH_SUPPLY_LEAD_MS before T0 */
+ raw+=500;assert(sd_card_launch_window_active()&&sd_run_snapshot()==2); /* window open */
+ raw+=19999;assert(sd_card_launch_window_active());
+ raw+=1;assert(!sd_card_launch_window_active()&&sd_run_snapshot()==3); /* closed at T0+20 s */
+ sd_card_set_launch_clock(0,0);assert(!sd_card_launch_window_active());
+ assert(!mask);
+}
+""")
+
     def test_network_time_step_inside_the_window_keeps_the_monotonic_close(self):
         """A 4 h step back and a 3.8 h step forward of the network clock inside
         the launch-log window (a follower re-anchoring to a source, or a leader

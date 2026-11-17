@@ -33,8 +33,23 @@ typedef struct
   int32_t ext_adc_temp_code;
 } daq_snapshot_t;
 
+/* One ADC1 reading of the board supply: VMAIN through the VMON divider and
+ * the LM74202 IMON current, with their ADC1 codes and pin volts. */
+typedef struct
+{
+  uint32_t monotonic_ms; /* HAL_GetTick at the reading */
+  float input_voltage_v;
+  float input_current_a;
+  float pin_v[2];   /* VMON, IMON */
+  int32_t code[2];  /* VMON, IMON; -1 when the conversion failed */
+} daq_supply_sample_t;
+
 UINT daq_board_init(void);
 UINT daq_board_sample(daq_snapshot_t *snapshot);
+/* Read VMON/IMON now, outside the 100 ms analog cadence (launch window). */
+UINT daq_board_sample_supply(void);
+/* The supply reading taken since the last call, if any (each one once). */
+uint8_t daq_board_take_supply(daq_supply_sample_t *supply);
 HAL_StatusTypeDef daq_board_ext_adc_start_dma(void);
 
 #ifdef __cplusplus

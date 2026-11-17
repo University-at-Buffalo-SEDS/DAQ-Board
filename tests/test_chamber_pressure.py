@@ -107,7 +107,7 @@ int main(void){const float values[]={-5,-0.015f,-0.0f,0,0.015f,0.0225f,2.5f,6};
       snapshot=(daq_snapshot_t){.ext_adc_sample_valid=1,.ext_adc_channel=channels[i],
         .ext_adc_monotonic_ms=90,.ext_adc_code=-1234,.ext_adc_voltage_v=inputs[j],
         .ext_adc_loadcell_kg1000=inputs[j],.ext_adc_temp_c=25};
-      assert(daq_drain_ext_adc(&snapshot,records,4,&cal,&window)==1);
+      assert(daq_drain_ext_adc(&snapshot,records,4,&cal,&window,1,NULL,NULL)==1);
       assert(records[0].raw_adc_code==-1234);
       printf("%u %u %d %08x %08x %u %u %llu\n",channels[i],j,records[0].raw_adc_code,
         bits(records[0].raw_value),bits(records[0].calibrated_value),records[0].monotonic_ms,
@@ -116,11 +116,11 @@ int main(void){const float values[]={-5,-0.015f,-0.0f,0,0.015f,0.0225f,2.5f,6};
   }
   memset(records,0xa5,sizeof(records));sd_raw_adc_record_t before[4];memcpy(before,records,sizeof(before));
   snapshot=(daq_snapshot_t){0};
-  assert(daq_drain_ext_adc(&snapshot,records,4,&cal,&window)==0);
+  assert(daq_drain_ext_adc(&snapshot,records,4,&cal,&window,1,NULL,NULL)==0);
   assert(memcmp(records,before,sizeof(records))==0); /* missing is not zero */
   snapshot=(daq_snapshot_t){.ext_adc_sample_valid=1,.ext_adc_channel=6,
     .ext_adc_code=-1234,.ext_adc_voltage_v=NAN,.ext_adc_loadcell_kg1000=NAN};
-  assert(daq_drain_ext_adc(&snapshot,records,4,&cal,&window)==1);
+  assert(daq_drain_ext_adc(&snapshot,records,4,&cal,&window,1,NULL,NULL)==1);
   assert(records[0].raw_adc_code==-1234 && isnan(records[0].raw_value));
   assert(isnan(records[0].calibrated_value)); /* invalid is not zero */
 '''+harness[end:]
@@ -146,7 +146,7 @@ int main(void){const float values[]={-5,-0.015f,-0.0f,0,0.015f,0.0225f,2.5f,6};
     def test_actual_report_prepare_never_fabricates_missing_stale_or_invalid_zero(self):
         source=(ROOT/'Core/Src/daq_thread.c').read_text()
         start=source.index('    for (unsigned channel = 6U; channel <= 7U; ++channel)')
-        end=source.index('    float filtered;',start)
+        end=source.index('    /* SEDSnet receives the boxcar mean',start)
         actual=source[start:end]
         self.compile_run(r'''#include "daq_rates.h"
 #include "daq_downsample.h"
@@ -216,13 +216,14 @@ int main(void) { daq_network_schedule_t s={0}; unsigned counts[DAQ_NETWORK_STREA
 
     def test_raw_sd_path_precedes_network_and_keeps_both_clocks_and_raw_code(self):
         source=(ROOT/'Core/Src/daq_thread.c').read_text()
-        self.assertLess(source.index('sd_card_enqueue_raw_adc_samples_captured(raw_records'),source.index('daq_enqueue_report(&report)'))
+        self.assertNotIn('daq_enqueue_report(',source)
+        self.assertLess(source.index('daq_offer_live_report(&report);\n'),source.index('sd_card_enqueue_raw_adc_samples_captured(raw_records'))
         self.assertIn('records[count].raw_adc_code = sample.code',source)
         self.assertIn('records[count].network_unix_ms',source)
         self.assertIn('records[count].monotonic_ms',source)
         self.assertIn('daq_chamber_pressure_psi(corrected)',source)
         logger=(ROOT/'Core/Src/sd_card.c').read_text()
-        self.assertIn('"chamber_pressure_raw_volts_psi"',logger)
+        self.assertIn('"chamber_pressure_v"',logger)
         self.assertIn('noise_floor_millipsi=%u',logger)
         self.assertIn('noise_floor_rule=finite_raw_psig<floor_millipsi/1000:0',logger)
         self.assertIn('(unsigned)DAQ_CHAMBER_NOISE_FLOOR_MILLIPSI',logger)

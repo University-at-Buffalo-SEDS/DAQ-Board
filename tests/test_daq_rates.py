@@ -110,6 +110,43 @@ int main(void) {
 }
 ''')
 
+    def test_supply_launch_period_defaults_and_bounds(self):
+        self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_SUPPLY_LAUNCH_PERIOD_MS == 4);}')
+        self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_SUPPLY_LAUNCH_PERIOD_MS == 5);}',
+                     ['DAQ_ACQUISITION_PERIOD_MS=5', 'DAQ_BROADCAST_RATE_HZ=10'])
+        for value in ('1', '11'):
+            self.compile('#include "daq_rates.h"\nint main(void) {}', ['DAQ_SUPPLY_LAUNCH_PERIOD_MS=' + value], False)
+
+    def test_loadcell_bins_are_fixed_on_uptime_and_close_on_the_next_bin(self):
+        self.compile(r'''#include "daq_downsample.h"
+#include <assert.h>
+#include <string.h>
+int main(void) {
+  daq_bin_average_t s = {0}; float out = 0; uint64_t at = 0;
+  /* Bin [8,12): 9, 9, 11 ms. The first sample of [12,16) closes it. */
+  assert(!daq_bin_average_add(&s, 1.0f, 9, 4, &out, &at));
+  assert(!daq_bin_average_add(&s, 2.0f, 9, 4, &out, &at));
+  assert(!daq_bin_average_add(&s, NAN, 10, 4, &out, &at)); /* skipped */
+  assert(!daq_bin_average_add(&s, 6.0f, 11, 4, &out, &at));
+  assert(daq_bin_average_add(&s, 100.0f, 12, 4, &out, &at));
+  assert(out == 3.0f && at == 11);
+  /* A gap of several bins emits once, then starts the new bin. */
+  assert(daq_bin_average_add(&s, 7.0f, 40, 4, &out, &at));
+  assert(out == 100.0f && at == 12);
+  /* Double sum in order, one binary32 rounding of sum/count. */
+  s = (daq_bin_average_t){0};
+  const float v[] = {0.1f, 0.2f, 0.30000001f};
+  double sum = 0;
+  for (unsigned i = 0; i < 3; ++i) { sum += (double)v[i]; assert(!daq_bin_average_add(&s, v[i], 100 + i, 4, &out, &at)); }
+  assert(daq_bin_average_add(&s, 0, 104, 4, &out, &at));
+  const float expected = (float)(sum / 3);
+  assert(memcmp(&out, &expected, sizeof(out)) == 0 && at == 102);
+  /* 64-bit uptime past the 32-bit HAL wrap keeps fixed bins. */
+  s = (daq_bin_average_t){0};
+  assert(!daq_bin_average_add(&s, 1, UINT64_C(0x100000000) - 1, 4, &out, &at));
+  assert(daq_bin_average_add(&s, 1, UINT64_C(0x100000000), 4, &out, &at));
+}''')
+
     def test_temperature_publication_uses_elapsed_time_not_loop_count(self):
         source = (ROOT / 'Core/Src/daq_thread.c').read_text()
         block = source[source.index('    const uint32_t report_ms ='):

@@ -1,7 +1,8 @@
 /* SD logging throughput model: the production writer (Core/Src/sd_card.c),
  * the production IDMA adapter (Core/Src/sd_storage_io.c) and real FileX run on
  * the host against a virtual-time SD card. Producers offer raw ADC records and
- * loadcell rows at fixed rates while the card injects long busy stalls.
+ * the 10 Hz optional snapshot rows at fixed rates while the card injects long
+ * busy stalls. (Load cells have no scalar SD rows; raw records are their copy.)
  *
  * Time is virtual and single-CPU. The writer is the lowest-priority thread:
  * its CPU work (charged per formatted record) is stretched by the share other
@@ -22,8 +23,9 @@
 #ifndef OFFER_RAW_HZ
 #define OFFER_RAW_HZ 2410U
 #endif
+/* Optional snapshots per second (SD_OPTIONAL_SNAPSHOT_ROWS rows each). */
 #ifndef OFFER_SCALAR_HZ
-#define OFFER_SCALAR_HZ 500U
+#define OFFER_SCALAR_HZ 10U
 #endif
 #ifndef STALL_MS
 #define STALL_MS 400U
@@ -291,10 +293,11 @@ static void producers_until(uint64_t t)
     if (next == g_next_raw_us) {
       offer_raw(next); g_next_raw_us += DAQ_ACQUISITION_PERIOD_MS * 1000U;
     } else {
-      const uint64_t period = 2U * 1000000U / (OFFER_SCALAR_HZ ? OFFER_SCALAR_HZ : 1U);
-      (void)sd_card_enqueue_csv_row("kg1000_network", g_now_us / 1000U, 12.5f, &g_sd_calibration);
-      (void)sd_card_enqueue_csv_row("kg50_network", g_now_us / 1000U, 3.25f, &g_sd_calibration);
-      g_scalar_offered += 2U; g_next_scalar_us += period;
+      const uint64_t period = 1000000U / (OFFER_SCALAR_HZ ? OFFER_SCALAR_HZ : 1U);
+      float values[SD_OPTIONAL_SNAPSHOT_ROWS];
+      for (unsigned i = 0U; i < SD_OPTIONAL_SNAPSHOT_ROWS; ++i) values[i] = 12.5f + (float)i * 0.25f;
+      (void)sd_card_enqueue_optional_snapshot(values, g_now_us / 1000U, &g_sd_calibration);
+      g_scalar_offered += SD_OPTIONAL_SNAPSHOT_ROWS; g_next_scalar_us += period;
     }
     g_model_primask = mask;
   }
@@ -321,7 +324,7 @@ static int verify_log(uint64_t *rows, uint64_t *raw_rows, uint64_t *bad)
       if (strlen(line) < 3 || line[strlen(line) - 2] != '\r') { ++*bad; continue; }
       unsigned commas = 0U; for (char *p = line; *p; ++p) commas += *p == ',';
       if (commas != 12U) { ++*bad; continue; }
-      if (strstr(line, ",kg1000_network,") || strstr(line, ",kg50_network,")) continue;
+      if (strstr(line, ",\"")) continue; /* scalar rows quote their value */
       /* Raw rows keep their acquisition sequence in the final column. */
       const char *last = strrchr(line, ',');
       const uint64_t seq = strtoull(last + 1, NULL, 10);
@@ -352,7 +355,7 @@ static void maybe_start(void)
   if (!g_offer_start_us && g_sd_ready && !g_warmup_sent) {
     g_warmup_sent = 1U;
     const uint32_t mask = g_model_primask; g_model_primask = 0U;
-    (void)sd_card_enqueue_csv_row("kg1000_network", g_now_us / 1000U, 1.0f, &g_sd_calibration);
+    (void)sd_card_enqueue_csv_row("valve_pressure_psi", g_now_us / 1000U, 1.0f, &g_sd_calibration);
     g_model_primask = mask;
   }
   if (!g_offer_start_us && g_sd_ready && g_sd_regular_log.open && g_sd_queue.tx_queue_enqueued == 0U) {
@@ -388,6 +391,7 @@ int main(void)
   const uint32_t line_dropped = g_sd_line_drop_count - g_line_dropped0;
   const uint32_t accepted = g_sd_raw_records_enqueued_count - g_raw_enq0;
   printf("drained=%u\n", phase == 2);
+  printf("offered_scalar=%llu\n", (unsigned long long)g_scalar_offered);
   printf("offered_raw=%llu offered_raw_per_s=%.0f\n", (unsigned long long)g_raw_offered,
          g_raw_offered * 1e6 / (double)offered_us);
   printf("accepted_raw=%u raw_dropped=%u line_dropped=%u essential_telemetry_dropped=%u\n",

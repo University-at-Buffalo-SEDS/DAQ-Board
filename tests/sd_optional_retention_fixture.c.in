@@ -112,6 +112,8 @@ typedef struct
   int32_t adc_temperature_code;
   uint8_t channel;
 } sd_raw_adc_record_t;
+#define SD_RAW_CHANNEL_INPUT_VOLTAGE 10U
+#define SD_RAW_CHANNEL_INPUT_CURRENT 11U
 /* SOURCE_TYPES */static sd_raw_slot_t *g_sd_raw_append_tail;
 static sd_scalar_slot_t *g_sd_scalar_append_tail;
 /* SOURCE_SENSORS */typedef struct {
@@ -204,10 +206,12 @@ static unsigned serve_raw(void){
         {
           const sd_raw_adc_record_t *sample = &slot->samples[i]; last_raw=(unsigned)sample->record_sequence;assert(sample->raw_adc_code==(int32_t)last_raw&&sample->monotonic_ms==(uint32_t)(sample->network_unix_ms-1700000000000ULL));
           const uint64_t captured_uptime = board_uptime_project(slot->uptime_reference, sample->monotonic_ms);
-          const char *sensor = daq_chamber_is_channel(sample->channel) ? "chamber_pressure_raw_volts_psi" : sample->channel < 8U ? (const char *const[]){
-              "mcp3564r_raw", "kg50_raw", "mcp3564r_ch2_raw", "mcp3564r_ch3_raw",
-              "mcp3564r_ch4_raw", "mcp3564r_ch5_raw", "mcp3564r_ch6_raw", "mcp3564r_ch7_raw"
-          }[sample->channel] : sample->channel == 9U ? "mcp3564r_ch2_ch3_gain16_raw" : "invalid_adc_channel";
+          const char *sensor = daq_chamber_is_channel(sample->channel) ? "chamber_pressure_v" : sample->channel < 8U ? (const char *const[]){
+              "kg1000_v", "kg50_v", "mcp3564r_ch2_v", "mcp3564r_ch3_v",
+              "mcp3564r_ch4_v", "mcp3564r_ch5_v", "mcp3564r_ch6_v", "mcp3564r_ch7_v"
+          }[sample->channel] : sample->channel == 9U ? "kg50_p6_v" :
+              sample->channel == SD_RAW_CHANNEL_INPUT_VOLTAGE ? "input_voltage_v" :
+              sample->channel == SD_RAW_CHANNEL_INPUT_CURRENT ? "input_current_a" : "invalid_adc_channel";
           const int len = sd_format_csv_raw_record(line, sizeof(line),
               sample->network_unix_ms, captured_uptime, sensor, sample->raw_adc_code,
               sample->raw_value, sample->calibrated_value, sample->adc_temperature_c,
@@ -236,9 +240,9 @@ static void add_expected(const char *name,float value,uint64_t captured,uint64_t
  e->session=expected_session;e->epoch=epoch;e->slope=cal->kg1000_slope;
 }
 static void snapshot(uint64_t captured,uint64_t expected_session,unsigned epoch,daq_calibration_t *cal){
- float values[24];for(unsigned i=0;i<24;i++)values[i]=i==3?NAN:i==7?INFINITY:i==9?-0.0f:(float)i/7;
+ float values[22];for(unsigned i=0;i<22;i++)values[i]=i==3?NAN:i==7?INFINITY:i==9?-0.0f:(float)i/7;
  uint64_t seq=sd_row_sequence+1;assert(sd_card_enqueue_optional_snapshot(values,captured,cal)==SD_CARD_STATUS_OK);
- for(unsigned i=0;i<24;i++)add_expected(g_sd_scalar_sensors[5+i],values[i],captured,seq+i,expected_session,epoch,cal);
+ for(unsigned i=0;i<22;i++)add_expected(g_sd_scalar_sensors[2+i],values[i],captured,seq+i,expected_session,epoch,cal);
 }
 static void required(uint64_t captured,uint64_t expected_session,unsigned epoch,daq_calibration_t *cal){
  uint64_t seq=sd_row_sequence+1;assert(sd_card_enqueue_csv_row(g_sd_scalar_sensors[0],captured,2.5f,cal)==SD_CARD_STATUS_OK);
@@ -256,14 +260,14 @@ int main(void){
  g_sd_raw_records_enqueued_count=272;assert(!sd_service_telemetry_rows()&&consumed==5);
  assert(!sd_service_telemetry_rows()&&g_sd_optional_snapshots_deferred==1&&!g_sd_line_drop_count);
  now=129;snapshot(122,2,0,&cal);now=229;snapshot(222,2,0,&cal);assert(g_sd_optional_snapshot_slots_used==3);
- float values[24]={0};now=329;assert(sd_card_enqueue_optional_snapshot(values,322,&cal)==SD_CARD_STATUS_BACKPRESSURE);
- assert(g_sd_optional_snapshots_refused==1&&g_sd_line_drop_count==24&&g_sd_optional_telemetry_dropped==24&&g_sd_optional_snapshot_slots_used==3);
+ float values[22]={0};now=329;assert(sd_card_enqueue_optional_snapshot(values,322,&cal)==SD_CARD_STATUS_BACKPRESSURE);
+ assert(g_sd_optional_snapshots_refused==1&&g_sd_line_drop_count==22&&g_sd_optional_telemetry_dropped==22&&g_sd_optional_snapshot_slots_used==3);
  required(329,2,0,&cal);assert(g_sd_scalar_records_enqueued==1);
  /* Time and coefficients can change while media is stalled; none of the
   * already queued values/context may be resampled by a retry. */
  now=999;cal.kg1000_slope=3;g_sd_raw_records_enqueued_count=0;fail_write=1;
  unsigned before=consumed;assert(sd_service_telemetry_rows()&&consumed==before);drain();
- assert(g_sd_optional_scalar_records_written==72&&g_sd_optional_snapshots_completed==3&&g_sd_scalar_records_written==1);
+ assert(g_sd_optional_scalar_records_written==66&&g_sd_optional_snapshots_completed==3&&g_sd_scalar_records_written==1);
  assert(!g_sd_optional_snapshot_slots_used&&!g_sd_optional_snapshot_used);
  /* Atomic routing capture before/after20s, delayed writes and calibration. */
  now=19999;snapshot(19995,2,0,&cal);now=20001;cal.kg1000_slope=4;snapshot(20000,3,1,&cal);
@@ -272,24 +276,24 @@ int main(void){
   * a source32bit wrap remain immutable. */
  g_sd_session=88;g_sd_deadline_anchored=1;g_sd_launch_closed=0;g_sd_launch_opened=0;g_sd_close_local_ms=UINT64_C(4295000000);g_sd_route_epoch=2;
  now=UINT64_C(4294967290);sd_row_sequence=UINT64_MAX-5;snapshot(now-7,3,2,&cal);now+=20;drain();
- /* Below-reserve escape counts only the remaining19 rows, frees the static
+ /* Below-reserve escape counts only the remaining17 rows, frees the static
   * head and services required FIFO without changing the raw guard. */
- snapshot(now,3,2,&cal);assert(sd_service_telemetry_rows());assert(expected_count-consumed==19);
+ snapshot(now,3,2,&cal);assert(sd_service_telemetry_rows());assert(expected_count-consumed==17);
  sd_line_slot_t *held[100];unsigned held_n=0;unsigned reserve=(g_sd_line_pool.tx_block_pool_total*3U+3U)/4U;
  while(g_sd_line_pool.tx_block_pool_available>=reserve){held[held_n]=sd_alloc_slot(8);assert(held[held_n]);held_n++;}
  g_sd_raw_records_enqueued_count=272;expected_count=consumed;required(now,3,2,&cal);
  unsigned completed=g_sd_optional_snapshots_completed;assert(sd_service_telemetry_rows());
- assert(g_sd_optional_snapshot_rows_discarded==19&&g_sd_line_drop_count==43&&g_sd_optional_snapshots_completed==completed);
+ assert(g_sd_optional_snapshot_rows_discarded==17&&g_sd_line_drop_count==39&&g_sd_optional_snapshots_completed==completed);
  assert(consumed==expected_count&&!g_sd_line_pending&&!g_sd_optional_snapshot_slots_used);
  g_sd_raw_records_enqueued_count=0;while(held_n)sd_free_slot(held[--held_n]);
  /* Channel refusal and uninitialized services own nothing and count one
-  * permanent24row loss; invalid API input cannot create a phantom owner. */
+  * permanent22row loss; invalid API input cannot create a phantom owner. */
  unsigned available=g_sd_line_pool.tx_block_pool_available;g_sd_queue.count=1024;
  assert(sd_card_enqueue_optional_snapshot(values,now,&cal)==SD_CARD_STATUS_BACKPRESSURE);g_sd_queue.count=0;
- assert(!g_sd_optional_snapshot_used&&!g_sd_optional_snapshot_slots_used&&g_sd_line_pool.tx_block_pool_available==available&&g_sd_line_drop_count==67);
+ assert(!g_sd_optional_snapshot_used&&!g_sd_optional_snapshot_slots_used&&g_sd_line_pool.tx_block_pool_available==available&&g_sd_line_drop_count==61);
  g_sd_services_initialized=0;assert(sd_card_enqueue_optional_snapshot(values,now,&cal)==SD_CARD_STATUS_BUSY);
- assert(g_sd_line_drop_count==91&&!g_sd_optional_snapshot_slots_used);g_sd_services_initialized=1;
- assert(sd_card_enqueue_optional_snapshot(NULL,now,&cal)==SD_CARD_STATUS_IO_ERROR&&g_sd_line_drop_count==91);
+ assert(g_sd_line_drop_count==83&&!g_sd_optional_snapshot_slots_used);g_sd_services_initialized=1;
+ assert(sd_card_enqueue_optional_snapshot(NULL,now,&cal)==SD_CARD_STATUS_IO_ERROR&&g_sd_line_drop_count==83);
  assert(!g_sd_line_slots_used&&g_sd_line_pool.tx_block_pool_available==g_sd_line_pool.tx_block_pool_total);
- printf("PASS%u exactCSV; static%zuB; partial/cursor/media retry;3owners/full; source clocks/uint32wrap/seq64wrap; launch20s/epoch/calibration; required reserve escape19actualdiscards; init/channel refusal; no phantom completion\n",consumed,sizeof g_sd_optional_snapshots);
+ printf("PASS%u exactCSV; static%zuB; partial/cursor/media retry;3owners/full; source clocks/uint32wrap/seq64wrap; launch20s/epoch/calibration; required reserve escape17actualdiscards; init/channel refusal; no phantom completion\n",consumed,sizeof g_sd_optional_snapshots);
 }

@@ -70,7 +70,7 @@ logging remain independent of network coalescing. Pressure older than 100 ms or 
 scalar KG1000. Transport queues can still delay an accepted frame; capture
 timestamps remain attached. No pressure is invented when an input is unassigned.
 
-SD raw rows use sensor `chamber_pressure_raw_volts_psi`, the original ADC code,
+SD raw rows use sensor `chamber_pressure_v`, the original ADC code,
 connector volts in raw_value, and psig in calibrated_value. They retain monotonic
 and network clocks, clock validity, uptime frequency and record sequence. Each
 new file includes the selected channel, model constants and units as a comment.

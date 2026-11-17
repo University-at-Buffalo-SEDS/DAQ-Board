@@ -40,8 +40,6 @@ volatile uint32_t g_daq_temperature_publish_fail_count = 0U;
 volatile uint32_t g_daq_raw_samples_drained_count = 0U;
 volatile uint32_t g_daq_nonzero_raw_sample_count = 0U;
 volatile uint32_t g_daq_sd_raw_batch_drop_count = 0U;
-volatile uint32_t g_daq_sd_network_row_ok_count = 0U;
-volatile uint32_t g_daq_sd_network_row_fail_count = 0U;
 volatile uint32_t g_daq_sample_overrun_count = 0U;
 volatile uint32_t g_daq_cycle_elapsed_ticks = 0U;
 volatile uint32_t g_daq_cycle_max_ticks = 0U;
@@ -86,11 +84,18 @@ typedef struct
   uint16_t count[10];
 } daq_loadcell_window_t;
 
+/* Load-cell network values completed during one drain: the latest bin of
+ * KG1000 and of the selected KG50 input (see daq_bin_average_add). */
+typedef struct { float value; uint64_t captured_ms; uint8_t ready; } daq_bin_output_t;
+typedef struct { daq_bin_output_t kg1000, kg50; } daq_loadcell_bins_t;
+
 static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
                                   sd_raw_adc_record_t *records,
                                   uint16_t capacity,
                                   const daq_calibration_t *calibration,
-                                  daq_loadcell_window_t *window)
+                                  daq_loadcell_window_t *window,
+                                  uint8_t kg50_channel, daq_loadcell_bins_t *bins,
+                                  const daq_supply_sample_t *supply)
 {
   mcp3564r_sample_t sample = {
     .sample_valid = snapshot->ext_adc_sample_valid,
@@ -113,21 +118,41 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
   const uint64_t unix_now = daq_log_unix_ms_cached();
   const uint64_t mono_now = board_uptime_ticks();
   static uint32_t raw_sequence;
+  /* The network boxcar runs on exactly the values and uptimes the SD raw
+   * records hold, so SD alone reproduces every KG1000/KG50 network value. */
+  static daq_bin_average_t kg1000_bins, kg50_bins;
+  static uint8_t kg50_bins_channel = 1U;
+  if (kg50_channel != kg50_bins_channel)
+  {
+    kg50_bins = (daq_bin_average_t){0};
+    kg50_bins_channel = kg50_channel;
+  }
   *window = (daq_loadcell_window_t){0};
+  if (bins != NULL) *bins = (daq_loadcell_bins_t){0};
 
+  /* A supply reading takes the last two records of this batch. */
+  const uint16_t adc_capacity = supply != NULL && capacity >= 2U ? (uint16_t)(capacity - 2U) : capacity;
   for (;;)
   {
-    if (sample.sample_valid != 0U && (sample.channel < 8U || sample.channel == 9U) && count < capacity)
+    if (sample.sample_valid != 0U && (sample.channel < 8U || sample.channel == 9U) && count < adc_capacity)
     {
       const uint8_t channel = sample.channel;
       const float raw = sample.raw_value;
       const float corrected = channel < 2U ? daq_filter_add(&filters[channel],
           daq_calibration_temperature_raw(calibration, channel, raw, sample.temperature_c),
           (uint32_t)sample.monotonic_ms, calibration->filter_tau_ms[channel]) : mcp3564r_connector_voltage(channel, sample.voltage_v);
+      const uint64_t captured_uptime = board_uptime_project(mono_now, (uint32_t)sample.monotonic_ms);
+      if (channel == 0U || channel == kg50_channel)
+      {
+        float mean;
+        uint64_t mean_ms;
+        if (daq_bin_average_add(channel == 0U ? &kg1000_bins : &kg50_bins, raw, captured_uptime,
+                                DAQ_BROADCAST_PERIOD_MS, &mean, &mean_ms) && bins != NULL)
+          *(channel == 0U ? &bins->kg1000 : &bins->kg50) = (daq_bin_output_t){mean, mean_ms, 1U};
+      }
       if (records != NULL)
       {
         records[count].channel = channel;
-        const uint64_t captured_uptime = board_uptime_project(mono_now, (uint32_t)sample.monotonic_ms);
         records[count].monotonic_ms = (uint32_t)sample.monotonic_ms;
         records[count].record_sequence = ++raw_sequence;
         records[count].network_unix_ms = daq_sample_network_ms(unix_now, mono_now, captured_uptime);
@@ -146,8 +171,23 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
       window->count[channel]++;
       count++;
     }
-    if (count >= capacity || mcp3564r_pending_samples() == 0U ||
+    if (count >= adc_capacity || mcp3564r_pending_samples() == 0U ||
         mcp3564r_get_sample(&sample) != TX_SUCCESS || sample.sample_valid == 0U) break;
+  }
+  if (supply != NULL && records != NULL && adc_capacity != capacity)
+  {
+    const uint64_t captured_uptime = board_uptime_project(mono_now, supply->monotonic_ms);
+    for (unsigned i = 0U; i < 2U; ++i)
+    {
+      records[count] = (sd_raw_adc_record_t){
+        .network_unix_ms = daq_sample_network_ms(unix_now, mono_now, captured_uptime),
+        .monotonic_ms = supply->monotonic_ms, .record_sequence = ++raw_sequence,
+        .raw_adc_code = supply->code[i], .raw_value = supply->pin_v[i],
+        .calibrated_value = i == 0U ? supply->input_voltage_v : supply->input_current_a,
+        .adc_temperature_c = NAN, .adc_temperature_code = 0,
+        .channel = i == 0U ? SD_RAW_CHANNEL_INPUT_VOLTAGE : SD_RAW_CHANNEL_INPUT_CURRENT};
+      ++count;
+    }
   }
   /* Legacy snapshot fields describe only the 1000 kg input. */
   snapshot->ext_adc_sample_valid = window->count[0] != 0U;
@@ -172,19 +212,18 @@ static void daq_store_snapshot_csv(const daq_snapshot_t *snapshot,
   /* SD has its own bounded static owners. Never retain this acquisition/network
    * work block or re-publish its network data while storage is backpressured. */
   float values[SD_OPTIONAL_SNAPSHOT_ROWS];
-  values[0] = snapshot->input_voltage_v;
-  values[1] = snapshot->input_current_a;
-  values[2] = snapshot->adc1_aux_v;
-  memcpy(&values[3], snapshot->analog_inputs_v, sizeof(snapshot->analog_inputs_v));
-  memcpy(&values[11], snapshot->current_sense_v, sizeof(snapshot->current_sense_v));
-  memcpy(&values[13], snapshot->current_sense_a, sizeof(snapshot->current_sense_a));
-  memcpy(&values[15], snapshot->power_monitor_v, sizeof(snapshot->power_monitor_v));
-  memcpy(&values[17], snapshot->analog_outputs_v, sizeof(snapshot->analog_outputs_v));
-  values[19] = snapshot->ext_adc_sample_valid ? (float)snapshot->ext_adc_code : NAN;
-  values[20] = snapshot->ext_adc_sample_valid ? snapshot->ext_adc_voltage_v : NAN;
-  values[21] = snapshot->ext_adc_sample_valid ? snapshot->ext_adc_loadcell_kg1000 : NAN;
-  values[22] = snapshot->ext_adc_temp_c;
-  values[23] = window->count[1] ? window->voltage_sum[1] / window->count[1] : NAN;
+  /* input_voltage_v/input_current_a are raw records (daq_drain_ext_adc). */
+  values[0] = snapshot->adc1_aux_v;
+  memcpy(&values[1], snapshot->analog_inputs_v, sizeof(snapshot->analog_inputs_v));
+  memcpy(&values[9], snapshot->current_sense_v, sizeof(snapshot->current_sense_v));
+  memcpy(&values[11], snapshot->current_sense_a, sizeof(snapshot->current_sense_a));
+  memcpy(&values[13], snapshot->power_monitor_v, sizeof(snapshot->power_monitor_v));
+  memcpy(&values[15], snapshot->analog_outputs_v, sizeof(snapshot->analog_outputs_v));
+  values[17] = snapshot->ext_adc_sample_valid ? (float)snapshot->ext_adc_code : NAN;
+  values[18] = snapshot->ext_adc_sample_valid ? snapshot->ext_adc_voltage_v : NAN;
+  values[19] = snapshot->ext_adc_sample_valid ? snapshot->ext_adc_loadcell_kg1000 : NAN;
+  values[20] = snapshot->ext_adc_temp_c;
+  values[21] = window->count[1] ? window->voltage_sum[1] / window->count[1] : NAN;
   if (sd_card_enqueue_optional_snapshot_captured(values, snapshot->monotonic_ms, calibration, capture) != SD_CARD_STATUS_OK)
     { sd_card_capture_fault(capture); g_daq_sd_snapshot_row_drop_count += SD_OPTIONAL_SNAPSHOT_ROWS; }
 #else
@@ -324,80 +363,22 @@ static void daq_publish_analog(const daq_snapshot_t *snapshot, const daq_loadcel
   }
 }
 
-static void daq_publish_loadcell(const daq_snapshot_t *snapshot, const daq_calibration_t *calibration,
-                                  const float *chamber, sd_capture_t capture)
-{
-  float loadcell_kg1000;
-
-  if (snapshot->ext_adc_sample_valid == 0U)
-  {
-    return;
-  }
-
-  /* CAN carries the uncalibrated window average. GroundStation owns display
-   * calibration; SD raw records separately retain calibrated values and the
-   * coefficients. Never apply calibration twice along the network path. */
-  loadcell_kg1000 = snapshot->ext_adc_loadcell_kg1000;
-
-#if (DISABLE_SD_CARD == 0U)
-  if (sd_card_enqueue_csv_row_captured("kg1000_network",
-                              snapshot->monotonic_ms,
-                              loadcell_kg1000, calibration, capture) == SD_CARD_STATUS_OK)
-  {
-    g_daq_sd_network_row_ok_count++;
-  }
-  else
-  {
-    sd_card_capture_fault(capture); g_daq_sd_network_row_fail_count++;
-  }
-#endif
-
-  (void)chamber; (void)capture;
-
-}
-
-static void daq_publish_kg50(float raw, uint8_t input, uint64_t monotonic_ms,
-                             const daq_calibration_t *calibration, sd_capture_t capture)
-{
-#if (DISABLE_SD_CARD == 0U)
-  if (sd_card_enqueue_csv_row_captured(input ? "kg50_p6_network_volts" : "kg50_network", monotonic_ms, raw, calibration, capture) == SD_CARD_STATUS_OK)
-    g_daq_sd_network_row_ok_count++;
-  else { sd_card_capture_fault(capture); g_daq_sd_network_row_fail_count++; }
-#else
-  (void)monotonic_ms;
-  (void)calibration; (void)capture;
-#endif
-}
-
-/* This queue is for SD rows only; live values use an independent latest-slot handoff.
- * A work item keeps the
- * captured timestamp and calibration; saturation rejects the newest item and
- * is counted separately from the raw SD path. */
-#define DAQ_REPORT_DEPTH 16U
+/* One acquisition cycle's live values. Acquisition offers them straight to
+ * the latest-value network slots. Nothing here is queued or written to SD:
+ * the SD card keeps every conversion as a raw record instead. Load cells are
+ * uncalibrated ADC-pin volts; GroundStation owns display calibration, and SD
+ * raw records separately keep the on-board calibrated values. */
 #define DAQ_REPORT_KG1000 1U
 #define DAQ_REPORT_KG50 2U
 #define DAQ_REPORT_TEMPERATURE 4U
 typedef struct {
-  uint64_t monotonic_ms;
-  daq_calibration_t calibration;
+  uint64_t monotonic_ms, kg1000_ms, kg50_ms;
   float kg1000, kg50, temperature;
   float chamber[2];
   uint8_t chamber_valid;
   uint32_t flags;
-  sd_capture_t capture;
   uint8_t kg50_input;
 } daq_report_t;
-_Static_assert(sizeof(daq_report_t) == 112U, "Capture token must not grow the report pool");
-static TX_THREAD g_report_thread;
-static TX_QUEUE g_report_queue;
-static TX_BLOCK_POOL g_report_pool;
-static ULONG g_report_stack[8192U / sizeof(ULONG)];
-static ULONG g_report_queue_storage[DAQ_REPORT_DEPTH];
-static ULONG g_report_pool_storage[(DAQ_REPORT_DEPTH * (sizeof(daq_report_t) + sizeof(void *)) + sizeof(ULONG) - 1U) / sizeof(ULONG)];
-volatile uint32_t g_daq_report_enqueued_count;
-volatile uint32_t g_daq_report_completed_count;
-volatile uint32_t g_daq_report_drop_count;
-volatile uint32_t g_daq_report_max_age_ms;
 
 /* Acquisition publishes only into fixed latest-value slots. SD queue or
  * writer delays must never hold the live path behind historical reports. */
@@ -408,16 +389,16 @@ static void daq_offer_live_report(const daq_report_t *report)
     if (report->chamber_valid && isfinite(report->chamber[0]) && isfinite(report->chamber[1])) {
       const float combined[] = {report->kg1000, report->chamber[0], report->chamber[1]};
       daq_network_offer(DAQ_NETWORK_KG1000, SEDS_DT_DAQ_LOADCELL_CHAMBER,
-                        combined, 3U, report->monotonic_ms);
+                        combined, 3U, report->kg1000_ms);
     } else daq_network_offer(DAQ_NETWORK_KG1000, SEDS_DT_KG1000,
-                            &report->kg1000, 1U, report->monotonic_ms);
+                            &report->kg1000, 1U, report->kg1000_ms);
   }
   if (report->flags & DAQ_REPORT_KG50) {
     const float tagged[] = {(float)report->kg50_input, report->kg50};
     daq_network_offer(DAQ_NETWORK_KG50,
         report->kg50_input == 0U ? SEDS_DT_KG50 : SEDS_DT_DAQ_KG50_SELECTED,
         report->kg50_input == 0U ? &report->kg50 : tagged,
-        report->kg50_input == 0U ? 1U : 2U, report->monotonic_ms);
+        report->kg50_input == 0U ? 1U : 2U, report->kg50_ms);
   }
   if (report->flags & DAQ_REPORT_TEMPERATURE)
     daq_network_offer(DAQ_NETWORK_TEMPERATURE, SEDS_DT_DAQ_ADC_TEMPERATURE,
@@ -425,58 +406,6 @@ static void daq_offer_live_report(const daq_report_t *report)
 #else
   (void)report;
 #endif
-}
-
-static void daq_enqueue_report(const daq_report_t *report)
-{
-  if (!report->flags) return;
-  daq_report_t *work;
-  if (tx_block_allocate(&g_report_pool, (VOID **)&work, TX_NO_WAIT) != TX_SUCCESS) {
-#if (DISABLE_SD_CARD == 0U)
-    sd_card_capture_fault(report->capture);
-#endif
-    g_daq_report_drop_count++;
-    return;
-  }
-  *work = *report;
-#if (DISABLE_SD_CARD == 0U)
-  sd_card_capture_retain(work->capture);
-#endif
-  ULONG message = (ULONG)(uintptr_t)work;
-  if (tx_queue_send(&g_report_queue, &message, TX_NO_WAIT) != TX_SUCCESS) {
-#if (DISABLE_SD_CARD == 0U)
-    sd_card_capture_fault(work->capture); sd_card_capture_release(work->capture);
-#endif
-    (void)tx_block_release(work);
-    g_daq_report_drop_count++;
-  } else g_daq_report_enqueued_count++;
-}
-
-static void daq_report_thread_entry(ULONG argument)
-{
-  (void)argument;
-  for (;;) {
-    ULONG message;
-    if (tx_queue_receive(&g_report_queue, &message, TX_WAIT_FOREVER) != TX_SUCCESS) continue;
-    daq_report_t *work = (daq_report_t *)(uintptr_t)message;
-    const uint64_t now = daq_log_monotonic_ms();
-    const uint32_t age = now >= work->monotonic_ms ? (uint32_t)(now - work->monotonic_ms) : 0U;
-    if (age > g_daq_report_max_age_ms) g_daq_report_max_age_ms = age;
-    if (work->flags & DAQ_REPORT_KG1000) {
-      daq_snapshot_t snapshot = {0};
-      snapshot.ext_adc_sample_valid = 1U;
-      snapshot.ext_adc_loadcell_kg1000 = work->kg1000;
-      snapshot.monotonic_ms = work->monotonic_ms;
-      daq_publish_loadcell(&snapshot, &work->calibration, work->chamber_valid ? work->chamber : NULL, work->capture);
-    }
-    if (work->flags & DAQ_REPORT_KG50)
-      daq_publish_kg50(work->kg50, work->kg50_input, work->monotonic_ms, &work->calibration, work->capture);
-    g_daq_report_completed_count++;
-#if (DISABLE_SD_CARD == 0U)
-    sd_card_capture_release(work->capture);
-#endif
-    (void)tx_block_release(work);
-  }
 }
 
 #if (DAQ_ENABLE_DUMMY_CAN_TELEMETRY != 0U)
@@ -501,10 +430,10 @@ void daq_thread_entry(ULONG initial_input)
   uint8_t power_loss_latched = 0U;
   uint8_t daq_ready = 1U;
   uint32_t last_temperature_report_ms = 0U;
-  daq_downsample_t downsample = {0};
-  daq_downsample_t downsample_kg50 = {0};
   daq_downsample_t downsample_chamber = {0};
-  uint8_t previous_kg50_input = 0U;
+#if (DISABLE_SD_CARD == 0U)
+  uint32_t last_supply_ms = 0U;
+#endif
   float chamber[2] = {NAN, NAN};
   uint32_t chamber_sample_ms = 0U;
   uint8_t chamber_seen = 0U;
@@ -546,6 +475,20 @@ void daq_thread_entry(ULONG initial_input)
       continue;
     }
 
+#if (DISABLE_SD_CARD == 0U)
+    /* Launch window: VMAIN/IMON every DAQ_SUPPLY_LAUNCH_PERIOD_MS, beside the
+     * load-cell records, so supply dips line up with load-cell faults. */
+    if (!snapshot.analog_sample_fresh &&
+        (uint32_t)((uint32_t)snapshot.monotonic_ms - last_supply_ms) >= DAQ_SUPPLY_LAUNCH_PERIOD_MS &&
+        sd_card_launch_window_active())
+    {
+      (void)daq_board_sample_supply();
+      last_supply_ms = (uint32_t)snapshot.monotonic_ms;
+    }
+    if (snapshot.analog_sample_fresh) last_supply_ms = (uint32_t)snapshot.monotonic_ms;
+    daq_supply_sample_t supply;
+    const uint8_t supply_fresh = daq_board_take_supply(&supply);
+#endif
     stage_started = daq_profile_stage(0U, stage_started);
     g_daq_sample_ok_count++;
     daq_calibration_t calibration;
@@ -556,18 +499,22 @@ void daq_thread_entry(ULONG initial_input)
     calibration = daq_calibration_current();
 #endif
     daq_loadcell_window_t window;
+    daq_loadcell_bins_t bins;
+    daq_report_t report = {.monotonic_ms = snapshot.monotonic_ms,
+                           .kg50_input = mcp3564r_kg50_input()};
+    const uint8_t kg50_channel = report.kg50_input == 1U ? 9U : 1U;
 
 #if (DISABLE_SD_CARD == 0U)
     const uint16_t raw_count = daq_drain_ext_adc(&snapshot,
                                                  raw_records,
-                                                 DAQ_RAW_BATCH_MAX, &calibration, &window);
+                                                 DAQ_RAW_BATCH_MAX, &calibration, &window,
+                                                 kg50_channel, &bins, supply_fresh ? &supply : NULL);
 #else
-    (void)daq_drain_ext_adc(&snapshot, NULL, DAQ_RAW_BATCH_MAX, &calibration, &window);
+    (void)daq_drain_ext_adc(&snapshot, NULL, DAQ_RAW_BATCH_MAX, &calibration, &window,
+                            kg50_channel, &bins, NULL);
 #endif
 
     stage_started = daq_profile_stage(1U, stage_started);
-    daq_report_t report = {.monotonic_ms = snapshot.monotonic_ms,
-                           .calibration = calibration, .capture = capture};
     const uint32_t report_ms = (uint32_t)snapshot.monotonic_ms;
     if ((uint32_t)(report_ms - last_temperature_report_ms) >= DAQ_TEMPERATURE_REPORT_PERIOD_MS)
     {
@@ -595,28 +542,19 @@ void daq_thread_entry(ULONG initial_input)
       memcpy(report.chamber, chamber, sizeof(chamber));
       report.chamber_valid = 1U;
     }
-    float filtered;
-    if (daq_downsample_add(&downsample, snapshot.ext_adc_loadcell_kg1000,
-                           window.count[0], (uint32_t)snapshot.monotonic_ms,
-                           DAQ_BROADCAST_PERIOD_MS, &filtered))
+    /* SEDSnet receives the boxcar mean of each bin of unfiltered raw
+     * conversions; SD keeps those conversions and nothing else, so the SD
+     * raw records are the single stored copy of this stream. */
+    if (bins.kg1000.ready)
     {
-      /* SD kg1000_network and SEDSNet receive this identical filtered value.
-       * Raw records above retain individual, unfiltered conversions. */
-      report.kg1000 = filtered;
+      report.kg1000 = bins.kg1000.value;
+      report.kg1000_ms = bins.kg1000.captured_ms;
       report.flags |= DAQ_REPORT_KG1000;
     }
-
-    report.kg50_input = mcp3564r_kg50_input();
-    if (report.kg50_input != previous_kg50_input) {
-      memset(&downsample_kg50, 0, sizeof(downsample_kg50));
-      previous_kg50_input = report.kg50_input;
-    }
-    const unsigned kg50_channel = report.kg50_input == 1U ? 9U : 1U;
-    const float kg50_average = window.count[kg50_channel] != 0U ? window.sum[kg50_channel] / window.count[kg50_channel] : 0.0f;
-    if (daq_downsample_add(&downsample_kg50, kg50_average, window.count[kg50_channel],
-                           (uint32_t)snapshot.monotonic_ms, DAQ_BROADCAST_PERIOD_MS, &filtered))
+    if (bins.kg50.ready)
     {
-      report.kg50 = filtered;
+      report.kg50 = bins.kg50.value;
+      report.kg50_ms = bins.kg50.captured_ms;
       report.flags |= DAQ_REPORT_KG50;
     }
     daq_offer_live_report(&report);
@@ -625,7 +563,6 @@ void daq_thread_entry(ULONG initial_input)
         sd_card_enqueue_raw_adc_samples_captured(raw_records, raw_count, &calibration, capture) != SD_CARD_STATUS_OK)
       { sd_card_capture_fault(capture); ++g_daq_sd_raw_batch_drop_count; }
 #endif
-    daq_enqueue_report(&report);
     daq_enqueue_analog(&snapshot, &calibration, &window, capture);
 #if (DISABLE_SD_CARD == 0U)
     sd_card_capture_release(capture);
@@ -750,19 +687,7 @@ static void daq_analog_thread_entry(ULONG argument)
 
 UINT create_daq_thread(void)
 {
-  UINT status = tx_block_pool_create(&g_report_pool, "Loadcell reports", sizeof(daq_report_t),
-                                     g_report_pool_storage, sizeof(g_report_pool_storage));
-  if (status != TX_SUCCESS) return status;
-  status = tx_queue_create(&g_report_queue, "Loadcell reports", TX_1_ULONG,
-                           g_report_queue_storage, sizeof(g_report_queue_storage));
-  if (status != TX_SUCCESS) return status;
-  status = tx_thread_create(&g_report_thread, "Loadcell reporting", daq_report_thread_entry, 0U,
-                            g_report_stack, sizeof(g_report_stack), DAQ_IO_THREAD_PRIORITY,
-                            DAQ_IO_THREAD_PRIORITY,
-                            (TX_TIMER_TICKS_PER_SECOND * DAQ_IO_THREAD_SLICE_MS + 999U) / 1000U,
-                            TX_AUTO_START);
-  if (status != TX_SUCCESS) return status;
-  status = tx_block_pool_create(&g_analog_pool, "Analog snapshots", sizeof(daq_analog_work_t),
+  UINT status = tx_block_pool_create(&g_analog_pool, "Analog snapshots", sizeof(daq_analog_work_t),
                                      g_analog_pool_storage, sizeof(g_analog_pool_storage));
   if (status != TX_SUCCESS) return status;
   status = tx_queue_create(&g_analog_queue, "Analog snapshots", TX_1_ULONG,

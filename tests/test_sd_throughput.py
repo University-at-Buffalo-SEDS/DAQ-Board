@@ -26,6 +26,22 @@ MARGIN = OFFERED * 3 // 2  # 1.5x target
 GOLDEN_RAW_ONLY = ('d62be12dadbb36fd3fdcadbf830f852a9ac0b891d356a82294b9f8ac8b0022a1', 5488013)
 GOLDEN_MIXED = ('27f5cf5727ec7835ce3135985ab3c6bedb613ba791ded2d3cf1315b997b68810',
                 'b626dcd49fca6257f3b31994b2d3e11142906a032283774f92fb2ef94ffcb164')
+# Those goldens predate the <sensor>_<unit> names and the calibration line's
+# loadcell_input/loadcell_boxcar_ms fields (loadcell_input left them stale).
+# Undoing exactly those edits must give the old bytes, so the writer is
+# otherwise unchanged. The warm-up row that opens the file was kg1000_network.
+LEGACY_NAMES = ((b',kg1000_v,', b',mcp3564r_raw,'), (b',kg50_v,', b',kg50_raw,'),
+                (b',kg50_p6_v,', b',mcp3564r_ch2_ch3_gain16_raw,'),
+                (b',chamber_pressure_v,', b',chamber_pressure_raw_volts_psi,'),
+                (b',mcp3564r_ch2_v,', b',mcp3564r_ch2_raw,'), (b',mcp3564r_ch3_v,', b',mcp3564r_ch3_raw,'),
+                (b',valve_pressure_psi,', b',kg1000_network,'),
+                (b',loadcell_input=adc_volts,loadcell_boxcar_ms=4\r\n', b'\r\n'))
+
+
+def legacy_bytes(data):
+    for new, old in LEGACY_NAMES:
+        data = data.replace(new, old)
+    return data
 
 
 def filex_source():
@@ -94,7 +110,11 @@ class SdThroughputTest(unittest.TestCase):
         text = result['text']
         self.assertEqual(result['drained'], 1, text)
         self.assertEqual(result['raw_dropped'], 0, text)
-        self.assertEqual(result['line_dropped'], 0, text)
+        # Only optional 10 Hz snapshot rows may be shed during a 400 ms card
+        # stall, a whole snapshot at a time; required rows never.
+        self.assertEqual(result['essential_telemetry_dropped'], 0, text)
+        self.assertEqual(result['line_dropped'] % 22, 0, text)
+        self.assertLessEqual(result['line_dropped'], result['offered_scalar'] // 10, text)
         self.assertEqual(result['accepted_raw'], result['offered_raw'], text)
         self.assertEqual(result['write_errors'], 0, text)
         self.assertEqual(result['verify'], 0, text)
@@ -106,8 +126,10 @@ class SdThroughputTest(unittest.TestCase):
         self.assert_no_loss(result)
         self.assertGreaterEqual(result['stalls'], 4, result['text'])
         self.assertGreaterEqual(result['max_write_ms'], 400, result['text'])
-        # Whole sectors leave in large in-place commands, not 4 KiB pieces.
-        self.assertGreaterEqual(result['sectors_per_write'], 16.0, result['text'])
+        # Whole sectors leave in large in-place commands, not 4 KiB (8-sector)
+        # pieces. 15.9 with the 10 Hz snapshot bursts; 16+ with the former
+        # steady 500 rows/s of load-cell copies.
+        self.assertGreaterEqual(result['sectors_per_write'], 14.0, result['text'])
 
     def test_one_and_a_half_times_offered_rate_across_card_latencies(self):
         for latency_us in (2000, 6000, 10000, 15000):
@@ -126,14 +148,19 @@ class SdThroughputTest(unittest.TestCase):
         raw = self.run_model(dump=out / 'raw.csv', OFFER_SCALAR_HZ=0, STALL_MS=0, PROG_FIXED_US=2000)
         self.assert_no_loss(raw)
         data = (out / 'raw.csv').read_bytes()
+        self.assertNotIn(b'network,', data.replace(b',network,', b','))
+        data = legacy_bytes(data)
         self.assertEqual((hashlib.sha256(data).hexdigest(), len(data)), GOLDEN_RAW_ONLY)
         mixed = self.run_model(dump=out / 'mixed.csv', STALL_MS=400, PROG_FIXED_US=2000)
         self.assert_no_loss(mixed)
         lines = (out / 'mixed.csv').read_bytes().split(b'\n')
-        other = b'\n'.join(line for line in lines if b'_network,' not in line)
-        network = b'\n'.join(line for line in lines if b'_network,' in line)
-        self.assertEqual((hashlib.sha256(other).hexdigest(), hashlib.sha256(network).hexdigest()),
-                         GOLDEN_MIXED)
+        # Raw/header lines keep their exact old bytes; the scalar stream is now
+        # the 10 Hz optional snapshot instead of 500 rows/s of load-cell copies.
+        other = legacy_bytes(b'\n'.join(line for line in lines if b',"' not in line))
+        self.assertEqual(hashlib.sha256(other).hexdigest(), GOLDEN_MIXED[0])
+        scalar = [line for line in lines if b',"' in line]
+        self.assertFalse([line for line in scalar if b'_network' in line or b'kg1000_v' in line])
+        self.assertEqual(len(scalar), mixed['offered_scalar'] - mixed['line_dropped'] + 1)  # + warm-up row
 
 
 if __name__ == '__main__':

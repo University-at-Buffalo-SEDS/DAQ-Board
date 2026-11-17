@@ -55,10 +55,18 @@ by this firmware and contains that marker.
 Firmware writes one regular session file, `DAQ_<network-time>_<sequence>.CSV`,
 per session. A session runs from boot, or from the end of a launch window, until
 the next launch window or power-off, and its file receives every row: raw ADC
-channels, filtered network rows, telemetry snapshots, packet diagnostics and VB
+conversions, board supply, telemetry snapshots, packet diagnostics and VB
 OX-tank pressure. Each launch window, T0 through T+20 s (T0 = the Ground Station
 deadline minus 20 s), goes to exactly one `DAQ_LAUNCH_<network-time>_<sequence>.CSV`
 file with all channels; when the window ends a new regular session file opens.
+From 0.5 s before T0 until the window closes, acquisition also reads the board
+supply (VMAIN through VMON and the LM74202 IMON, both on ADC1) every
+`DAQ_SUPPLY_LAUNCH_PERIOD_MS` (4 ms) instead of every 100 ms and writes it as
+`input_voltage_v`/`input_current_a` records in the load-cell record stream, so
+supply dips line up with load-cell samples. Each reading is two polled ADC1
+conversions (about 26 us each at 16 MHz with 391.5-cycle sampling, roughly
+60 us with HAL overhead, under 2% of the acquisition thread), and adds about
+56 KB/s of SD rows during the 20.5 s window.
 Rows are assigned by capture time when UTC is known, so neither transition loses
 or duplicates a row. A calibration change writes an in-stream
 `# calibration,...` line instead of starting a file. A file is split only before
@@ -71,8 +79,11 @@ frequency (1000 Hz), and a per-stream sequence. Uptime remains usable when
 network UTC is corrected. Raw rows preserve ADC code, raw/calibrated values
 and ADC temperature. Failed and partial writes retain their pending records;
 queue rejection and storage errors are counted. The default live network cap
-is 100 sensor packets/s total; the separate load-cell SD report target remains
-250 rows/s per loadcell, using captured fresh samples.
+is 100 sensor packets/s total. Each load-cell conversion is stored once, as a
+raw record; the SEDSnet KG1000/KG50 values are rebuilt from those records, so
+there is no separate SD copy of them. Sensor names follow `<sensor>_<unit>`;
+see [SD sensor names](docs/sd-record-format.md#daq-sensor-names) for the full
+list and the mapping from older names (`kg1000_network`, `mcp3564r_raw`, ...).
 Every file begins with the four active
 load-cell calibration coefficients and contains both raw and calibrated sample
 values. Values use nine-significant-digit decimal scientific notation, preserving
@@ -234,9 +245,11 @@ Do not claim lossless capture of every ADC conversion with this timer-driven
 driver. The compile-time checks reject settings exceeding conversion speed or
 raw batch capacity. SD throughput and actual achieved rate still require testing.
 
-A sample-weighted boxcar averages acquired raw samples before downsampling.
-Individual raw ADC records remain unfiltered on SD, while `kg1000_network`
-contains the identical uncalibrated filtered value sent over SEDSNet.
+A boxcar averages acquired raw samples before downsampling: each KG1000/KG50
+network value is the mean of the conversions in one fixed 4 ms bin of the
+uptime clock (`daq_bin_average_add`). It reads only what the SD raw records
+hold, so SD keeps the individual unfiltered conversions and nothing else, and
+the network stream can be rebuilt from them exactly.
 GroundStation applies display calibration; SD raw records separately retain
 calibrated values and calibration coefficients. Averaging
 reduces broadband noise, but is not a sharp anti-alias filter and does not
@@ -294,15 +307,15 @@ explains that DCACHE1 bypasses internal SRAM on this device. The ADC driver
 therefore uses memory barriers before DMA launch and before consuming its
 completed data, and performs no polling DCACHE maintenance in interrupts.
 
-SD raw records identify CH1 as `kg50_raw` and retain its ADC code, ADC-pin
-volts (the calibration input), calibrated kg, and acquisition timestamp. CH0
-retains the `mcp3564r_raw` name. KG1000/KG50 telemetry and SD values are
+SD raw records identify CH0 as `kg1000_v` and CH1 as `kg50_v` (P6: `kg50_p6_v`)
+and retain the ADC code, ADC-pin volts (the calibration input), calibrated kg,
+and acquisition timestamp. KG1000/KG50 telemetry and SD values are
 ADC-pin volts; firmware before this change used a historical raw scale (one
 raw unit is 16000/921 V) and stored calibrations are converted once at boot
-(see [load-cell inputs](docs/loadcell-inputs.md)). Separate slow diagnostic rows `mcp3564r_voltage_v`
-(CH0) and `mcp3564r_ch1_voltage_v` (CH1) use the nominal internal 2.4 V reference
+(see [load-cell inputs](docs/loadcell-inputs.md)). Separate slow diagnostic rows `kg1000_window_v`
+(CH0) and `kg50_window_v` (CH1) use the nominal internal 2.4 V reference
 and the configured ADC gain of 1.
-The replay file records `kg50_network`, identical to the raw `KG50` payload.
+The `KG50` payload is the 4 ms boxcar of the `kg50_v` records.
 Every file header includes the 50 kg polynomial coefficients, input shift, and
 tare offset; calibration changes rotate files as for the original channel.
 

@@ -17,10 +17,14 @@ typedef struct
   float current_sense_v[2]; /* J7, J8 */
   float current_sense_a[2];
   float power_monitor_v[2]; /* VMON, IMON ADC-pin volts */
+  int32_t power_monitor_code[2]; /* VMON, IMON ADC1 counts; -1 when unread. */
 } daq_adc1_sample_t;
 
 UINT daq_adc1_init(void);
 UINT daq_adc1_sample(daq_adc1_sample_t *sample);
+/* VMON/IMON only (two conversions, about 60 us): refreshes input_voltage_v,
+ * input_current_a, power_monitor_v and power_monitor_code in place. */
+UINT daq_adc1_sample_supply(daq_adc1_sample_t *sample);
 
 #ifdef __cplusplus
 }

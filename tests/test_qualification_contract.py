@@ -197,16 +197,20 @@ class QualificationContractTests(unittest.TestCase):
         self.assertIn("DAQ_SAMPLE_PERIOD_MS DAQ_ACQUISITION_PERIOD_MS", daq)
         self.assertIn("daq_drain_ext_adc", daq)
         self.assertIn("sd_card_enqueue_raw_adc_samples", daq)
-        self.assertIn('sd_card_enqueue_csv_row_captured("kg1000_network"', daq)
+        # Load cells reach SD once, as raw records; the network boxcar runs
+        # on those same records, so there is no second SD copy to write.
+        self.assertNotIn("sd_card_enqueue_csv_row", daq)
+        self.assertNotIn("_network\"", daq)
+        self.assertIn("daq_bin_average_add(channel == 0U ? &kg1000_bins : &kg50_bins, raw, captured_uptime,", daq)
         self.assertIn("calibration->kg1000_slope * corrected", daq)
         self.assertIn("const sd_capture_t capture = sd_card_capture_begin(NULL, &calibration);", daq)
         self.assertLess(
-            daq.index('sd_card_enqueue_csv_row_captured("kg1000_network"'),
-            daq.index("daq_network_offer(DAQ_NETWORK_KG1000"),
+            daq.index("daq_offer_live_report(&report);\n"),
+            daq.index("sd_card_enqueue_raw_adc_samples_captured(raw_records"),
         )
         self.assertIn("log_telemetry_captured(sample.type, sample.values,", daq)
         self.assertIn("sample.count, sizeof(float), sample.captured_ms)", daq)
-        self.assertIn("g_daq_sd_network_row_ok_count", daq)
+        self.assertNotIn("g_daq_sd_network_row_ok_count", daq)
         self.assertIn("g_daq_raw_samples_drained_count", daq)
         self.assertNotIn("sd_card_request_flush();", daq)
         self.assertIn("SD_RAW_BATCH_MAX DAQ_RAW_BATCH_CAPACITY", sd)

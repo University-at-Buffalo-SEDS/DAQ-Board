@@ -50,27 +50,26 @@ static int sd_scalar_sensor_index(const char *name){(void)name;return -1;}
 static int sd_enqueue_scalar(uint8_t s,uint64_t n,uint64_t u,float v,const daq_calibration_t *c,sd_capture_t capture){(void)capture;(void)s;(void)n;(void)u;(void)v;(void)c;assert(0);return -1;}
 ''' + required + adapter + r'''
 int main(void) {
-  assert(sd_card_enqueue_csv_row("kg1000_network", 20, 0.25f, NULL)==SD_CARD_STATUS_BUSY);
+  assert(sd_card_enqueue_csv_row("chamber_pressure_v", 20, 0.25f, NULL)==SD_CARD_STATUS_BUSY);
   g_sd_services_initialized=1;
   /* No card-ready flag exists in this harness: the initialized bounded queue
    * must be usable before mounting completes. */
-  assert(sd_card_enqueue_csv_row("kg1000_network", 20, 0.25f, NULL)==SD_CARD_STATUS_OK);
+  assert(sd_card_enqueue_csv_row("chamber_pressure_v", 20, 0.25f, NULL)==SD_CARD_STATUS_OK);
   assert(enqueued==1);
-  assert(strcmp(slot.line, "1224,20,kg1000_network,\"2.50000000e-01\",,,,network,,,20,1000,1\r\n")==0);
+  assert(strcmp(slot.line, "1224,20,chamber_pressure_v,\"2.50000000e-01\",,,,network,,,20,1000,1\r\n")==0);
   network_ms=0;
-  assert(sd_card_enqueue_csv_row("kg1000_network", 25, 0.25f, NULL)==SD_CARD_STATUS_OK);
-  assert(strcmp(slot.line, "25,25,kg1000_network,\"2.50000000e-01\",,,,local,,,25,1000,2\r\n")==0);
+  assert(sd_card_enqueue_csv_row("chamber_pressure_v", 25, 0.25f, NULL)==SD_CARD_STATUS_OK);
+  assert(strcmp(slot.line, "25,25,chamber_pressure_v,\"2.50000000e-01\",,,,local,,,25,1000,2\r\n")==0);
   enqueued=1;
   full=1;
-  assert(sd_card_enqueue_csv_row("kg1000_network", 40, 0.25f, NULL)==SD_CARD_STATUS_BACKPRESSURE);
+  assert(sd_card_enqueue_csv_row("chamber_pressure_v", 40, 0.25f, NULL)==SD_CARD_STATUS_BACKPRESSURE);
   assert(g_sd_line_drop_count==1 && enqueued==1 && g_sd_essential_telemetry_dropped==1);
   full=0;
-  assert(sd_card_enqueue_csv_row("kg1000_network", 60, 0.25f, NULL)==SD_CARD_STATUS_OK);
+  assert(sd_card_enqueue_csv_row("chamber_pressure_v", 60, 0.25f, NULL)==SD_CARD_STATUS_OK);
   optional_allowed=0;
   assert(sd_card_enqueue_csv_row("temperature",60,26.0f,NULL)==SD_CARD_STATUS_BACKPRESSURE);
   assert(g_sd_optional_telemetry_dropped==1);
-  assert(sd_card_enqueue_csv_row("kg50_network",60,0.25f,NULL)==SD_CARD_STATUS_OK);
-  assert(sd_card_enqueue_csv_row("kg50_p6_network_volts",60,0.25f,NULL)==SD_CARD_STATUS_OK);
+  assert(sd_card_enqueue_csv_row("valve_pressure_psi",60,0.25f,NULL)==SD_CARD_STATUS_OK);
 }
 '''
         with tempfile.TemporaryDirectory() as tmp:

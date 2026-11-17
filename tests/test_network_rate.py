@@ -1,4 +1,4 @@
-"""Production publishers and worker: one global weighted cap, untouched SD."""
+"""Production publishers and worker: one global weighted cap, no SD copy of the live stream."""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -35,8 +35,8 @@ class NetworkRateTests(unittest.TestCase):
 
     def harness(self):
         source = (ROOT / 'Core/Src/daq_thread.c').read_text()
-        report_types = source[source.index('#define DAQ_REPORT_DEPTH'):
-                              source.index('static TX_THREAD g_report_thread')]
+        report_types = source[source.index('#define DAQ_REPORT_KG1000'):
+                              source.index('/* Acquisition publishes only into fixed')]
         return r'''
 #include <assert.h>
 #include <math.h>
@@ -58,8 +58,6 @@ class NetworkRateTests(unittest.TestCase):
 #define SEDS_DT_DAQ_SAR_VOLTAGES 5
 #define SEDS_DT_DAQ_CURRENT_SENSE 6
 #define SEDS_DT_DAQ_POWER_MONITOR 7
-typedef uint32_t sd_capture_t;
-static void sd_card_capture_fault(sd_capture_t c){assert(c==0);}
 typedef int SedsResult;
 typedef struct
 {
@@ -86,8 +84,7 @@ static unsigned g_daq_loadcell_publish_ok_count,g_daq_loadcell_publish_fail_coun
 static unsigned g_daq_kg50_publish_ok_count,g_daq_kg50_publish_fail_count;
 static unsigned g_daq_temperature_publish_ok_count,g_daq_temperature_publish_fail_count;
 static unsigned g_daq_analog_publish_ok_count,g_daq_analog_publish_fail_count;
-static unsigned g_daq_sd_network_row_ok_count,g_daq_sd_network_row_fail_count;
-static unsigned sd_rows,sd_by_type[3],sent[7],buckets[10],fail_next,irq;
+static unsigned sent[7],buckets[10],fail_next,irq;
 static uint32_t actual_ms,last_send_ms=UINT32_MAX;
 static uint64_t expected_ms;
 static float expected_value;
@@ -95,12 +92,6 @@ static uint32_t __get_PRIMASK(void){return irq;}
 static void __disable_irq(void){irq=1;}
 static void __set_PRIMASK(uint32_t value){irq=value;}
 static float mcp3564r_connector_voltage(unsigned i,float value){(void)i;return value;}
-static int sd_card_enqueue_csv_row_captured(const char*name,uint64_t ms,float raw,const daq_calibration_t*c,sd_capture_t capture){
- assert(capture==0);
- assert(ms==expected_ms && raw==expected_value && c->kg1000_slope==3 && c->kg1000_intercept==-7);
- unsigned ty=!strcmp(name,"kg1000_network")?0:!strcmp(name,"kg50_network")?1:2;
- assert(ty!=2 || !strcmp(name,"kg50_p6_network_volts"));++sd_rows;++sd_by_type[ty];return 0;
-}
 static int log_telemetry_captured(unsigned type,const void*value,size_t n,size_t width,uint64_t captured){
  assert(!irq && width==sizeof(float) && actual_ms!=last_send_ms);
  last_send_ms=actual_ms;
@@ -120,17 +111,18 @@ static int log_telemetry_captured(unsigned type,const void*value,size_t n,size_t
 ''' + report_types + '\n'.join(function(source, marker) for marker in [
             'static void daq_network_offer(', 'static void daq_network_process_once(',
             'static void daq_publish_analog_packet(', 'static void daq_publish_analog(',
-            'static void daq_publish_loadcell(', 'static void daq_publish_kg50(',
             'static void daq_offer_live_report(']) + r'''
 static void capture_loadcell(const daq_snapshot_t*s,const daq_calibration_t*c,const float*pressure){
- daq_report_t report={.monotonic_ms=s->monotonic_ms,.kg1000=s->ext_adc_loadcell_kg1000,.flags=DAQ_REPORT_KG1000};
+ (void)c;
+ /* The bin's own capture time stamps the packet, not the cycle time. */
+ daq_report_t report={.monotonic_ms=UINT64_MAX,.kg1000_ms=s->monotonic_ms,.kg1000=s->ext_adc_loadcell_kg1000,.flags=DAQ_REPORT_KG1000};
  if(pressure){report.chamber[0]=pressure[0];report.chamber[1]=pressure[1];report.chamber_valid=1;}
  daq_offer_live_report(&report); /* acquisition owns NETWORK offers */
- daq_publish_loadcell(s,c,pressure,0); /* independent SD row path */
 }
 static void capture_kg50(float value,uint8_t input,uint64_t ms,const daq_calibration_t*c){
- daq_report_t report={.monotonic_ms=ms,.kg50=value,.kg50_input=input,.flags=DAQ_REPORT_KG50};
- daq_offer_live_report(&report);daq_publish_kg50(value,input,ms,c,0);
+ (void)c;
+ daq_report_t report={.monotonic_ms=UINT64_MAX,.kg50_ms=ms,.kg50=value,.kg50_input=input,.flags=DAQ_REPORT_KG50};
+ daq_offer_live_report(&report);
 }
 static void publish_temperature(float value,uint64_t ms){
  daq_report_t report={.monotonic_ms=ms,.temperature=value,.flags=DAQ_REPORT_TEMPERATURE};
@@ -172,11 +164,9 @@ int main(void){
  }
  assert(sum==total && !g_daq_network_invalid);
  for(unsigned i=0;i<10;i++)assert(buckets[i]==DAQ_NETWORK_RATE_HZ);
- assert(sd_rows==5000 && sd_by_type[0]==2500 && sd_by_type[1]==1250 && sd_by_type[2]==1250);
- assert(g_daq_sd_network_row_ok_count==5000 && !g_daq_sd_network_row_fail_count);
  assert(!g_daq_loadcell_publish_fail_count && !g_daq_kg50_publish_fail_count && !g_daq_analog_publish_fail_count);
- /* A paused network worker can emit only one packet when it resumes. The
-  * report producer still saves every SD row while replacing NETWORK work. */
+ /* A paused network worker can emit only one packet when it resumes; newer
+  * offers replace NETWORK work (SD holds every raw conversion separately). */
  actual_ms=50000;
  for(unsigned i=0;i<20;i++){
   expected_ms=59000+i*4;expected_value=100000+(float)expected_ms;
@@ -187,7 +177,7 @@ int main(void){
  fail_next=1;daq_network_process_once(actual_ms);
  for(unsigned i=0;i<100;i++)daq_network_process_once(actual_ms);
  unsigned after=0,failures=0;for(unsigned i=0;i<7;i++){after+=sent[i];failures+=g_daq_network_failed[i];}
- assert(after==before+1 && failures==1 && !fail_next && sd_rows==5020);
+ assert(after==before+1 && failures==1 && !fail_next);
 }
 '''
 
@@ -200,21 +190,21 @@ int main(void){
         code=code.replace('capture_loadcell(&snapshot,&calibration,NULL);','capture_loadcell(&snapshot,&calibration,pressure);')
         self.compile(code)
 
-    def test_global_cap_priority_weights_sd_capture_and_input_switch(self):
+    def test_global_cap_priority_weights_capture_time_and_input_switch(self):
         for rate in (None, 83, 37):
             with self.subTest(rate=rate):
                 self.compile(self.harness(), () if rate is None else (f'DAQ_NETWORK_RATE_HZ={rate}',))
 
     def test_fault_classifier_distinguishes_io_without_retrying_a_slot(self):
         code = self.harness().replace(
-            'static unsigned sd_rows,',
+            'static unsigned sent[7]',
             'static uint32_t g_sim_daq_publication_attempts, '
             'g_sim_daq_publication_io_refusals, g_sim_daq_publication_other_refusals;\n'
-            'static unsigned sd_rows,')
+            'static unsigned sent[7]')
         code = code.replace(
             'if(fail_next){--fail_next;return SEDS_IO;}',
             'if(fail_next){unsigned result=fail_next;fail_next=0;return result==2?-3:SEDS_IO;}')
-        end = 'assert(after==before+1 && failures==1 && !fail_next && sd_rows==5020);'
+        end = 'assert(after==before+1 && failures==1 && !fail_next);'
         self.assertIn(end, code)
         code = code.replace(end, end + r'''
  assert(g_sim_daq_publication_attempts==after);

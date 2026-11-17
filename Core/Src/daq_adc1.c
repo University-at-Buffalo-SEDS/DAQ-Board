@@ -93,31 +93,65 @@ UINT daq_adc1_init(void)
   return TX_SUCCESS;
 }
 
+/* VMON (R57 100k / R69 10k) and IMON (LM74202: 78.28 uA/A into R60 6.2k;
+ * below 50 mA this is only indicative). volts/codes hold VMON then IMON. */
+static void daq_adc1_store_supply(daq_adc1_sample_t *sample, const float volts[2], const int32_t codes[2])
+{
+  for (unsigned i = 0; i < 2U; ++i)
+  {
+    sample->power_monitor_v[i] = volts[i];
+    sample->power_monitor_code[i] = codes[i];
+  }
+  sample->input_voltage_v = volts[0] * 11.0f;
+  sample->input_current_a = volts[1] / (0.00007828f * 6200.0f);
+}
+
+static UINT daq_adc1_read_channels(unsigned first, unsigned count, uint32_t timeout_ms,
+                                   float *volts, int32_t *codes)
+{
+  UINT result = TX_SUCCESS;
+  for (unsigned i = 0; i < count; ++i)
+  {
+    uint32_t raw;
+    volts[i] = NAN;
+    codes[i] = -1;
+    if (daq_adc1_read_raw(g_adc1_channels[first + i], &raw, timeout_ms) == HAL_OK)
+    {
+      volts[i] = (float)raw * DAQ_VREF_V / ADC1_FULL_SCALE_COUNTS;
+      codes[i] = (int32_t)raw;
+    }
+    else
+      result = TX_NOT_DONE;
+  }
+  return result;
+}
+
+UINT daq_adc1_sample_supply(daq_adc1_sample_t *sample)
+{
+  if (sample == NULL) return TX_PTR_ERROR;
+  float volts[2];
+  int32_t codes[2];
+  /* Each conversion takes about 26 us (391.5 + 17.5 cycles at 16 MHz); a
+   * 1 ms poll bound keeps a faulted ADC from stalling acquisition. */
+  const UINT result = daq_adc1_read_channels(6U, 2U, 1U, volts, codes);
+  daq_adc1_store_supply(sample, volts, codes);
+  return result;
+}
+
 UINT daq_adc1_sample(daq_adc1_sample_t *sample)
 {
   if (sample == NULL) return TX_PTR_ERROR;
   float volts[8];
-  UINT result = TX_SUCCESS;
-  for (unsigned i = 0; i < 8U; ++i)
-  {
-    uint32_t raw;
-    volts[i] = NAN;
-    if (daq_adc1_read_raw(g_adc1_channels[i], &raw, 10U) == HAL_OK)
-      volts[i] = (float)raw * DAQ_VREF_V / ADC1_FULL_SCALE_COUNTS;
-    else
-      result = TX_NOT_DONE;
-  }
+  int32_t codes[8];
+  const UINT result = daq_adc1_read_channels(0U, 8U, 10U, volts, codes);
   for (unsigned i = 0; i < 4U; ++i) sample->sar_inputs_v[i] = volts[i];
   for (unsigned i = 0; i < 2U; ++i)
   {
     sample->current_sense_v[i] = volts[4U + i];
     /* TMCS1108A1B: midpoint zero, nominal 50 mV/A (verify zero on hardware). */
     sample->current_sense_a[i] = (volts[4U + i] - DAQ_VREF_V * 0.5f) / 0.05f;
-    sample->power_monitor_v[i] = volts[6U + i];
   }
-  sample->input_voltage_v = volts[6] * 11.0f; /* R57 100k / R69 10k. */
-  /* LM74202: 78.28 uA/A into R60 6.2k. Below 50mA this is only indicative. */
-  sample->input_current_a = volts[7] / (0.00007828f * 6200.0f);
+  daq_adc1_store_supply(sample, &volts[6], &codes[6]);
   sample->aux_voltage_v = volts[5];
   /* Same ADC owner, after all acquired channels; no extra SD/network rows. */
   board_temperature_poll();

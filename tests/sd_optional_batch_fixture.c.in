@@ -106,6 +106,8 @@ typedef struct
   int32_t adc_temperature_code;
   uint8_t channel;
 } sd_raw_adc_record_t;
+#define SD_RAW_CHANNEL_INPUT_VOLTAGE 10U
+#define SD_RAW_CHANNEL_INPUT_CURRENT 11U
 /* SOURCE_TYPES */
 static sd_raw_slot_t *g_sd_raw_append_tail;
 static sd_scalar_slot_t *g_sd_scalar_append_tail;
@@ -202,10 +204,12 @@ static unsigned serve_raw(void){
         {
           const sd_raw_adc_record_t *sample = &slot->samples[i]; last_raw=(unsigned)sample->record_sequence;assert(sample->raw_adc_code==(int32_t)last_raw&&sample->monotonic_ms==(uint32_t)(sample->network_unix_ms-1700000000000ULL));
           const uint64_t captured_uptime = board_uptime_project(slot->uptime_reference, sample->monotonic_ms);
-          const char *sensor = daq_chamber_is_channel(sample->channel) ? "chamber_pressure_raw_volts_psi" : sample->channel < 8U ? (const char *const[]){
-              "mcp3564r_raw", "kg50_raw", "mcp3564r_ch2_raw", "mcp3564r_ch3_raw",
-              "mcp3564r_ch4_raw", "mcp3564r_ch5_raw", "mcp3564r_ch6_raw", "mcp3564r_ch7_raw"
-          }[sample->channel] : sample->channel == 9U ? "mcp3564r_ch2_ch3_gain16_raw" : "invalid_adc_channel";
+          const char *sensor = daq_chamber_is_channel(sample->channel) ? "chamber_pressure_v" : sample->channel < 8U ? (const char *const[]){
+              "kg1000_v", "kg50_v", "mcp3564r_ch2_v", "mcp3564r_ch3_v",
+              "mcp3564r_ch4_v", "mcp3564r_ch5_v", "mcp3564r_ch6_v", "mcp3564r_ch7_v"
+          }[sample->channel] : sample->channel == 9U ? "kg50_p6_v" :
+              sample->channel == SD_RAW_CHANNEL_INPUT_VOLTAGE ? "input_voltage_v" :
+              sample->channel == SD_RAW_CHANNEL_INPUT_CURRENT ? "input_current_a" : "invalid_adc_channel";
           const int len = sd_format_csv_raw_record(line, sizeof(line),
               sample->network_unix_ms, captured_uptime, sensor, sample->raw_adc_code,
               sample->raw_value, sample->calibrated_value, sample->adc_temperature_c,
@@ -247,54 +251,54 @@ int main(void){
  mock_pool_init(&g_sd_line_pool,line_pool_storage,62U*1024U,SD_LINE_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE);
  mock_pool_init(&g_sd_raw_pool,raw_pool_storage,332U*1024U,SD_RAW_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE);
  daq_calibration_t cal={.kg1000_slope=2};now=4294967290ULL;
- assert(sizeof(g_sd_scalar_sensors)/sizeof(g_sd_scalar_sensors[0])==29);
- for(unsigned n=0;n<29;n++)expect_enqueue(g_sd_scalar_sensors[n],n==6?NAN:n==7?INFINITY:n==8?-0.0f:(float)n/7,&cal,7);
- expect_enqueue(g_sd_scalar_sensors[0],-2.25f,&cal,3);assert(g_sd_queue.count==1&&g_sd_scalar_append_tail->count==30);
- assert(g_sd_scalar_records_enqueued==6&&g_sd_optional_scalar_records_enqueued==24);
+ assert(sizeof(g_sd_scalar_sensors)/sizeof(g_sd_scalar_sensors[0])==24);
+ for(unsigned n=0;n<24;n++)expect_enqueue(g_sd_scalar_sensors[n],n==6?NAN:n==7?INFINITY:n==8?-0.0f:(float)n/7,&cal,7);
+ expect_enqueue(g_sd_scalar_sensors[0],-2.25f,&cal,3);assert(g_sd_queue.count==1&&g_sd_scalar_append_tail->count==25);
+ assert(g_sd_scalar_records_enqueued==3&&g_sd_optional_scalar_records_enqueued==22);
  sd_line_slot_t *pending=take_owner();assert(!g_sd_scalar_append_tail);
- sd_scalar_slot_t *old=(void*)pending;assert(old->count==30);
- expect_enqueue(g_sd_scalar_sensors[5],3.5f,&cal,0);assert(old->count==30&&g_sd_scalar_append_tail!=(void*)old);
+ sd_scalar_slot_t *old=(void*)pending;assert(old->count==25);
+ expect_enqueue(g_sd_scalar_sensors[2],3.5f,&cal,0);assert(old->count==25&&g_sd_scalar_append_tail!=(void*)old);
  uint16_t cursor=0;uint8_t done=0;fail_write=1;
- assert(sd_write_telemetry_item(pending,&cursor,&done)==FX_IO_ERROR&&!cursor&&!consumed&&old->count==30);
- finish_owner(pending);drain();assert(g_sd_scalar_records_written==6&&g_sd_optional_scalar_records_written==25);
+ assert(sd_write_telemetry_item(pending,&cursor,&done)==FX_IO_ERROR&&!cursor&&!consumed&&old->count==25);
+ finish_owner(pending);drain();assert(g_sd_scalar_records_written==3&&g_sd_optional_scalar_records_written==23);
  /* Metadata changes cannot append to an older owner's immutable context. */
  now+=20;expect_enqueue(g_sd_scalar_sensors[0],1.5f,&cal,5);session=99;
- expect_enqueue(g_sd_scalar_sensors[5],2.5f,&cal,5);g_sd_route_epoch=3;
- expect_enqueue(g_sd_scalar_sensors[6],4.5f,&cal,5);cal.kg1000_slope=3;
- expect_enqueue(g_sd_scalar_sensors[7],5.5f,&cal,5);assert(g_sd_queue.count==4);drain();
+ expect_enqueue(g_sd_scalar_sensors[2],2.5f,&cal,5);g_sd_route_epoch=3;
+ expect_enqueue(g_sd_scalar_sensors[3],4.5f,&cal,5);cal.kg1000_slope=3;
+ expect_enqueue(g_sd_scalar_sensors[4],5.5f,&cal,5);assert(g_sd_queue.count==4);drain();
  /* A sequence delta exceeding32bits must allocate a separate exact owner. */
- expect_enqueue(g_sd_scalar_sensors[5],6.5f,&cal,0);uint64_t base=g_sd_scalar_append_tail->sequence_base;
- sd_row_sequence=base+UINT32_MAX;expect_enqueue(g_sd_scalar_sensors[6],7.5f,&cal,0);assert(g_sd_queue.count==2);drain();
+ expect_enqueue(g_sd_scalar_sensors[2],6.5f,&cal,0);uint64_t base=g_sd_scalar_append_tail->sequence_base;
+ sd_row_sequence=base+UINT32_MAX;expect_enqueue(g_sd_scalar_sensors[3],7.5f,&cal,0);assert(g_sd_queue.count==2);drain();
  /* Unknown numeric names retain the CSV fallback and reserve policy. */
- expect_enqueue(g_sd_scalar_sensors[5],8.25f,&cal,0);
+ expect_enqueue(g_sd_scalar_sensors[2],8.25f,&cal,0);
  expect_enqueue("unregistered_optional",8.5f,&cal,0);assert(!g_sd_scalar_append_tail);
  expect_enqueue(g_sd_scalar_sensors[0],8.75f,&cal,0);assert(g_sd_queue.count==3);
  drain();
  /* A pre-existing queued compact tail can accept rows without taking a block
   * below the reserve, while a new optional context is refused. */
- expect_enqueue(g_sd_scalar_sensors[5],9.5f,&cal,0);sd_line_slot_t *held[100];unsigned held_n=0;
+ expect_enqueue(g_sd_scalar_sensors[2],9.5f,&cal,0);sd_line_slot_t *held[100];unsigned held_n=0;
  unsigned threshold=(g_sd_line_pool.tx_block_pool_total*3U+3U)/4U;
  while(g_sd_line_pool.tx_block_pool_available>=threshold){held[held_n]=sd_alloc_slot(8);assert(held[held_n]);held_n++;}
  unsigned available=g_sd_line_pool.tx_block_pool_available;
- expect_enqueue(g_sd_scalar_sensors[6],10.5f,&cal,0);assert(g_sd_line_pool.tx_block_pool_available==available);
+ expect_enqueue(g_sd_scalar_sensors[3],10.5f,&cal,0);assert(g_sd_line_pool.tx_block_pool_available==available);
  daq_calibration_t different=cal;different.kg1000_slope=4;
  unsigned drop=g_sd_optional_telemetry_dropped,essential=g_sd_essential_telemetry_dropped;
- assert(sd_card_enqueue_csv_row(g_sd_scalar_sensors[7],(uint32_t)now,0,&different)==SD_CARD_STATUS_BACKPRESSURE);
+ assert(sd_card_enqueue_csv_row(g_sd_scalar_sensors[4],(uint32_t)now,0,&different)==SD_CARD_STATUS_BACKPRESSURE);
  assert(g_sd_optional_telemetry_dropped==drop+1&&g_sd_essential_telemetry_dropped==essential);
  /* Higher-priority required arrival still consumes reserved capacity. */
  expect_enqueue(g_sd_scalar_sensors[0],11.5f,&different,0);assert(g_sd_line_pool.tx_block_pool_available==available-1);
  /* The original raw guard still refuses optional even on matching tail. */
  g_sd_raw_records_enqueued_count=257;drop=g_sd_optional_telemetry_dropped;
- assert(sd_card_enqueue_csv_row(g_sd_scalar_sensors[8],(uint32_t)now,0,&different)==SD_CARD_STATUS_BACKPRESSURE);
+ assert(sd_card_enqueue_csv_row(g_sd_scalar_sensors[5],(uint32_t)now,0,&different)==SD_CARD_STATUS_BACKPRESSURE);
  assert(g_sd_optional_telemetry_dropped==drop+1);expect_enqueue(g_sd_scalar_sensors[1],12.5f,&different,0);
  g_sd_raw_records_enqueued_count=0;drain();while(held_n)sd_free_slot(held[--held_n]);
  /* Real allocation and channel refusal preserve ownership/accounting. */
  mock_force_full=1;drop=g_sd_optional_telemetry_dropped;
- assert(sd_card_enqueue_csv_row(g_sd_scalar_sensors[5],(uint32_t)now,0,&cal)==SD_CARD_STATUS_BACKPRESSURE);mock_force_full=0;
+ assert(sd_card_enqueue_csv_row(g_sd_scalar_sensors[2],(uint32_t)now,0,&cal)==SD_CARD_STATUS_BACKPRESSURE);mock_force_full=0;
  assert(g_sd_optional_telemetry_dropped==drop+1&&!g_sd_scalar_append_tail);
  g_sd_queue.count=1024;available=g_sd_line_pool.tx_block_pool_available;drop=g_sd_optional_telemetry_dropped;
- assert(sd_card_enqueue_csv_row(g_sd_scalar_sensors[5],(uint32_t)now,0,&cal)==SD_CARD_STATUS_BACKPRESSURE);
+ assert(sd_card_enqueue_csv_row(g_sd_scalar_sensors[2],(uint32_t)now,0,&cal)==SD_CARD_STATUS_BACKPRESSURE);
  assert(g_sd_optional_telemetry_dropped==drop+1&&g_sd_line_pool.tx_block_pool_available==available&&!g_sd_scalar_append_tail);g_sd_queue.count=0;
  assert(!g_sd_line_slots_used&&g_sd_line_pool.tx_block_pool_available==g_sd_line_pool.tx_block_pool_total);
- printf("PASS exactCSV%u;29names;required counters;queued/dequeued isolation;failure cursor;epoch/session/calibration/wrap/sequence overflow;reserve/raw guard;allocation/channel refusal\n",consumed);
+ printf("PASS exactCSV%u;24names;required counters;queued/dequeued isolation;failure cursor;epoch/session/calibration/wrap/sequence overflow;reserve/raw guard;allocation/channel refusal\n",consumed);
 }

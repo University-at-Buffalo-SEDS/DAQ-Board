@@ -76,7 +76,7 @@ static int tx_queue_receive(TX_QUEUE *queue,void *message,unsigned wait){
  if(!queue->count)return 1;
  *(ULONG*)message=queue->messages[queue->head];queue->head=(queue->head+1)%1024;queue->count--;return 0;
 }
-'''+'typedef struct'+record+'sd_raw_adc_record_t;\n'+types+r'''
+'''+'typedef struct'+record+'sd_raw_adc_record_t;\n'+'''#define SD_RAW_CHANNEL_INPUT_VOLTAGE 10U\n#define SD_RAW_CHANNEL_INPUT_CURRENT 11U\n'''+types+r'''
 static sd_raw_slot_t *g_sd_raw_append_tail;
 '''
         for name in ['sd_pool_allocate','sd_pool_release','sd_alloc_raw_slot','sd_free_raw_slot',
