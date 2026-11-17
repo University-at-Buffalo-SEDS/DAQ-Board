@@ -16,6 +16,7 @@
 #include "daq_timestamp.h"
 #include "daq_filter.h"
 #include "daq_chamber_pressure.h"
+#include "daq_input_faults.h"
 #include <string.h>
 #include <math.h>
 TX_THREAD daq_thread;
@@ -420,6 +421,61 @@ static void daq_publish_dummy_can_telemetry(void)
 }
 #endif
 
+/* Live input faults (daq_input_faults.h). Acquisition observes each window;
+ * the telemetry thread (board_health_poll) takes reports. Both run with IRQs
+ * masked for a few microseconds. */
+static daq_input_faults_t g_daq_input_faults;
+static uint8_t g_daq_input_faults_ready;
+static uint32_t g_daq_input_health_sent_ms;
+
+/* `supply` is the VMAIN reading taken since the last window (every analog
+ * sample, and every DAQ_SUPPLY_LAUNCH_PERIOD_MS in the launch window), timed
+ * by its own HAL tick; NULL falls back to the snapshot's 100 ms reading. */
+static void daq_observe_input_faults(const daq_snapshot_t *snapshot,
+                                     const daq_loadcell_window_t *window, uint8_t kg50_input,
+                                     const daq_supply_sample_t *supply)
+{
+  const uint32_t now = (uint32_t)snapshot->monotonic_ms;
+  const unsigned kg50 = kg50_input == 1U ? 9U : 1U;
+  daq_input_faults_t *faults = &g_daq_input_faults;
+  const uint32_t saved = __get_PRIMASK();
+  __disable_irq();
+  if (!g_daq_input_faults_ready) {
+    daq_input_faults_reset(faults);
+    g_daq_input_faults_ready = 1U;
+  }
+  if (supply != NULL) daq_input_faults_supply(faults, supply->input_voltage_v, supply->monotonic_ms);
+  else if (snapshot->analog_sample_fresh) daq_input_faults_supply(faults, snapshot->input_voltage_v, now);
+  if (window->count[0] != 0U) daq_input_faults_kg1000(faults, window->sum[0] / window->count[0], now);
+  daq_input_faults_kg50_input(faults, kg50_input);
+  if (window->count[kg50] != 0U) daq_input_faults_kg50(faults, window->sum[kg50] / window->count[kg50], now);
+  if (window->count[2] != 0U && window->count[3] != 0U)
+    daq_input_faults_p6_legs(faults, window->voltage_sum[2] / window->count[2],
+                             window->voltage_sum[3] / window->count[3], now);
+#if DAQ_CHAMBER_SCAN_MASK != 0U
+  if (window->count[DAQ_CHAMBER_ADC_CHANNEL] != 0U)
+    daq_input_faults_chamber(faults, mcp3564r_connector_voltage(DAQ_CHAMBER_ADC_CHANNEL,
+        window->voltage_sum[DAQ_CHAMBER_ADC_CHANNEL] / window->count[DAQ_CHAMBER_ADC_CHANNEL]), now);
+#endif
+  __set_PRIMASK(saved);
+}
+
+int daq_input_health_take(uint32_t now_ms, uint32_t words[DAQ_INPUT_HEALTH_WORDS])
+{
+  const uint32_t saved = __get_PRIMASK();
+  __disable_irq();
+  const uint32_t since = now_ms - g_daq_input_health_sent_ms;
+  const int due = g_daq_input_faults_ready &&
+      (since >= DAQ_INPUT_HEALTH_PERIOD_MS ||
+       (g_daq_input_faults.onset != 0U && since >= DAQ_INPUT_HEALTH_MIN_SPACING_MS));
+  if (due) {
+    daq_input_faults_report(&g_daq_input_faults, words);
+    g_daq_input_health_sent_ms = now_ms;
+  }
+  __set_PRIMASK(saved);
+  return due;
+}
+
 static void daq_enqueue_analog(const daq_snapshot_t *snapshot,
                                const daq_calibration_t *calibration,
                                const daq_loadcell_window_t *window, sd_capture_t capture);
@@ -551,6 +607,11 @@ void daq_thread_entry(ULONG initial_input)
       report.kg1000_ms = bins.kg1000.captured_ms;
       report.flags |= DAQ_REPORT_KG1000;
     }
+#if (DISABLE_SD_CARD == 0U)
+    daq_observe_input_faults(&snapshot, &window, report.kg50_input, supply_fresh ? &supply : NULL);
+#else
+    daq_observe_input_faults(&snapshot, &window, report.kg50_input, NULL);
+#endif
     if (bins.kg50.ready)
     {
       report.kg50 = bins.kg50.value;

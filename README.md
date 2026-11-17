@@ -354,6 +354,28 @@ monitors are supported at a default 10 Hz. See [the connector and telemetry
 map](docs/analog-inputs.md) for pinouts, nominal units, GroundStation testing
 configuration, and the additional load on acquisition/network/SD.
 
+## Live input faults
+
+The DAQ checks its inputs while it acquires and reports `DAQ_INPUT_HEALTH`
+(10 UInt32 words, unreliable, priority 0) once a second, and early (at most
+every 200 ms) when a new fault episode starts. The checks are:
+
+- DAQ supply (VMAIN) below 12.5 V, recovering at 13.0 V; every dip is counted.
+- KG1000 at the ADC full scale (2.4 V) or the amplifier low rail (0.0434 V).
+- The selected KG50 input at its rail: +/-2.4 V on AMP2, +/-0.15 V on P6.
+- P6 only: the two sense legs (CH2 = P6/3 S+, CH3) more than 50 mV apart,
+  or their mean outside 0.6-1.8 V (bridge excitation or both leads lost).
+- Chamber transducer below 0.05 V (or half its live zero) for 2 s.
+
+Each fault is debounced, has level and time hysteresis, counts its episodes
+since boot, and is latched until the next report, so a dip between two
+reports is never lost. No excitation rail is measured on this board, so the P6
+leg mean is the only excitation check. The thresholds, with the test-fire
+data behind them, are in `Core/Inc/daq_input_fault_config.h` (compile-time);
+the word layout is in `Core/Inc/daq_input_faults.h`. GroundStation shows the
+faults in a DAQ input-health block and raises warnings. They never block an
+operator action and never change acquisition.
+
 ## Hardware watchdog
 
 [Board watchdog configuration and validation](docs/watchdog.md). Build with

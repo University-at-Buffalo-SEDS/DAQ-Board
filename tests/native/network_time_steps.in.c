@@ -38,8 +38,10 @@ static void set_utc(SedsRouter*r,uint64_t unix_ms){
  assert(seds_router_set_local_network_datetime_millis(r,(int32_t)y,(uint8_t)m,(uint8_t)d,(uint8_t)(ms/3600000U),(uint8_t)(ms/60000U%60U),(uint8_t)(ms/1000U%60U),(uint16_t)(ms%1000U))==SEDS_OK);
 }
 
-/* In-process link: frames queue per direction; GS->DAQ frames may be held. */
-typedef struct {uint8_t bytes[4096];size_t len;} Frame;
+/* In-process link: frames queue per direction; GS->DAQ frames may be held.
+ * The link has no MTU, so the DAQ's discovery schema response arrives as one
+ * frame: about 4.1 KiB with 58 types, growing with each added type. */
+typedef struct {uint8_t bytes[8192];size_t len;} Frame;
 typedef struct {Frame f[512];size_t n;} Queue;
 static Queue to_daq,to_gs,held;static bool holding;
 static SedsRouter *gs,*daq;static int32_t gs_side,daq_side;

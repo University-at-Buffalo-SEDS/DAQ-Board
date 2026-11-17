@@ -18,6 +18,10 @@ typedef int SedsResult;
 #define SEDS_DT_BOARD_HEALTH 42
 #define SEDS_DT_DAQ_SD_HEALTH 43
 #define SEDS_DT_DAQ_LAUNCH_LOG_STATUS 44
+#define SEDS_DT_DAQ_INPUT_HEALTH 45
+#define DAQ_INPUT_HEALTH_WORDS 10U
+unsigned input_due,input_sent;
+int daq_input_health_take(uint32_t now_ms,uint32_t words[10]){(void)now_ms;if(!input_due)return 0;input_due=0;for(unsigned i=0;i<10;i++)words[i]=i+110;return 1;}
 #define SEDS_EK_UNSIGNED 0
 #define BOARD_UPTIME_FREQUENCY_HZ 1000U
 #define SD_AVAILABLE
@@ -45,6 +49,7 @@ void telemetry_lock(void){assert(!mask);++lock_depth;}
 void telemetry_unlock(void){assert(lock_depth==1);--lock_depth;}
 SedsResult seds_router_log_bytes_ex(SedsRouter *router,int dtype,const uint8_t *data,size_t length,const uint64_t *stamp,bool queue){
  assert(router&&!stamp&&queue);
+ if(dtype==45){assert(!mask&&lock_depth==1&&length==40&&((const uint32_t*)data)[0]==110);++input_sent;return 0;}
  if(dtype==44){assert(!mask&&lock_depth==1&&length==28&&((const uint32_t*)data)[0]==90);return 0;}
  if(dtype==43){assert(length==32&&((const uint32_t*)data)[0]==70);return 0;}
  assert(dtype==42&&length==96);
@@ -55,7 +60,8 @@ int main(void){
  SedsRouter router=1;
  board_health_poll(NULL);assert(!calls);
 #ifdef TELEMETRY_ENABLED
- uptime=100;board_health_poll(&router);assert(!calls);
+ uptime=100;board_health_poll(&router);assert(!calls&&!input_sent);
+ input_due=1;board_health_poll(&router);assert(!calls&&input_sent==1); /* input faults do not wait for the 5 s report */
  uptime=4999;board_health_poll(&router);assert(!calls);
  uptime=5000;refuse=1;board_health_poll(&router);assert(calls==1);
  for(unsigned i=0;i<1000;i++)board_health_poll(&router);

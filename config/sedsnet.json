@@ -926,6 +926,22 @@
       "priority": 0
     },
     {
+      "rust": "DaqInputHealth",
+      "name": "DAQ_INPUT_HEALTH",
+      "doc": "DAQ live input faults, 1 Hz and early on a new episode: active and latched fault masks, u16 episode counters, VMAIN/chamber/P6 mV, configured levels. Layout in daq_input_faults.h. Warnings only.",
+      "class": "Data",
+      "element": {
+        "kind": "Static",
+        "data_type": "UInt32",
+        "count": 10
+      },
+      "endpoints": [
+        "ActuatorGroundStation"
+      ],
+      "reliable": "Off",
+      "priority": 0
+    },
+    {
       "rust": "DaqSdRetry",
       "name": "DAQ_SD_RETRY",
       "doc": "Explicit authenticated GS/RRLS request to retry DAQ SD initialization. One nonzero UInt32 token; direct handler, never replayed as a managed variable; no formatting permission.",

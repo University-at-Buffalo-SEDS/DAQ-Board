@@ -5,6 +5,7 @@
 #include "telemetry.h"
 #include "main.h"
 #include "sd_card.h"
+#include "daq_input_faults.h"
 #include <stdint.h>
 #include <stdbool.h>
 #if __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
@@ -29,6 +30,16 @@ void board_health_poll(SedsRouter *router)
   if (!router) return;
   const uint64_t uptime = board_uptime_ticks();
   const uint32_t now = (uint32_t)uptime;
+  /* Live input faults: 1 Hz, early on a new episode; never retried. */
+  uint32_t input_words[DAQ_INPUT_HEALTH_WORDS];
+  if (daq_input_health_take(now, input_words)) {
+    if (!telemetry_router_enter()) ++failures;
+    else {
+      (void)seds_router_log_bytes_ex(router, SEDS_DT_DAQ_INPUT_HEALTH,
+          (const uint8_t *)input_words, sizeof(input_words), NULL, true);
+      if (!telemetry_router_leave()) ++failures;
+    }
+  }
   if ((uint32_t)(now - last_report_ms) < 5000U) return;
   last_report_ms = now;
 
