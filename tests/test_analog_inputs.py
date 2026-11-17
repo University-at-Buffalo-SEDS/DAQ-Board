@@ -208,7 +208,7 @@ int main(void) {
 #include <math.h>
 #include <string.h>
 #define DISABLE_SD_CARD 0
-#define SD_OPTIONAL_SNAPSHOT_ROWS 22U
+#define SD_OPTIONAL_SNAPSHOT_ROWS 21U
 #define SD_CARD_STATUS_OK 0
 ''' + SNAPSHOT_TYPE + r'''
 typedef uint32_t sd_capture_t;
@@ -235,7 +235,7 @@ static unsigned calls, refuse;
 static void sd_card_capture_fault(sd_capture_t c){assert(c==0);}
 static int sd_card_enqueue_optional_snapshot_captured(const float *values,uint64_t ms,const daq_calibration_t *cal,sd_capture_t capture) {
  assert(capture==0);
- assert(ms==123 && cal->kg1000_slope==42 && values[8]==8 && values[21]==3);
+ assert(ms==123 && cal->kg1000_slope==42 && values[8]==8 && values[20]==3);
  calls++;return refuse?2:0;
 }
 ''' + code + r'''
@@ -245,7 +245,7 @@ int main(void) {
  daq_store_snapshot_csv(&s,&c,&w,0);assert(calls==1 && !g_daq_sd_snapshot_row_drop_count);
  s.analog_sample_fresh=0;daq_store_snapshot_csv(&s,&c,&w,0);assert(calls==1);
  s.analog_sample_fresh=1;refuse=1;daq_store_snapshot_csv(&s,&c,&w,0);
- assert(calls==2 && g_daq_sd_snapshot_row_drop_count==22);
+ assert(calls==2 && g_daq_sd_snapshot_row_drop_count==21);
 }
 '''
         with tempfile.TemporaryDirectory() as tmp:

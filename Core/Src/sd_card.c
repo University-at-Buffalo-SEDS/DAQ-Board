@@ -150,7 +150,7 @@ _Static_assert(offsetof(sd_scalar_slot_t, count) == offsetof(sd_line_slot_t, lin
 #define SD_OPTIONAL_SNAPSHOT_TAG (UINT16_MAX - 1U)
 #define SD_OPTIONAL_SNAPSHOT_SLOTS 3U
 #ifndef SD_OPTIONAL_SNAPSHOT_ROWS
-#define SD_OPTIONAL_SNAPSHOT_ROWS 22U
+#define SD_OPTIONAL_SNAPSHOT_ROWS 21U
 #endif
 typedef struct {
   uint16_t len;
@@ -200,7 +200,6 @@ static const char *const g_sd_scalar_sensors[] = {
   "analog_out_2_v",
   "kg1000_window_code",
   "kg1000_window_v",
-  "kg1000_window_input_v",
   "mcp3564r_temp_c",
   "kg50_window_v"
 };

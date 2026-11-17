@@ -251,16 +251,16 @@ int main(void){
  mock_pool_init(&g_sd_line_pool,line_pool_storage,62U*1024U,SD_LINE_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE);
  mock_pool_init(&g_sd_raw_pool,raw_pool_storage,332U*1024U,SD_RAW_BLOCK_PAYLOAD+SD_POOL_ALIGNMENT_RESERVE);
  daq_calibration_t cal={.kg1000_slope=2};now=4294967290ULL;
- assert(sizeof(g_sd_scalar_sensors)/sizeof(g_sd_scalar_sensors[0])==24);
- for(unsigned n=0;n<24;n++)expect_enqueue(g_sd_scalar_sensors[n],n==6?NAN:n==7?INFINITY:n==8?-0.0f:(float)n/7,&cal,7);
- expect_enqueue(g_sd_scalar_sensors[0],-2.25f,&cal,3);assert(g_sd_queue.count==1&&g_sd_scalar_append_tail->count==25);
- assert(g_sd_scalar_records_enqueued==3&&g_sd_optional_scalar_records_enqueued==22);
+ assert(sizeof(g_sd_scalar_sensors)/sizeof(g_sd_scalar_sensors[0])==SD_REQUIRED_SCALAR_SENSORS+SD_OPTIONAL_SNAPSHOT_ROWS);
+ for(unsigned n=0;n<SD_REQUIRED_SCALAR_SENSORS+SD_OPTIONAL_SNAPSHOT_ROWS;n++)expect_enqueue(g_sd_scalar_sensors[n],n==6?NAN:n==7?INFINITY:n==8?-0.0f:(float)n/7,&cal,7);
+ expect_enqueue(g_sd_scalar_sensors[0],-2.25f,&cal,3);assert(g_sd_queue.count==1&&g_sd_scalar_append_tail->count==SD_REQUIRED_SCALAR_SENSORS+SD_OPTIONAL_SNAPSHOT_ROWS+1U);
+ assert(g_sd_scalar_records_enqueued==3&&g_sd_optional_scalar_records_enqueued==SD_OPTIONAL_SNAPSHOT_ROWS);
  sd_line_slot_t *pending=take_owner();assert(!g_sd_scalar_append_tail);
- sd_scalar_slot_t *old=(void*)pending;assert(old->count==25);
- expect_enqueue(g_sd_scalar_sensors[2],3.5f,&cal,0);assert(old->count==25&&g_sd_scalar_append_tail!=(void*)old);
+ sd_scalar_slot_t *old=(void*)pending;assert(old->count==SD_REQUIRED_SCALAR_SENSORS+SD_OPTIONAL_SNAPSHOT_ROWS+1U);
+ expect_enqueue(g_sd_scalar_sensors[2],3.5f,&cal,0);assert(old->count==SD_REQUIRED_SCALAR_SENSORS+SD_OPTIONAL_SNAPSHOT_ROWS+1U&&g_sd_scalar_append_tail!=(void*)old);
  uint16_t cursor=0;uint8_t done=0;fail_write=1;
- assert(sd_write_telemetry_item(pending,&cursor,&done)==FX_IO_ERROR&&!cursor&&!consumed&&old->count==25);
- finish_owner(pending);drain();assert(g_sd_scalar_records_written==3&&g_sd_optional_scalar_records_written==23);
+ assert(sd_write_telemetry_item(pending,&cursor,&done)==FX_IO_ERROR&&!cursor&&!consumed&&old->count==SD_REQUIRED_SCALAR_SENSORS+SD_OPTIONAL_SNAPSHOT_ROWS+1U);
+ finish_owner(pending);drain();assert(g_sd_scalar_records_written==3&&g_sd_optional_scalar_records_written==SD_OPTIONAL_SNAPSHOT_ROWS+1U);
  /* Metadata changes cannot append to an older owner's immutable context. */
  now+=20;expect_enqueue(g_sd_scalar_sensors[0],1.5f,&cal,5);session=99;
  expect_enqueue(g_sd_scalar_sensors[2],2.5f,&cal,5);g_sd_route_epoch=3;

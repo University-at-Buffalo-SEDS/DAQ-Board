@@ -223,9 +223,8 @@ static void daq_store_snapshot_csv(const daq_snapshot_t *snapshot,
   memcpy(&values[15], snapshot->analog_outputs_v, sizeof(snapshot->analog_outputs_v));
   values[17] = snapshot->ext_adc_sample_valid ? (float)snapshot->ext_adc_code : NAN;
   values[18] = snapshot->ext_adc_sample_valid ? snapshot->ext_adc_voltage_v : NAN;
-  values[19] = snapshot->ext_adc_sample_valid ? snapshot->ext_adc_loadcell_kg1000 : NAN;
-  values[20] = snapshot->ext_adc_temp_c;
-  values[21] = window->count[1] ? window->voltage_sum[1] / window->count[1] : NAN;
+  values[19] = snapshot->ext_adc_temp_c;
+  values[20] = window->count[1] ? window->voltage_sum[1] / window->count[1] : NAN;
   if (sd_card_enqueue_optional_snapshot_captured(values, snapshot->monotonic_ms, calibration, capture) != SD_CARD_STATUS_OK)
     { sd_card_capture_fault(capture); g_daq_sd_snapshot_row_drop_count += SD_OPTIONAL_SNAPSHOT_ROWS; }
 #else

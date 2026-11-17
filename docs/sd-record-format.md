@@ -67,10 +67,9 @@ until it closes, so supply dips line up with load-cell samples.
 Scalar rows (value in `value`), written every 100 ms: `adc1_aux_v`,
 `analog_in_1_v` .. `analog_in_8_v`, `isense1_v`, `isense2_v`, `isense1_a`,
 `isense2_a`, `vmon_v`, `imon_v`, `analog_out_1_v`, `analog_out_2_v`,
-`kg1000_window_code`, `kg1000_window_v`, `kg1000_window_input_v`,
-`mcp3564r_temp_c`, `kg50_window_v`. The `kg*_window_*` rows are the mean of
-the conversions drained in one acquisition cycle. Since load cells report
-ADC-pin volts, `kg1000_window_v` and `kg1000_window_input_v` are equal.
+`kg1000_window_code`, `kg1000_window_v`, `mcp3564r_temp_c`,
+`kg50_window_v`. The `kg*_window_*` rows are the mean of the conversions
+drained in one acquisition cycle.
 `valve_pressure_psi` carries VB OX-tank pressure (ADC code and psi).
 
 The SEDSnet `KG1000`/`KG50` values are not stored separately. Each one is the
@@ -97,7 +96,7 @@ The `# calibration` line gives `loadcell_boxcar_ms`.
 | `input_voltage_v`, `input_current_a` (scalar rows) | ADC records with the same names |
 | `mcp3564r_code` | `kg1000_window_code` |
 | `mcp3564r_voltage_v` | `kg1000_window_v` |
-| `kg1000_raw_window_average` | `kg1000_window_input_v` |
+| `kg1000_raw_window_average` | `kg1000_window_input_v`, then removed: equal to `kg1000_window_v` |
 | `mcp3564r_ch1_voltage_v` | `kg50_window_v` |
 
 Files without `loadcell_input=adc_volts` on the `# calibration` line hold

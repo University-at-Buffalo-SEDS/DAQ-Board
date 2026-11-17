@@ -113,7 +113,7 @@ class SdThroughputTest(unittest.TestCase):
         # Only optional 10 Hz snapshot rows may be shed during a 400 ms card
         # stall, a whole snapshot at a time; required rows never.
         self.assertEqual(result['essential_telemetry_dropped'], 0, text)
-        self.assertEqual(result['line_dropped'] % 22, 0, text)
+        self.assertEqual(result['line_dropped'] % 21, 0, text)
         self.assertLessEqual(result['line_dropped'], result['offered_scalar'] // 10, text)
         self.assertEqual(result['accepted_raw'], result['offered_raw'], text)
         self.assertEqual(result['write_errors'], 0, text)
@@ -160,6 +160,11 @@ class SdThroughputTest(unittest.TestCase):
         self.assertEqual(hashlib.sha256(other).hexdigest(), GOLDEN_MIXED[0])
         scalar = [line for line in lines if b',"' in line]
         self.assertFalse([line for line in scalar if b'_network' in line or b'kg1000_v' in line])
+        # kg1000_window_input_v duplicated kg1000_window_v once load cells
+        # reported volts and is no longer written; nothing to undo above, since
+        # the golden hash covers only the raw/header lines.
+        self.assertFalse([line for line in scalar if b'kg1000_window_input_v' in line])
+        self.assertTrue([line for line in scalar if b',kg1000_window_v,' in line])
         self.assertEqual(len(scalar), mixed['offered_scalar'] - mixed['line_dropped'] + 1)  # + warm-up row
 
 

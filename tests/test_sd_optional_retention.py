@@ -68,7 +68,7 @@ class OptionalRetentionTests(unittest.TestCase):
 """+snapshot_type+r"""
 #include "daq_calibration.h"
 #define DISABLE_SD_CARD 0
-#define SD_OPTIONAL_SNAPSHOT_ROWS 22U
+#define SD_OPTIONAL_SNAPSHOT_ROWS 21U
 #define SD_CARD_STATUS_OK 0U
 #define TX_SUCCESS 0U
 #define TX_WAIT_FOREVER 1U
@@ -91,7 +91,7 @@ static void sd_card_capture_release(sd_capture_t c){assert(c==0);}
 static unsigned sd_card_enqueue_optional_snapshot_captured(const float *v,uint64_t captured,const daq_calibration_t*c,sd_capture_t capture){
  assert(capture==0);
  assert(published==offered+1 && captured==22+100*offered && c->kg1000_slope==42+offered);
- assert(v[8]==8+offered&&v[21]==3+offered);offered++;
+ assert(v[8]==8+offered&&v[20]==3+offered);offered++;
  if(retained==3)return 2;
  retained++;return SD_CARD_STATUS_OK;
 }
@@ -107,7 +107,7 @@ int main(void){
  }
  if(!setjmp(finished))daq_analog_thread_entry(0);
  assert(published==20&&offered==20&&released==20&&retained==3);
- assert(g_daq_sd_snapshot_row_drop_count==17*22);
+ assert(g_daq_sd_snapshot_row_drop_count==17*21);
 }
 """
         self.run_c(code)
