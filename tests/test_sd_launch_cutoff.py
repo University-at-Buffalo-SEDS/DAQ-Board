@@ -65,13 +65,17 @@ int main(void){
  raw+=10000;utc=0;assert(sd_launch_finished() && sd_run_snapshot()==7);
  utc=start+999999;sd_card_set_launch_clock(13,start+100000);
  assert(sd_launch_finished() && sd_run_snapshot()==7); // expired restart never reopens
- /* A countdown longer than the window stays regular until T0 exactly. */
+ /* The launch file opens at Launch acceptance (here 10 s before T0) and
+  * holds the countdown through T+20 s. */
  utc=start+2000000;sd_card_set_launch_clock(14,utc+30000);
- raw+=9999;assert(sd_run_snapshot()==7);++raw;assert(sd_run_snapshot()==8);
- raw+=20000;assert(sd_run_snapshot()==9&&sd_launch_finished());
+ assert(sd_run_snapshot()==8);
+ raw+=29999;assert(sd_run_snapshot()==8);++raw;assert(sd_run_snapshot()==9&&sd_launch_finished());
  /* The raw-stream key floor survives replays, not a new or revised window. */
  g_sd_raw_key_floor=99;sd_card_set_launch_clock(14,start+2030000);assert(g_sd_raw_key_floor==99);
  sd_card_set_launch_clock(15,utc+60000);assert(g_sd_raw_key_floor==0);
+ /* Accepted 40 s before T0: the file opens SD_LAUNCH_LEAD_MAX_MS before T0. */
+ assert(sd_run_snapshot()==9);raw+=24999;assert(sd_run_snapshot()==9);
+ ++raw;assert(sd_run_snapshot()==10);
  assert(!mask);
 }
 """)
@@ -98,11 +102,13 @@ static uint64_t daq_log_monotonic_ms(void){return board_uptime_extend(&uptime,ra
 int main(void){
  (void)sd_launch_finished;(void)sd_capture_key_locked;
  assert(!sd_card_launch_window_active()); /* no launch session */
- sd_card_set_launch_clock(10,utc+30000);   /* T0 = deadline - 20 s = now + 10 s */
- raw+=9499;assert(!sd_card_launch_window_active());
- raw+=1;assert(sd_card_launch_window_active()); /* SD_LAUNCH_SUPPLY_LEAD_MS before T0 */
- raw+=500;assert(sd_card_launch_window_active()&&sd_run_snapshot()==2); /* window open */
- raw+=19999;assert(sd_card_launch_window_active());
+ /* T0 = deadline - 20 s = now + 20 s: accepted more than SD_LAUNCH_LEAD_MAX_MS
+  * early, so the launch file opens at T0 - 15 s = now + 5 s. */
+ sd_card_set_launch_clock(10,utc+40000);
+ raw+=4499;assert(!sd_card_launch_window_active());
+ raw+=1;assert(sd_card_launch_window_active()); /* SD_LAUNCH_SUPPLY_LEAD_MS before it opens */
+ raw+=500;assert(sd_card_launch_window_active()&&sd_run_snapshot()==2); /* launch file open */
+ raw+=34999;assert(sd_card_launch_window_active());
  raw+=1;assert(!sd_card_launch_window_active()&&sd_run_snapshot()==3); /* closed at T0+20 s */
  sd_card_set_launch_clock(0,0);assert(!sd_card_launch_window_active());
  assert(!mask);
@@ -173,14 +179,15 @@ static uint64_t daq_log_unix_ms_settled(void){return daq_log_unix_ms();}
 static uint64_t daq_log_monotonic_ms(void){return local;}
 """+body+route_epoch_support(source)+function(source,'sd_pressure_capture_route')+r"""
 static void tick(uint64_t ms){local+=ms;sd_card_note_network_time(utc_now(),local);}
-static uint32_t pressure_bits(uint64_t at){pressure_sd_batch_t b={.unix_ms=at};mask=1;uint32_t r=sd_pressure_capture_route(&b,sd_launch_key_locked(),g_sd_close_frame_ms);mask=0;return r;}
+static uint32_t pressure_bits(uint64_t at){pressure_sd_batch_t b={.unix_ms=at};mask=1;uint32_t r=sd_pressure_capture_route(&b,sd_launch_key_locked(),g_sd_open_frame_ms,g_sd_close_frame_ms);mask=0;return r;}
 static void run(uint64_t session,int64_t step){
  sd_card_set_launch_clock(0,0);stepped=0;tick(1000);
  const uint64_t t0=utc_now(),opened=local;
  const uint64_t key=sd_run_snapshot();
- /* The window [close-20 s, close) opens 10 s from now. */
+ /* Launch accepted now, T0 10 s from now: the launch file opens now. */
  sd_card_set_launch_clock(session,t0+30000);
  const uint64_t close=g_sd_close_local_ms;assert(close==opened+30000);
+ assert(sd_run_snapshot()==key+1);
  tick(15000);const uint64_t launch=sd_run_snapshot();assert(launch==key+1&&sd_launch_key_locked()==launch);
  /* The network clock steps inside the window. */
  stepped=step;tick(5);
@@ -190,8 +197,8 @@ static void run(uint64_t session,int64_t step){
  assert(sd_capture_key_locked(launch,utc_now())==launch);
  assert(sd_capture_key_locked(launch,utc_now()+14994)==launch);
  assert(sd_capture_key_locked(launch,utc_now()+14995)==launch+1);
- assert(sd_capture_key_locked(launch,utc_now()-5006)==launch-1);
- assert(sd_capture_key_locked(launch,utc_now()-5005)==launch);
+ assert(sd_capture_key_locked(launch,utc_now()-15006)==launch-1);
+ assert(sd_capture_key_locked(launch,utc_now()-15005)==launch);
  mask=0;
  assert(pressure_bits(utc_now())==0xFU);
  assert(pressure_bits(utc_now()+14995)==0xF00U);

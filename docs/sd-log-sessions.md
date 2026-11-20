@@ -9,7 +9,8 @@ carries a route key: odd keys name regular session files (`DAQ_*.CSV`, in
 `/NO_UTC/` or `/UTC/`), even keys name launch-window files (`DAQ_LAUNCH_*.CSV`
 in `/LAUNCH/`). Raw ADC, network/report-rate, snapshot, packet and VB pressure
 rows of one key share one file. The key advances when a launch window opens at
-T0 and again when it ends at T+20 s (or is reset), so a session's rows never
+Launch acceptance (when the launch clock arrives, at most 15 s before T0) and
+again when it ends at T+20 s (or is reset), so a session's rows never
 alternate between files. A calibration change writes an in-stream
 `# calibration,...` line; duplicate calibration updates or network reconnects
 write nothing. Each file header includes its regression coefficients. Files

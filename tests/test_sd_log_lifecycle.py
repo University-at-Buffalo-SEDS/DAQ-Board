@@ -122,17 +122,17 @@ int main(void) {
   for (unsigned i=0;i<10000;i++) assert(!sd_launch_finished());
   assert(utc_reads==0); /* Idle acquisition must not contend for the router. */
   assert(sd_run_snapshot()==1 && !sd_launch_key_locked()); /* Boot session file. */
-  sd_card_set_launch_clock(100,start+30000); /* T-10 -> T+20 */
-  /* The countdown stays in the regular session file; the window is T0..T+20. */
-  assert(sd_run_snapshot()==1 && sd_launch_key_locked()==2 && !sd_launch_finished());
+  sd_card_set_launch_clock(100,start+30000); /* Launch accepted at T-10 -> T+20 */
+  /* The launch file opens at acceptance: it holds the countdown through T+20. */
+  assert(sd_run_snapshot()==2 && sd_launch_key_locked()==2 && !sd_launch_finished());
   assert(utc_reads==1); /* Active local deadline also avoids per-row queries. */
-  local+=9999; utc+=9999; assert(sd_run_snapshot()==1);
+  local+=9999; utc+=9999; assert(sd_run_snapshot()==2);
   local+=1; utc+=1;
   sd_card_set_launch_clock(100,utc+20000); /* Pilot T0, same session. */
-  assert(sd_run_snapshot()==2 && sd_launch_key_locked()==2); /* Window opens at T0. */
-  /* Rows are classified by capture UTC: [T0, T+20) only, regardless of when
-   * their batch is enqueued; unknown UTC follows the receive-time route. */
-  assert(sd_capture_key_locked(2,start+9999)==1 && sd_capture_key_locked(2,start+10000)==2);
+  assert(sd_run_snapshot()==2 && sd_launch_key_locked()==2); /* Still the one launch file. */
+  /* Rows are classified by capture UTC: [acceptance, T+20) only, regardless of
+   * when their batch is enqueued; unknown UTC follows the receive-time route. */
+  assert(sd_capture_key_locked(2,start-1)==1 && sd_capture_key_locked(2,start)==2);
   assert(sd_capture_key_locked(2,start+29999)==2 && sd_capture_key_locked(2,start+30000)==3);
   assert(sd_capture_key_locked(2,0)==2);
   for (unsigned i=0;i<19;++i) {
@@ -150,8 +150,8 @@ int main(void) {
   sd_card_set_launch_clock(100,start+30000);
   assert(sd_run_snapshot()==3); /* Old retained launch cannot revive a reset. */
   sd_card_set_launch_clock(101,start+30000);
-  assert(sd_run_snapshot()==3 && sd_launch_key_locked()==4 && !sd_launch_finished());
-  local+=10000; assert(sd_run_snapshot()==4); /* Second launch window. */
+  assert(sd_run_snapshot()==4 && sd_launch_key_locked()==4 && !sd_launch_finished()); /* Second launch file, from acceptance. */
+  local+=10000; assert(sd_run_snapshot()==4);
   sd_card_set_launch_clock(100,start+30000);
   assert(sd_run_snapshot()==4); /* Older session replay. */
   sd_card_set_launch_clock(0,0);

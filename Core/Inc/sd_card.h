@@ -105,7 +105,9 @@ void sd_card_set_launch_clock(uint64_t session, uint64_t close_unix_ms);
  * (daq_log_monotonic_ms). Captures after a network time step are routed in
  * the frame the launch deadline was mapped in. */
 void sd_card_note_network_time(uint64_t unix_ms, uint64_t local_ms);
-/* Nonzero from SD_LAUNCH_SUPPLY_LEAD_MS before the launch window opens until
+/* The launch window opens at Launch acceptance (receipt of the launch clock,
+ * at most SD_LAUNCH_LEAD_MAX_MS before T0) and closes at T+20 s.
+ * Nonzero from SD_LAUNCH_SUPPLY_LEAD_MS before the launch window opens until
  * it closes: acquisition then logs the board supply at the launch rate. */
 uint8_t sd_card_launch_window_active(void);
 /* Milliseconds since launch T0 (the DAQ_LOG_CLOCK deadline - 20 s, on the

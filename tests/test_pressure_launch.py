@@ -109,19 +109,21 @@ int main(void){
  const uint64_t T0=1767225700000ULL;
  /* Boot session: regular file (key1). */
  receive_at(utc-40);drain();assert(regular_opens==1&&!launch_opens);
- /* Launch command at T-10 s with the deadline T0+20 s: the countdown stays
-  * in the same regular file; nothing opens or rotates. */
+ /* Launch accepted at T-10 s with the deadline T0+20 s: the launch file starts
+  * at acceptance, so the countdown, igniter and pilot opening are in it. */
  utc=T0-10000;local=200000;sd_card_set_launch_clock(42,T0+20000);
- receive_at(T0-9000);advance(1000);receive_at(T0-8000);drain();
- assert(regular_opens==1&&!launch_opens&&sd_run_snapshot()==1);
- /* T0: a batch straddling T0 splits by VB capture time. Only the window rows
-  * open the single launch file. */
- utc=T0;local=210000;assert(sd_run_snapshot()==2);
+ assert(sd_run_snapshot()==2);
  /* DAQ rows use the same capture-time classification as VB pressure. */
- mask=1;assert(sd_capture_key_locked(2,T0-1)==1&&sd_capture_key_locked(2,T0)==2&&sd_capture_key_locked(2,T0+20000)==3);mask=0;
+ mask=1;assert(sd_capture_key_locked(2,T0-10001)==1&&sd_capture_key_locked(2,T0-10000)==2&&sd_capture_key_locked(2,T0+20000)==3);mask=0;
+ /* A batch straddling acceptance splits by VB capture time: only its later
+  * rows open the single launch file. */
+ receive_at(T0-10008);drain();assert(launch_opens==1&&regular_opens==1);
+ /* A pre-acceptance batch delivered late: still the regular file. */
+ receive_at(T0-10500);drain();assert(launch_opens==1&&regular_opens==1);
+ advance(1000);receive_at(T0-9000);drain();assert(launch_opens==1&&regular_opens==1);
+ /* T0 changes nothing: the launch file stays open through T+20 s. */
+ utc=T0;local=210000;assert(sd_run_snapshot()==2);
  receive_at(T0-8);drain();assert(launch_opens==1&&regular_opens==1);
- /* Pre-T0 batch delivered late, inside the window: still the regular file. */
- receive_at(T0-1000);drain();assert(launch_opens==1&&regular_opens==1);
  /* A failed write retains its exact row; the retry writes it once. */
  advance(5000);receive_at(T0+5000);fail_write=1;
  for(unsigned i=0;i<20;++i)receive_at(0),drain(); /* unknown UTC, receive-time key2 */
@@ -187,9 +189,10 @@ class PressureLaunchTests(unittest.TestCase):
         before, launch, after = files
         self.assertTrue(all(r[2] == 'valve_pressure_psi' for f in files for r in f))
         network = lambda f: [int(r[0]) for r in f if r[7] == 'network']
-        self.assertTrue(all(t < T0 for t in network(before)))
-        self.assertTrue(launch and all(T0 <= t < T0 + 20000 for t in network(launch)))
-        self.assertEqual(min(network(launch)), T0)
+        accepted = T0 - 10000  # Launch acceptance opens the launch file
+        self.assertTrue(all(t < accepted for t in network(before)))
+        self.assertTrue(launch and all(accepted <= t < T0 + 20000 for t in network(launch)))
+        self.assertEqual(min(network(launch)), accepted)
         self.assertEqual(max(network(launch)), T0 + 19996)
         # Late in-window rows after the launch file was finished are retained.
         self.assertEqual(sorted(t for t in network(after) if t < T0 + 20000),

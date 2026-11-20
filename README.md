@@ -56,10 +56,15 @@ Firmware writes one regular session file, `DAQ_<network-time>_<sequence>.CSV`,
 per session. A session runs from boot, or from the end of a launch window, until
 the next launch window or power-off, and its file receives every row: raw ADC
 conversions, board supply, telemetry snapshots, packet diagnostics and VB
-OX-tank pressure. Each launch window, T0 through T+20 s (T0 = the Ground Station
-deadline minus 20 s), goes to exactly one `DAQ_LAUNCH_<network-time>_<sequence>.CSV`
-file with all channels; when the window ends a new regular session file opens.
-From 0.5 s before T0 until the window closes, acquisition also reads the board
+OX-tank pressure. Each launch window, from Launch acceptance through T+20 s (T0
+= the Ground Station deadline minus 20 s), goes to exactly one
+`DAQ_LAUNCH_<network-time>_<sequence>.CSV` file with all channels; when the
+window ends a new regular session file opens. The window opens when the
+launch clock arrives (the station publishes it as Launch is accepted, one
+countdown, normally 10 s, before T0), so the countdown, igniter and pilot
+opening are in the launch file; it never opens more than 15 s
+(`SD_LAUNCH_LEAD_MAX_MS`) before T0 or after T0.
+From 0.5 s before the window opens until it closes, acquisition also reads the board
 supply (VMAIN through VMON and the LM74202 IMON, both on ADC1) every
 `DAQ_SUPPLY_LAUNCH_PERIOD_MS` (4 ms) instead of every 100 ms and writes it as
 `input_voltage_v`/`input_current_a` records in the load-cell record stream, so
@@ -510,7 +515,7 @@ units, capture period and source-sequence domain. This is not DAQ chamber PT
 and does not use Ground Station pressure recalibration.
 
 When the VB capture UTC is known, each of the four 4ms samples is routed by
-its capture time: T0 inclusive through T+20s exclusive goes into the
+its capture time: Launch acceptance inclusive through T+20s exclusive goes into the
 `DAQ_LAUNCH` file; earlier samples go into the regular session file before the
 launch and later ones into the new session file after it. A crossing batch is
 split without duplicating rows. Missing UTC remains explicitly local in the

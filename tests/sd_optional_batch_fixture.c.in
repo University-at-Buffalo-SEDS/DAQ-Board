@@ -151,6 +151,7 @@ static UINT sd_write_telemetry_row(const sd_line_slot_t *slot){
  * ownership is exercised by test_pressure_launch with actual writer code. */
 static uint64_t g_sd_close_unix_ms;
 #define g_sd_close_frame_ms g_sd_close_unix_ms /* no network time step in this fixture */
+#define g_sd_open_frame_ms (g_sd_close_unix_ms - SD_LAUNCH_WINDOW_MS) /* launch file opened at T0 in this fixture */
 static uint64_t sd_frame_utc_locked(uint64_t utc){return utc;}
 
 /* No launch window is known to these owner tests: receive-time keys route. */

@@ -52,6 +52,7 @@ static uint64_t sd_run_snapshot(void){return g_sd_launch_closed ? 3 : 1;}
 static uint64_t sd_launch_key_locked(void){return 0;}
 static uint64_t g_sd_close_unix_ms=20000;
 #define g_sd_close_frame_ms g_sd_close_unix_ms /* no network time step in this fixture */
+#define g_sd_open_frame_ms (g_sd_close_unix_ms - SD_LAUNCH_WINDOW_MS) /* launch file opened at T0 in this fixture */
 static uint64_t sd_frame_utc_locked(uint64_t utc){return utc;}
 
 #define SD_LAUNCH_WINDOW_MS 20000U
@@ -132,6 +133,7 @@ static uint64_t sd_launch_key_locked(void){assert(mask);return 44;}
 static unsigned g_sd_services_initialized=1,g_sd_route_epoch=77;
 static uint64_t g_sd_close_unix_ms=1700000020000ULL;
 #define g_sd_close_frame_ms g_sd_close_unix_ms /* no network time step in this fixture */
+#define g_sd_open_frame_ms (g_sd_close_unix_ms - SD_LAUNCH_WINDOW_MS) /* launch file opened at T0 in this fixture */
 static uint64_t sd_frame_utc_locked(uint64_t utc){return utc;}
 
 #define SD_LAUNCH_WINDOW_MS 20000U

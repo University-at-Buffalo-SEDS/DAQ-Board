@@ -14,6 +14,7 @@ static uint32_t g_sd_pressure_records_enqueued,g_sd_pressure_records_dropped;
 static uint32_t g_pressure_sd_batches_received,g_pressure_sd_invalid_batches,g_reliable_refusal_count;
 static unsigned g_sd_services_initialized=1;static uint64_t g_sd_close_unix_ms=1767225620000ULL;
 #define g_sd_close_frame_ms g_sd_close_unix_ms /* no network time step in this fixture */
+#define g_sd_open_frame_ms (g_sd_close_unix_ms - SD_LAUNCH_WINDOW_MS) /* launch file opened at T0 in this fixture */
 static uint64_t sd_frame_utc_locked(uint64_t utc){return utc;}
 
 static uint32_t g_sd_route_epoch=3;

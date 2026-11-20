@@ -46,7 +46,7 @@ static uint32_t __get_PRIMASK(void){return irq_mask;}
 static void __disable_irq(void){irq_mask=1;}
 static void __set_PRIMASK(uint32_t m){irq_mask=m;}
 uint64_t board_uptime_ticks(void){return now;}
-static uint64_t g_sd_session=42,g_sd_close_local_ms=20000;
+static uint64_t g_sd_session=42,g_sd_close_local_ms=20000,g_sd_open_local_ms;
 /* The launch window (route key2) is already open when these owners start. */
 static uint8_t g_sd_launch_closed,g_sd_deadline_anchored=1,g_sd_launch_opened=1;
 #define SD_LAUNCH_WINDOW_MS 20000U
@@ -155,6 +155,7 @@ static UINT sd_write_telemetry_row(const sd_line_slot_t *slot){
  * launch routing is covered by the independent actual writer regression. */
 static uint64_t g_sd_close_unix_ms;
 #define g_sd_close_frame_ms g_sd_close_unix_ms /* no network time step in this fixture */
+#define g_sd_open_frame_ms (g_sd_close_unix_ms - SD_LAUNCH_WINDOW_MS) /* launch file opened at T0 in this fixture */
 static uint64_t sd_frame_utc_locked(uint64_t utc){return utc;}
 
 /* No launch window is known to these owner tests: receive-time keys route. */
@@ -272,9 +273,9 @@ int main(void){
  /* Atomic routing capture before/after20s, delayed writes and calibration. */
  now=19999;snapshot(19995,2,0,&cal);now=20001;cal.kg1000_slope=4;snapshot(20000,3,1,&cal);
  assert(g_sd_launch_closed&&g_sd_route_epoch==1);now=30000;drain();
- /* A new launch's countdown stays in the regular file (key3); its epoch and
+ /* A new launch whose file opens later stays in the regular file (key3); its epoch and
   * a source32bit wrap remain immutable. */
- g_sd_session=88;g_sd_deadline_anchored=1;g_sd_launch_closed=0;g_sd_launch_opened=0;g_sd_close_local_ms=UINT64_C(4295000000);g_sd_route_epoch=2;
+ g_sd_session=88;g_sd_deadline_anchored=1;g_sd_launch_closed=0;g_sd_launch_opened=0;g_sd_close_local_ms=UINT64_C(4295000000);g_sd_open_local_ms=UINT64_C(4295000000)-20000U;g_sd_route_epoch=2;
  now=UINT64_C(4294967290);sd_row_sequence=UINT64_MAX-5;snapshot(now-7,3,2,&cal);now+=20;drain();
  /* Below-reserve escape counts only the remaining rows, frees the static
   * head and services required FIFO without changing the raw guard. */
