@@ -13,11 +13,12 @@
 #include "daq_calibration.h"
 #include "daq_rates.h"
 #include "daq_network_schedule.h"
-#include "daq_downsample.h"
 #include "daq_timestamp.h"
 #include "daq_filter.h"
 #include "daq_chamber_pressure.h"
 #include "daq_input_faults.h"
+#include "daq_median.h"
+#include "daq_channel_stats.h"
 #include <string.h>
 #include <math.h>
 TX_THREAD daq_thread;
@@ -86,10 +87,40 @@ typedef struct
   uint16_t count[10];
 } daq_loadcell_window_t;
 
-/* Load-cell network values completed during one drain: the latest bin of
- * KG1000 and of the selected KG50 input (see daq_bin_average_add). */
+/* Published (network/display) values completed during one drain. SD keeps
+ * every raw conversion; these are the median-filtered report bins
+ * (daq_median.h, rates in daq_rates.h). Times are bin centres, uptime ms. */
 typedef struct { float value; uint64_t captured_ms; uint8_t ready; } daq_bin_output_t;
-typedef struct { daq_bin_output_t kg1000, kg50; } daq_loadcell_bins_t;
+typedef struct { daq_bin_output_t kg1000, kg50, chamber_v; } daq_loadcell_bins_t;
+
+/* Latest median-filtered auxiliary MCP3564R channel values (CH1..CH7 that
+ * are not a fast channel or the selected KG50), written by acquisition and
+ * read by the analog reporter under the IRQ lock. */
+static float g_daq_aux_value[8];
+static uint32_t g_daq_aux_ms[8];
+static uint8_t g_daq_aux_valid;
+
+/* Per-channel noise/drift statistics for DAQ_INPUT_HEALTH v2. */
+static daq_channel_stats_t g_daq_stats[DAQ_STATS_CHANNELS];
+
+static void daq_store_aux(unsigned channel, float value, uint32_t now_ms)
+{
+  const uint32_t saved = __get_PRIMASK();
+  __disable_irq();
+  g_daq_aux_value[channel] = value;
+  g_daq_aux_ms[channel] = now_ms;
+  g_daq_aux_valid |= (uint8_t)(1U << channel);
+  __set_PRIMASK(saved);
+}
+
+static void daq_report_bin(daq_bin_us_t *bin, daq_median_t *median, float value, uint64_t sample_us,
+                           uint32_t period_us, daq_bin_output_t *output)
+{
+  daq_bin_out_t out;
+  const float filtered = daq_median_add(median, value);
+  if (daq_bin_us_add(bin, filtered, sample_us, period_us, &out) && output != NULL)
+    *output = (daq_bin_output_t){out.mean, out.centre_us / 1000U, 1U};
+}
 
 static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
                                   sd_raw_adc_record_t *records,
@@ -102,7 +133,8 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
   mcp3564r_sample_t sample = {
     .sample_valid = snapshot->ext_adc_sample_valid,
     .channel = snapshot->ext_adc_channel,
-    .monotonic_ms = snapshot->ext_adc_monotonic_ms,
+    .monotonic_ms = snapshot->ext_adc_sample_us / 1000U,
+    .sample_us = snapshot->ext_adc_sample_us,
     .code = snapshot->ext_adc_code,
     .voltage_v = snapshot->ext_adc_voltage_v,
     .raw_value = snapshot->ext_adc_loadcell_kg1000,
@@ -120,13 +152,26 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
   const uint64_t unix_now = daq_log_unix_ms_cached();
   const uint64_t mono_now = board_uptime_ticks();
   static uint32_t raw_sequence;
-  /* The network boxcar runs on exactly the values and uptimes the SD raw
-   * records hold, so SD alone reproduces every KG1000/KG50 network value. */
-  static daq_bin_average_t kg1000_bins, kg50_bins;
+  /* Report filters: medians then microsecond bins. SD raw records keep the
+   * unfiltered value and the same microsecond time, so an SD reader repeating
+   * daq_median_add/daq_bin_us_add in record order reproduces every network
+   * value bit for bit. */
+  static daq_median_t kg1000_median, kg50_median, chamber_median, aux_median[8];
+  static daq_bin_us_t kg1000_bin, kg50_bin, chamber_bin;
+  static uint8_t medians_ready;
   static uint8_t kg50_bins_channel = 1U;
+  if (!medians_ready)
+  {
+    daq_median_init(&kg1000_median, DAQ_FAST_MEDIAN);
+    daq_median_init(&chamber_median, DAQ_FAST_MEDIAN);
+    daq_median_init(&kg50_median, DAQ_KG50_MEDIAN);
+    for (unsigned i = 0U; i < 8U; ++i) daq_median_init(&aux_median[i], DAQ_AUX_MEDIAN);
+    medians_ready = 1U;
+  }
   if (kg50_channel != kg50_bins_channel)
   {
-    kg50_bins = (daq_bin_average_t){0};
+    kg50_bin = (daq_bin_us_t){0};
+    daq_median_init(&kg50_median, DAQ_KG50_MEDIAN);
     kg50_bins_channel = kg50_channel;
   }
   *window = (daq_loadcell_window_t){0};
@@ -144,18 +189,33 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
           daq_calibration_temperature_raw(calibration, channel, raw, sample.temperature_c),
           (uint32_t)sample.monotonic_ms, calibration->filter_tau_ms[channel]) : mcp3564r_connector_voltage(channel, sample.voltage_v);
       const uint64_t captured_uptime = board_uptime_project(mono_now, (uint32_t)sample.monotonic_ms);
-      if (channel == 0U || channel == kg50_channel)
+      const uint64_t captured_us = captured_uptime * 1000U + sample.sample_us % 1000U;
+      daq_bin_output_t *none = NULL;
+      if (channel == 0U)
+        daq_report_bin(&kg1000_bin, &kg1000_median, raw, captured_us, DAQ_FAST_REPORT_US, bins ? &bins->kg1000 : none);
+      else if (channel == kg50_channel)
+        daq_report_bin(&kg50_bin, &kg50_median, raw, captured_us, DAQ_KG50_REPORT_US, bins ? &bins->kg50 : none);
+      else if (daq_chamber_is_channel(channel))
       {
-        float mean;
-        uint64_t mean_ms;
-        if (daq_bin_average_add(channel == 0U ? &kg1000_bins : &kg50_bins, raw, captured_uptime,
-                                DAQ_BROADCAST_PERIOD_MS, &mean, &mean_ms) && bins != NULL)
-          *(channel == 0U ? &bins->kg1000 : &bins->kg50) = (daq_bin_output_t){mean, mean_ms, 1U};
+        /* The chamber's 20 ms bin also feeds its DAQ_SDADC_VOLTAGES entry. */
+        daq_bin_output_t chamber_out = {0};
+        daq_report_bin(&chamber_bin, &chamber_median, corrected, captured_us, DAQ_FAST_REPORT_US, &chamber_out);
+        if (chamber_out.ready)
+        {
+          if (bins != NULL) bins->chamber_v = chamber_out;
+          daq_store_aux(channel, chamber_out.value, (uint32_t)sample.monotonic_ms);
+        }
       }
+      else if (channel < 8U)
+        daq_store_aux(channel, daq_median_add(&aux_median[channel], corrected), (uint32_t)sample.monotonic_ms);
+      const int stats = daq_stats_index(channel, kg50_channel);
+      if (stats >= 0) daq_channel_stats_add(&g_daq_stats[stats], channel == 9U || channel < 2U ? raw : corrected,
+                                            (uint32_t)sample.monotonic_ms);
       if (records != NULL)
       {
         records[count].channel = channel;
         records[count].monotonic_ms = (uint32_t)sample.monotonic_ms;
+        records[count].sample_us = (uint16_t)(sample.sample_us % 1000U);
         records[count].record_sequence = ++raw_sequence;
         records[count].network_unix_ms = daq_sample_network_ms(unix_now, mono_now, captured_uptime);
         records[count].raw_adc_code = sample.code;
@@ -332,27 +392,22 @@ static void daq_publish_analog_packet(uint32_t type, const float *values, size_t
 
 static void daq_publish_analog(const daq_snapshot_t *snapshot, const daq_loadcell_window_t *window)
 {
-  static float auxiliary[6];
-  static uint32_t updated[6];
-  static uint8_t valid;
   static uint32_t last_report;
+  (void)window;
   const uint32_t now = (uint32_t)snapshot->monotonic_ms;
-  for (unsigned i = 0; i < 6U; ++i)
-  {
-    if (window->count[i + 2U] != 0U)
-    {
-      auxiliary[i] = mcp3564r_connector_voltage(i + 2U, window->voltage_sum[i + 2U] / window->count[i + 2U]);
-      updated[i] = now;
-      valid |= (uint8_t)(1U << i);
-    }
-  }
   if ((uint32_t)(now - last_report) >= DAQ_ANALOG_REPORT_PERIOD_MS)
   {
     last_report = now;
+    /* CH2..CH7 connector volts: the latest 3-sample median of each channel's
+     * auxiliary slots (about 14 Hz); the chamber channel publishes its fast
+     * 20 ms bin. NaN once a value is older than DAQ_AUX_STALE_MS. */
     float values[6];
+    const uint32_t saved = __get_PRIMASK();
+    __disable_irq();
     for (unsigned i = 0; i < 6U; ++i)
-      values[i] = (valid & (1U << i)) && (uint32_t)(now - updated[i]) <= 3U * MCP3564R_AUX_INTERVAL_MS
-          ? auxiliary[i] : NAN;
+      values[i] = (g_daq_aux_valid & (1U << (i + 2U))) && (uint32_t)(now - g_daq_aux_ms[i + 2U]) <= DAQ_AUX_STALE_MS
+          ? g_daq_aux_value[i + 2U] : NAN;
+    __set_PRIMASK(saved);
     daq_publish_analog_packet(SEDS_DT_DAQ_SDADC_VOLTAGES, values, 6U, snapshot->monotonic_ms);
   }
   if (snapshot->analog_sample_fresh)
@@ -443,7 +498,8 @@ static void daq_observe_input_faults(const daq_snapshot_t *snapshot,
   daq_input_faults_t *faults = &g_daq_input_faults;
 #if DAQ_CHAMBER_SCAN_MASK != 0U
   /* Launch T0 for the chamber burn window; read only with a chamber reading
-   * (10 Hz auxiliary scan) and outside the IRQ lock (it takes its own). */
+   * (every 2 ms window: the chamber is a fast channel) and outside the IRQ
+   * lock (it takes its own). */
   uint32_t since_t0 = DAQ_CHAMBER_NO_LAUNCH;
 #if (DISABLE_SD_CARD == 0U)
   if (window->count[DAQ_CHAMBER_ADC_CHANNEL] != 0U && !DAQ_FAULT_CHAMBER_ALWAYS_ON)
@@ -461,9 +517,24 @@ static void daq_observe_input_faults(const daq_snapshot_t *snapshot,
   if (window->count[0] != 0U) daq_input_faults_kg1000(faults, window->sum[0] / window->count[0], now);
   daq_input_faults_kg50_input(faults, kg50_input);
   if (window->count[kg50] != 0U) daq_input_faults_kg50(faults, window->sum[kg50] / window->count[kg50], now);
-  if (window->count[2] != 0U && window->count[3] != 0U)
-    daq_input_faults_p6_legs(faults, window->voltage_sum[2] / window->count[2],
-                             window->voltage_sum[3] / window->count[3], now);
+  /* P6 legs: CH3 is converted 10 ms after CH2 in the auxiliary rotation
+   * (daq_acq_aux_items), one pair every 50 ms. */
+  static float p6_plus_v;
+  static uint32_t p6_plus_ms;
+  static uint8_t p6_plus_valid;
+  if (window->count[2] != 0U)
+  {
+    p6_plus_v = window->voltage_sum[2] / window->count[2];
+    p6_plus_ms = now;
+    p6_plus_valid = 1U;
+  }
+  if (window->count[3] != 0U && p6_plus_valid && (uint32_t)(now - p6_plus_ms) <= DAQ_P6_LEG_PAIR_MS)
+    daq_input_faults_p6_legs(faults, p6_plus_v, window->voltage_sum[3] / window->count[3], now);
+#if DAQ_EXCITATION_ADC_CHANNEL >= 0
+  if (window->count[DAQ_EXCITATION_ADC_CHANNEL] != 0U)
+    daq_input_faults_excitation(faults, mcp3564r_connector_voltage(DAQ_EXCITATION_ADC_CHANNEL,
+        window->voltage_sum[DAQ_EXCITATION_ADC_CHANNEL] / window->count[DAQ_EXCITATION_ADC_CHANNEL]));
+#endif
 #if DAQ_CHAMBER_SCAN_MASK != 0U
   if (window->count[DAQ_CHAMBER_ADC_CHANNEL] != 0U)
     daq_input_faults_chamber(faults, mcp3564r_connector_voltage(DAQ_CHAMBER_ADC_CHANNEL,
@@ -483,10 +554,32 @@ int daq_input_health_take(uint32_t now_ms, uint32_t words[DAQ_INPUT_HEALTH_WORDS
        (g_daq_input_faults.onset != 0U && since >= DAQ_INPUT_HEALTH_MIN_SPACING_MS));
   if (due) {
     daq_input_faults_report(&g_daq_input_faults, words);
+    for (unsigned i = 0U; i < DAQ_STATS_CHANNELS; ++i)
+      words[DAQ_INPUT_HEALTH_STATS_WORD + i] = daq_channel_stats_word(&g_daq_stats[i]);
+    words[DAQ_INPUT_HEALTH_FRAME_WORD] = daq_input_health_pair(g_mcp3564r_diag.frames_skipped, g_mcp3564r_diag.slots_skipped);
+    words[DAQ_INPUT_HEALTH_FRAME_WORD + 1U] = daq_input_health_pair(g_mcp3564r_diag.scans_timed_out,
+        g_mcp3564r_diag.recoveries + g_mcp3564r_diag.status_faults);
+    words[DAQ_INPUT_HEALTH_FRAME_WORD + 2U] = daq_input_health_pair(g_mcp3564r_diag.fast_done_max_us,
+        g_mcp3564r_diag.slot_done_max_us);
     g_daq_input_health_sent_ms = now_ms;
   }
   __set_PRIMASK(saved);
   return due;
+}
+
+/* Offers one KG1000 bin (with the chamber bin of the same centre, if any)
+ * and clears it. */
+static void daq_offer_kg1000(daq_report_t *report, daq_bin_output_t *kg1000, const daq_bin_output_t *chamber)
+{
+  daq_report_t one = {.monotonic_ms = report->monotonic_ms, .kg1000 = kg1000->value,
+                      .kg1000_ms = kg1000->captured_ms, .flags = DAQ_REPORT_KG1000};
+  if (chamber != NULL && isfinite(chamber->value)) {
+    one.chamber[1] = chamber->value;
+    one.chamber[0] = daq_chamber_pressure_psi(chamber->value);
+    one.chamber_valid = isfinite(one.chamber[0]);
+  }
+  daq_offer_live_report(&one);
+  kg1000->ready = 0U;
 }
 
 static void daq_enqueue_analog(const daq_snapshot_t *snapshot,
@@ -499,13 +592,11 @@ void daq_thread_entry(ULONG initial_input)
   uint8_t power_loss_latched = 0U;
   uint8_t daq_ready = 1U;
   uint32_t last_temperature_report_ms = 0U;
-  daq_downsample_t downsample_chamber = {0};
 #if (DISABLE_SD_CARD == 0U)
   uint32_t last_supply_ms = 0U;
 #endif
-  float chamber[2] = {NAN, NAN};
-  uint32_t chamber_sample_ms = 0U;
-  uint8_t chamber_seen = 0U;
+  daq_bin_output_t chamber_bin = {0}, kg1000_pending = {0};
+  uint8_t kg1000_wait = 0U;
 #if (DISABLE_SD_CARD == 0U)
   sd_raw_adc_record_t raw_records[DAQ_RAW_BATCH_MAX];
 #endif
@@ -545,11 +636,15 @@ void daq_thread_entry(ULONG initial_input)
     }
 
 #if (DISABLE_SD_CARD == 0U)
+    /* Launch window (with its 0.5 s pre-roll): the MCP3564R LAUNCH profile,
+     * fast pair at OSR 256. Applied by the frame engine at the next frame. */
+    const uint8_t launch_window = sd_card_launch_window_active();
+    mcp3564r_request_profile(launch_window ? DAQ_ACQ_PROFILE_LAUNCH : DAQ_ACQ_PROFILE_FILL);
     /* Launch window: VMAIN/IMON every DAQ_SUPPLY_LAUNCH_PERIOD_MS, beside the
      * load-cell records, so supply dips line up with load-cell faults. */
     if (!snapshot.analog_sample_fresh &&
         (uint32_t)((uint32_t)snapshot.monotonic_ms - last_supply_ms) >= DAQ_SUPPLY_LAUNCH_PERIOD_MS &&
-        sd_card_launch_window_active())
+        launch_window)
     {
       (void)daq_board_sample_supply();
       last_supply_ms = (uint32_t)snapshot.monotonic_ms;
@@ -591,34 +686,28 @@ void daq_thread_entry(ULONG initial_input)
       report.temperature = snapshot.ext_adc_temp_c;
       report.flags |= DAQ_REPORT_TEMPERATURE;
     }
-    /* Pressure shares the existing acquisition/SD ring and KG1000 network
-     * slot. Absence is never a fabricated zero; stale readings restore the
-     * original scalar KG1000 publication without changing its cadence. */
-    for (unsigned channel = 6U; channel <= 7U; ++channel) {
-      if (daq_chamber_is_channel(channel) && window.count[channel] != 0U) {
-        const float average_v = mcp3564r_connector_voltage(channel, window.voltage_sum[channel] / window.count[channel]);
-        float filtered_v;
-        if (daq_downsample_add(&downsample_chamber, average_v, window.count[channel],
-                               report_ms, DAQ_BROADCAST_PERIOD_MS, &filtered_v)) {
-          chamber[1] = filtered_v;
-          chamber[0] = daq_chamber_pressure_psi(chamber[1]);
-          chamber_seen = isfinite(chamber[0]);
-          chamber_sample_ms = report_ms;
-        }
-      }
-    }
-    if (chamber_seen && (uint32_t)(report_ms - chamber_sample_ms) <= 100U) {
-      memcpy(report.chamber, chamber, sizeof(chamber));
-      report.chamber_valid = 1U;
-    }
-    /* SEDSnet receives the boxcar mean of each bin of unfiltered raw
-     * conversions; SD keeps those conversions and nothing else, so the SD
-     * raw records are the single stored copy of this stream. */
+    /* The chamber PT shares the fast pair's 20 ms bins and network slot:
+     * a KG1000 bin goes out with the chamber bin of the same centre. Both are
+     * converted in the same scan, but their bins can close in consecutive
+     * drains, so a KG1000 bin waits at most one cycle for its chamber bin.
+     * Absence is never a fabricated zero: without a matching chamber bin the
+     * scalar KG1000 is sent. SEDSnet receives the mean of each 20 ms bin of
+     * 3-sample-median raw conversions; SD keeps those conversions
+     * unfiltered, so the SD raw records are the single stored copy. */
+    if (bins.chamber_v.ready) chamber_bin = bins.chamber_v;
     if (bins.kg1000.ready)
     {
-      report.kg1000 = bins.kg1000.value;
-      report.kg1000_ms = bins.kg1000.captured_ms;
-      report.flags |= DAQ_REPORT_KG1000;
+      if (kg1000_pending.ready) daq_offer_kg1000(&report, &kg1000_pending, NULL);
+      kg1000_pending = bins.kg1000;
+      kg1000_wait = 0U;
+    }
+    if (kg1000_pending.ready)
+    {
+      const uint8_t matched = chamber_bin.ready && chamber_bin.captured_ms == kg1000_pending.captured_ms;
+      if (matched || DAQ_CHAMBER_SCAN_MASK == 0U || kg1000_wait >= 1U ||
+          (chamber_bin.ready && chamber_bin.captured_ms > kg1000_pending.captured_ms))
+        daq_offer_kg1000(&report, &kg1000_pending, matched ? &chamber_bin : NULL);
+      else ++kg1000_wait;
     }
 #if (DISABLE_SD_CARD == 0U)
     daq_observe_input_faults(&snapshot, &window, report.kg50_input, supply_fresh ? &supply : NULL);

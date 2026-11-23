@@ -187,7 +187,8 @@ class LoadcellVoltsTests(unittest.TestCase):
         sd = (ROOT / "Core/Src/sd_card.c").read_text()
         line = re.search(r'"# calibration,[^"]*"', sd).group(0)
         self.assertTrue(line.startswith('"# calibration,kg1000_slope='))
-        self.assertTrue(line.endswith(',loadcell_input=adc_volts,loadcell_boxcar_ms=%u\\r\\n"'), line)
+        self.assertTrue(line.endswith(',loadcell_input=adc_volts,loadcell_report=median_bin,kg1000_median=%u,'
+                                      'kg1000_bin_us=%u,kg50_median=%u,kg50_bin_us=%u,adc_uptime_hz=1000000\\r\\n"'), line)
 
 
 if __name__ == "__main__":

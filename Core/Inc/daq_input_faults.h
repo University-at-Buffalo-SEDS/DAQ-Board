@@ -4,7 +4,7 @@
  * Pure state machine: no HAL, no RTOS; the caller serializes observations
  * against daq_input_faults_report(). Thresholds: daq_input_fault_config.h.
  *
- * DAQ_INPUT_HEALTH, 10 little-endian UInt32 words:
+ * DAQ_INPUT_HEALTH, 18 little-endian UInt32 words (version 2):
  *   0  version (bits 0-7) | KG50 input is P6 (bit 8) | chamber reading
  *      seen (bit 9)
  *   1  active fault mask (bits 0-15) | latched mask (bits 16-31): any fault
@@ -15,6 +15,15 @@
  *   7  chamber connector minimum since the previous report | now (mV)
  *   8  P6 |CH2 - CH3| maximum since the previous report | P6 leg mean now (mV)
  *   9  supply undervoltage level | chamber no-signal level (mV)
+ *  10-13 noise | drift of KG1000, selected KG50, chamber PT, excitation
+ *      (daq_channel_stats_word: noise uV u16, drift uV/min s16; 0xFFFF /
+ *      0x8000 none). Load cells in ADC-pin volts (P6 input volts), chamber
+ *      and excitation in connector volts.
+ *  14  excitation (HVAIN2, connector) minimum since the previous report |
+ *      now (mV); 0xFFFF when DAQ_EXCITATION_ADC_CHANNEL is unassigned
+ *  15  MCP3564R frames skipped | slot items skipped (u16 each, saturating)
+ *  16  scans restarted after a lost DRDY | device recoveries + STATUS faults
+ *  17  latest fast-scan end | latest slot end, us from the frame start
  * 0xFFFF in a mV half means no reading in that interval. */
 #include <math.h>
 #include <stdint.h>
@@ -31,8 +40,11 @@ enum {
   DAQ_FAULT_CHAMBER_NO_SIGNAL,
   DAQ_FAULT_COUNT
 };
-#define DAQ_INPUT_HEALTH_VERSION 1U
-#define DAQ_INPUT_HEALTH_WORDS 10U
+#define DAQ_INPUT_HEALTH_VERSION 2U
+#define DAQ_INPUT_HEALTH_WORDS 18U
+#define DAQ_INPUT_HEALTH_STATS_WORD 10U
+#define DAQ_INPUT_HEALTH_EXCITATION_WORD 14U
+#define DAQ_INPUT_HEALTH_FRAME_WORD 15U
 #define DAQ_INPUT_HEALTH_NO_MV 0xFFFFU
 
 typedef struct {
@@ -47,6 +59,7 @@ typedef struct {
   uint16_t latched, onset;
   uint16_t vmain_min_mv, vmain_mv, chamber_min_mv, chamber_mv;
   uint16_t p6_imbalance_max_mv, p6_common_mv;
+  uint16_t excitation_min_mv, excitation_mv;
   uint8_t kg50_input, chamber_seen;
 } daq_input_faults_t;
 
@@ -63,6 +76,22 @@ static inline void daq_input_faults_reset(daq_input_faults_t *s)
   *s = (daq_input_faults_t){0};
   s->vmain_min_mv = s->vmain_mv = s->chamber_min_mv = s->chamber_mv = DAQ_INPUT_HEALTH_NO_MV;
   s->p6_common_mv = s->p6_imbalance_max_mv = DAQ_INPUT_HEALTH_NO_MV;
+  s->excitation_min_mv = s->excitation_mv = DAQ_INPUT_HEALTH_NO_MV;
+}
+
+/* Two counters in one word, each saturating at 0xFFFF. */
+static inline uint32_t daq_input_health_pair(uint32_t low, uint32_t high)
+{
+  return (low > 0xFFFFU ? 0xFFFFU : low) | ((high > 0xFFFFU ? 0xFFFFU : high) << 16U);
+}
+
+/* Load-cell excitation monitor (HVAIN2, connector volts). Reported only. */
+static inline void daq_input_faults_excitation(daq_input_faults_t *s, float connector_v)
+{
+  if (!isfinite(connector_v)) return;
+  const uint16_t mv = daq_input_faults_mv(connector_v);
+  s->excitation_mv = mv;
+  if (s->excitation_min_mv == DAQ_INPUT_HEALTH_NO_MV || mv < s->excitation_min_mv) s->excitation_min_mv = mv;
 }
 
 /* One observation of fault `id`: `beyond_set` past the set level,
@@ -218,12 +247,16 @@ static inline void daq_input_faults_report(daq_input_faults_t *s, uint32_t words
              ((uint32_t)(s->kg50_input == 1U ? s->p6_common_mv : DAQ_INPUT_HEALTH_NO_MV) << 16U);
   words[9] = daq_input_faults_mv(DAQ_FAULT_SUPPLY_LOW_V) |
              ((uint32_t)daq_input_faults_mv(DAQ_FAULT_CHAMBER_NO_SIGNAL_V) << 16U);
+  words[DAQ_INPUT_HEALTH_EXCITATION_WORD] = s->excitation_min_mv | ((uint32_t)s->excitation_mv << 16U);
+  for (unsigned i = DAQ_INPUT_HEALTH_STATS_WORD; i < DAQ_INPUT_HEALTH_EXCITATION_WORD; ++i)
+    words[i] = 0x8000FFFFU; /* no statistics unless the owner fills them in */
   s->latched = 0U;
   for (unsigned i = 0; i < DAQ_FAULT_COUNT; ++i)
     if (s->fault[i].raw || s->fault[i].active) s->latched |= (uint16_t)(1U << i);
   s->onset = 0U;
   s->vmain_min_mv = s->vmain_mv;
   s->chamber_min_mv = s->chamber_mv;
+  s->excitation_min_mv = s->excitation_mv;
   s->p6_imbalance_max_mv = DAQ_INPUT_HEALTH_NO_MV;
 }
 

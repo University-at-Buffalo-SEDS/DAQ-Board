@@ -105,20 +105,29 @@ static int log_telemetry_captured(unsigned type,const void*data,size_t count,siz
 }
 '''+definitions+production+r'''
 int main(void){
- const unsigned duration=3000;unsigned produced=0;
+ const unsigned duration=3000;unsigned produced=0,produced50=0;
  for(now_ms=0;now_ms<duration;++now_ms){
-  if(now_ms%4==3){
-   /* A bin closes at its last conversion; acquisition offers it next cycle. */
-   daq_report_t report={.monotonic_ms=now_ms,.kg1000_ms=now_ms-1,.kg50_ms=now_ms-1,
-     .kg1000=(float)(now_ms-1),.kg50=-(float)(now_ms-1),.temperature=25,
-     .chamber={100,0.5f},.chamber_valid=1,.flags=DAQ_REPORT_KG1000|DAQ_REPORT_KG50|DAQ_REPORT_TEMPERATURE,.kg50_input=1};
+  /* A 20 ms fast bin (and every 50 ms a KG50 bin) closes at its last
+   * conversion; acquisition offers it on its next cycle, stamped at the
+   * bin centre. */
+  if(now_ms%20==1 && now_ms>20){
+   daq_report_t report={.monotonic_ms=now_ms,.kg1000_ms=now_ms-11,
+     .kg1000=(float)(now_ms-11),.temperature=25,
+     .chamber={100,0.5f},.chamber_valid=1,.flags=DAQ_REPORT_KG1000|DAQ_REPORT_TEMPERATURE,.kg50_input=1};
    ++produced;daq_offer_live_report(&report);
+  }
+  if(now_ms%50==1 && now_ms>50){
+   daq_report_t report={.monotonic_ms=now_ms,.kg50_ms=now_ms-26,.kg50=-(float)(now_ms-26),
+     .flags=DAQ_REPORT_KG50,.kg50_input=1};
+   ++produced50;daq_offer_live_report(&report);
   }
   daq_network_process_once(now_ms);
  }
- printf("produced=%u live50=%u live1000=%u live_maxgap=%u/%u live_maxage=%u\n",produced,sent[0],sent[1],max_gap[0],max_gap[1],max_age);
- assert(g_daq_network_offered[DAQ_NETWORK_KG50]==produced && g_daq_network_offered[DAQ_NETWORK_KG1000]==produced);
- assert(!stale_replays&&max_age<=5&&max_gap[0]<=40&&max_gap[1]<=40);
- for(unsigned i=0;i<2;++i)assert(fabsf((float)sent[i]-(float)duration*40.0f/1000.0f)<=1.0f);
+ printf("produced=%u/%u live50=%u live1000=%u live_maxgap=%u/%u live_maxage=%u\n",produced50,produced,sent[0],sent[1],max_gap[0],max_gap[1],max_age);
+ assert(g_daq_network_offered[DAQ_NETWORK_KG50]==produced50 && g_daq_network_offered[DAQ_NETWORK_KG1000]==produced);
+ /* Every bin is sent once, in order, within a slot of being offered. */
+ fflush(stdout);
+ assert(!stale_replays&&max_age<=50&&max_gap[0]<=60&&max_gap[1]<=30);
+ assert(sent[0]==produced50 && sent[1]==produced);
 }
 ''')

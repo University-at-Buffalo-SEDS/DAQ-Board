@@ -25,27 +25,27 @@ class LoadcellPlotTests(unittest.TestCase):
 
     def test_channel_tags_sign_extension_and_duplicate_filtering(self):
         ring = bytearray(plot.DEPTH * plot.ENTRY_SIZE)
-        struct.pack_into('<IIfi', ring, 0, 0x10200000, 998, 25.0, 123)
-        struct.pack_into('<IIfi', ring, 16, 0x0FFFFFFF, 999, 25.0, 123)
-        struct.pack_into('<IIfi', ring, 32, 0x81234567, 999, 25.0, 123)
+        struct.pack_into('<IIII', ring, 0, 0x10200000, (998 * 1000) & 0xFFFFFFFF, 1, 0)
+        struct.pack_into('<IIII', ring, 16, 0x0FFFFFFF, (999 * 1000) & 0xFFFFFFFF, 1, 0)
+        struct.pack_into('<IIII', ring, 32, 0x81234567, (999 * 1000) & 0xFFFFFFFF, 1, 0)
         seen = {}
         points = plot.decode_ring(ring, 3, 3, 1000, seen)
-        self.assertEqual(points, [(2, 998, 1, 2097152, 25.0), (1, 999, 0, -1, 25.0)])
+        self.assertEqual(points, [(2, 998, 1, 2097152, None), (1, 999, 0, -1, None)])
         self.assertEqual(plot.decode_ring(ring, 3, 3, 1001, seen), [])
 
     def test_inflight_slots_are_excluded_across_queue_wrap(self):
         ring = bytearray(plot.DEPTH * plot.ENTRY_SIZE)
         for slot in (126, 127, 0, 1, 2):
-            struct.pack_into('<IIfi', ring, slot * plot.ENTRY_SIZE, 0x10200000, 100, 25.0, 123)
+            struct.pack_into('<IIII', ring, slot * plot.ENTRY_SIZE, 0x10200000, (100 * 1000) & 0xFFFFFFFF, 1, 0)
         points = plot.decode_ring(ring, 126, 1, 101, {})
-        self.assertEqual(points, [(1, 100, 1, 2097152, 25.0)])
+        self.assertEqual(points, [(1, 100, 1, 2097152, None)])
 
     def test_tick_wrap_and_stale_entries(self):
         ring = bytearray(plot.DEPTH * plot.ENTRY_SIZE)
-        struct.pack_into('<IIfi', ring, 0, 0x10200000, 0xFFFFFFFE, 25.0, 123)
-        struct.pack_into('<IIfi', ring, 16, 0x10200000, 0xFFFFF000, 25.0, 123)
+        struct.pack_into('<IIII', ring, 0, 0x10200000, (0xFFFFFFFE * 1000) & 0xFFFFFFFF, 1, 0)
+        struct.pack_into('<IIII', ring, 16, 0x10200000, (0xFFFFF000 * 1000) & 0xFFFFFFFF, 1, 0)
         self.assertEqual(plot.decode_ring(ring, 2, 2, 3, {}),
-                         [(5, 0xFFFFFFFE, 1, 2097152, 25.0)])
+                         [(5, 0xFFFFFFFE, 1, 2097152, None)])
 
     def test_voltage_and_independent_calibration(self):
         calibration = [2., 3., 1., 0., 4., 5., 6., 0., 0., 0.2, 7.]
@@ -92,14 +92,14 @@ class LoadcellPlotTests(unittest.TestCase):
         self.assertAlmostEqual(connector, voltage * 11, places=6)
         self.assertAlmostEqual(psi, connector * 200, places=3)
         ring = bytearray(plot.DEPTH * plot.ENTRY_SIZE)
-        struct.pack_into('<IIfi', ring, 0, 0x90200000, 40, 25., 123)
-        struct.pack_into('<IIfi', ring, 16, 0x60200000, 41, 25., 123)
+        struct.pack_into('<IIII', ring, 0, 0x90200000, (40 * 1000) & 0xFFFFFFFF, 1, 0)
+        struct.pack_into('<IIII', ring, 16, 0x60200000, (41 * 1000) & 0xFFFFFFFF, 1, 0)
         self.assertEqual([p[2] for p in plot.decode_ring(ring, None, None, 42, {})], [9, 6])
 
     def test_chunked_double_read_omits_a_changing_entry(self):
         memory = bytearray(plot.DEPTH * plot.ENTRY_SIZE)
-        struct.pack_into('<IIfi', memory, 0, 0x90200000, 40, 25., 123)
-        struct.pack_into('<IIfi', memory, 16, 0x60200000, 41, 25., 123)
+        struct.pack_into('<IIII', memory, 0, 0x90200000, (40 * 1000) & 0xFFFFFFFF, 1, 0)
+        struct.pack_into('<IIII', memory, 16, 0x60200000, (41 * 1000) & 0xFFFFFFFF, 1, 0)
         class Probe:
             reads = 0
             def read(self, address, count):
@@ -142,15 +142,18 @@ class LoadcellPlotTests(unittest.TestCase):
         # A host pointer is64-bit; target SPI pointer is32-bit. All other
         # members are explicit fixed-width types with matching alignment.
         declarations = declarations.replace('SPI_HandleTypeDef *spi;', 'uint32_t spi;')
-        code = '#include <stdint.h>\n#include <stddef.h>\n#include <stdio.h>\n#define MCP3564R_SAMPLE_QUEUE_DEPTH 128U\n'
-        code += declarations + '\nint main(void){printf("%zu %zu %zu",sizeof(mcp3564r_context_t),offsetof(mcp3564r_context_t,queue),sizeof(mcp3564r_sample_entry_t));}\n'
+        code = ('#include <stdint.h>\n#include <stddef.h>\n#include <stdio.h>\n#include "daq_acq_schedule.h"\n'
+                '#define MCP3564R_SAMPLE_QUEUE_DEPTH 128U\n')
+        code += declarations + ('\nint main(void){printf("%zu %zu %zu %zu",sizeof(mcp3564r_context_t),'
+                                'offsetof(mcp3564r_context_t,queue),sizeof(mcp3564r_sample_entry_t),'
+                                'offsetof(mcp3564r_context_t,hal_offset_us));}\n')
         with tempfile.TemporaryDirectory() as folder:
             binary = Path(folder) / 'layout'
-            subprocess.run(['cc', '-std=c11', '-Wall', '-Werror', '-x', 'c', '-', '-o', str(binary)],
-                           input=code, text=True, check=True)
+            subprocess.run(['cc', '-std=c11', '-Wall', '-Werror', '-I', str(ROOT / 'Core/Inc'), '-x', 'c', '-',
+                            '-o', str(binary)], input=code, text=True, check=True)
             result = subprocess.check_output([str(binary)], text=True)
         self.assertEqual(tuple(map(int, result.split())),
-                         (plot.CONTEXT_SIZE, plot.RING_OFFSET, plot.ENTRY_SIZE))
+                         (plot.CONTEXT_SIZE, plot.RING_OFFSET, plot.ENTRY_SIZE, plot.HAL_OFFSET_OFFSET))
 
     def test_sd_health_tracks_progress_stall_reset_and_missing_reads(self):
         state = plot.SDStatus()

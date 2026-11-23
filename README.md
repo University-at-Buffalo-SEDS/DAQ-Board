@@ -167,21 +167,27 @@ the ten-minute high-rate soak. This is test media capacity, not MCU RAM and not
 a claim about an installed card. Small/full-card tests are separate from
 network-loss qualification.
 
-Edit `Core/Inc/daq_rates.h` and rebuild/reflash:
+The acquisition schedule, rates, filters and every data path are documented,
+with diagrams, in [docs/data-pipeline.md](docs/data-pipeline.md). In short:
+the MCP3564R runs one 1 ms frame per TIM2 tick: KG1000 and the chamber PT
+every frame (1 kHz, strictly periodic), then one slot item (KG50 in 8 of 10
+frames, the die temperature, one auxiliary channel). Every conversion goes to
+SD with a microsecond timestamp; the network gets 20 ms (fast pair) and 50 ms
+(KG50) bins of median-filtered values.
 
-- `DAQ_ADC_OSR`: hardware ADC oversampling filter (default 256 with chamber input; 1024 when explicitly disabled).
-- `DAQ_ADC_READ_RATE_HZ`: requested timer-paced ADC reads (default 5556 with chamber input; 3700 when explicitly disabled).
-- `DAQ_ACQUISITION_PERIOD_MS`: raw queue drain cadence (default 2 ms).
-- `DAQ_BROADCAST_RATE_HZ`: filtered report/SD replay cadence (default 250 Hz per loadcell).
+Edit `Core/Inc/daq_acq_schedule.h` (frame period, OSR per profile, slot
+pattern) or `Core/Inc/daq_rates.h` (thread period, report filters and bins)
+and rebuild/reflash. Compile-time checks reject a frame that does not fit.
 
 Edit `Core/Inc/daq_network_config.h` for the aggregate live rate and split:
 
-- `DAQ_NETWORK_RATE_HZ`: **100 sensor packets/s total**, independent of ADC and SD rates.
-- `DAQ_NETWORK_WEIGHT_KG50` and `DAQ_NETWORK_WEIGHT_KG1000`: **10 each**, giving both loadcells equal top priority and 40 packets/s each at the default total.
-- `DAQ_NETWORK_WEIGHT_TEMPERATURE`, `_SDADC`, `_SAR`, `_CURRENT`, `_POWER`: **1 each**, giving each auxiliary stream 4 packets/s.
+- `DAQ_NETWORK_RATE_HZ`: **100 sensor packets/s total** (at least 80), independent of ADC and SD rates.
+- The fast pair (`DAQ_LOADCELL_CHAMBER`, 50/s) and the selected KG50 (20/s) take a slot whenever one of their bins is waiting, so every bin is sent.
+- `DAQ_NETWORK_WEIGHT_TEMPERATURE`, `_SDADC`, `_SAR`, `_CURRENT`, `_POWER` (1, 2, 1, 1, 2) share the remaining slots.
 
-Shares are normalized by the total weight. A zero weight disables only that
-stream's live network output; at least one weight must be positive. Each stream
+Auxiliary shares are normalized by their total weight. A zero weight disables
+only that stream's live network output; at least one auxiliary weight must be
+positive. Each stream
 keeps one bounded latest sample. Coalescing replaces unsent NETWORK work after
 the original SD mirror enqueue; it never removes acquisition or SD records.
 The selected 50 kg input remains one stream, including when its input changes.
@@ -189,8 +195,7 @@ A single worker interleaves these samples and caps actual SDK submissions using
 monotonic time. Stalls do not produce catch-up floods. Heartbeats, commands,
 acknowledgements and discovery bypass this sensor-only scheduler.
 
-ADC acquisition, raw SD batches, calibrated records and the 250 Hz loadcell SD
-mirrors retain their cadence and capture timestamps. `g_daq_network_offered`,
+ADC acquisition and raw SD batches retain their cadence and capture timestamps. `g_daq_network_offered`,
 `g_daq_network_coalesced`, `g_daq_network_sent` and `g_daq_network_failed` expose
 per-stream counters in the order declared in `daq_network_schedule.h`.
 Coalescing is intentional; an SDK refusal is a separate failure counter.
@@ -208,14 +213,14 @@ The optional CLI override accepts 1..1000; actual delivered rate also depends on
 available source samples and transport capacity. Empty weighted slots stay empty.
 
 The raw SD byte pool budgets 800 ms at the configured acquisition rate.
-Batch capacity scales with the acquisition interval (16 records per batch and
+Batch capacity scales with the acquisition interval (11 records per batch and
 401 full-batch equivalents at the defaults); the pointer queue can hold
 smaller batches within that same byte budget. No stale
 reports are burst out after a missed deadline. Fresh ADC data, CPU scheduling,
 CAN capacity and the Gateway/Pico-Fi link constrain actual received cadence;
 100 aggregate live sensor packets/s is a cap, not measured end-to-end throughput.
 
-The report window preserves its phase across scheduler jitter. A low-voltage
+Report bins are fixed on the microsecond sample clock. A low-voltage
 SD flush notification no longer permanently switches acquisition to a 100 ms
 sleep; telemetry retains its configured cadence while the processor is running.
 `g_daq_loadcell_publish_ok_count` counts accepted router enqueues, not delivery.
@@ -240,26 +245,15 @@ on-demand only. Read the buffers while the request is idle; do not call router
 functions from GDB while firmware is halted. Runtime JSON includes per-type TX
 counts, and topology JSON includes each announcer's last-seen time and age.
 
-For a requested 12 kHz read ceiling, select OSR 256 and drain every 5 ms.
-This is not an exact 12 kHz conversion clock: with the physical 16 MHz MCO,
-OSR 256 has a 15.625 ksps continuous single-channel rate. Two-channel SCAN
-mode settles the filter at each channel change, reducing the conversion rate;
-reads are paced at rounded microsecond
-intervals plus SPI/interrupt overhead. Only acquired readings are recorded.
-Do not claim lossless capture of every ADC conversion with this timer-driven
-driver. The compile-time checks reject settings exceeding conversion speed or
-raw batch capacity. SD throughput and actual achieved rate still require testing.
-
-A boxcar averages acquired raw samples before downsampling: each KG1000/KG50
-network value is the mean of the conversions in one fixed 4 ms bin of the
-uptime clock (`daq_bin_average_add`). It reads only what the SD raw records
-hold, so SD keeps the individual unfiltered conversions and nothing else, and
-the network stream can be rebuilt from them exactly.
-GroundStation applies display calibration; SD raw records separately retain
-calibrated values and calibration coefficients. Averaging
-reduces broadband noise, but is not a sharp anti-alias filter and does not
-guarantee rejection of arbitrary interference. Lower OSR trades noise for speed.
-See Microchip MCP3561/2/4R datasheet DS20006391C, conversion-time table.
+Each KG1000/KG50 network value is the mean of one fixed bin (20 ms fast,
+50 ms KG50) of 3- or 5-sample running medians of the raw conversions, binned
+on the microsecond sample clock (`daq_median.h`). SD keeps every unfiltered
+conversion with the same microsecond time, so the network stream can be
+rebuilt from SD exactly (tests/test_launch_supply_log.py). GroundStation
+applies display calibration; SD raw records separately retain calibrated
+values and calibration coefficients. See Microchip MCP3561/2/4R datasheet
+DS20006391C, conversion-time table, and docs/data-pipeline.md for the
+bandwidth and delay of each filter.
 # SD initialization limits
 
 The SDMMC kernel runs at 80 MHz; divider 2 limits card transfers to 20 MHz
@@ -288,17 +282,15 @@ AGND. The schematic maps P7 through AMP1 to CH0 and P8 through AMP2 to CH1;
 the onboard amplifiers already convert each bridge's differential signal to
 a ground-referenced voltage. See [load-cell wiring and diagnostics](docs/loadcell-inputs.md).
 The ADC's 32-bit tagged output identifies the channel; only data-ready readings
-are queued. Both cells target independent sample-weighted 250 Hz raw telemetry
-(`KG1000`, ID 118; `KG50`, ID 119). Falling data-ready edges launch one
-five-byte SPI DMA transaction (opcode, STATUS, four tagged data bytes). Only
-healthy active-low data-ready STATUS results enter the existing sample queue.
-SCAN settling, OSR and SPI service determine acquisition cadence; the legacy
-`DAQ_ADC_READ_RATE_HZ` setting sizes the drain/batch budget rather than a poll
-timer. The existing network publication cap and SD ownership are unchanged.
-Scan/gain changes disarm acquisition before register writes. Startup clears
-stale ready data while in standby, so the next edge follows a settled new
-conversion. Errors and missing completion callbacks recover in the acquisition
-thread; no blocking SPI command or reconfiguration runs in an ISR. A DMA owner
+are queued. A TIM2 compare starts every 1 ms frame; each scan is a one-shot
+SCAN cycle that returns the ADC to standby, and the next scan's configuration
+is written by DMA in standby, so no write ever restarts a running conversion.
+Falling data-ready edges launch one five-byte SPI DMA transaction (opcode,
+STATUS, four tagged data bytes). Only healthy active-low data-ready STATUS
+results enter the sample queue. `DAQ_ADC_READ_RATE_HZ` is the exact schedule
+rate and sizes the drain/batch budget. Errors and missing completion
+callbacks recover in the acquisition thread; no blocking SPI command runs in
+an ISR. A DMA owner
 that remains busy for 20 ms records `g_mcp3564r_dma_timeout_count`; its buffers
 and CS remain owned until HAL abort succeeds. SPI2 uses SYSCLK160 MHz divided
 by16, so a healthy five-byte wire transaction takes4 us; this20 ms bound is a
@@ -320,7 +312,8 @@ raw unit is 16000/921 V) and stored calibrations are converted once at boot
 (see [load-cell inputs](docs/loadcell-inputs.md)). Separate slow diagnostic rows `kg1000_window_v`
 (CH0) and `kg50_window_v` (CH1) use the nominal internal 2.4 V reference
 and the configured ADC gain of 1.
-The `KG50` payload is the 4 ms boxcar of the `kg50_v` records.
+The `KG50` payload is the mean of one 50 ms bin of the 5-sample running
+median of the `kg50_v` (or `kg50_p6_v`) records.
 Every file header includes the 50 kg polynomial coefficients, input shift, and
 tare offset; calibration changes rotate files as for the original channel.
 
@@ -428,27 +421,22 @@ HVAIN2 is CH7. P4 pin 6 supplies +12VA, pin 1 supplies +3V3A, and
 pins 2/5 are ground; the PX309 excitation must not use the 3.3 V supply.
 Firmware selects CH6 by default, reverses the 11:1 divider,
 and converts connector volts to psi at 200 psi/V. Out-of-range measurements
-are preserved, not clamped. The existing combined KG1000/pressure/connector-V
-network slot shares the 40 Hz KG1000 schedule; the aggregate live cap stays 100 Hz.
-The raw SD stream preserves each captured sample and both timestamps.
+are preserved, not clamped. The chamber PT is a fast channel: converted with
+KG1000 in every 1 ms frame, published in the combined KG1000/pressure/
+connector-V packet at 50 Hz (20 ms bins), and every conversion is on SD with a
+microsecond timestamp.
 
-`DAQ_CHAMBER_ADC_CHANNEL=-1` explicitly disables the chamber channel and
-restores the legacy OSR1024 / read3700 profile. The assigned-channel default uses
-OSR256 / read5556 without changing the 16 MHz clock, unity gain, auto-zero settings
-or load-cell calibration. SCAN settles each channel separately and AZ_MUX
-doubles conversion time; OSR512 with three channels would reduce fresh
-load-cell density. OSR256 preserves density with the pressure channel, at the
-cost of less oversampling/noise rejection than OSR1024. It does not promise the
-same effective resolution or noise floor; evaluate physical load-cell noise
-before interpreting small changes.
+`DAQ_CHAMBER_ADC_CHANNEL=-1` explicitly disables the chamber channel; KG1000
+is then the only fast channel and the scalar `KG1000` packet is used.
 
-The driver owns a 128-entry fresh-conversion FIFO. Acquisition drains up to 16
-records every 2 ms into copied SD batches. A full FIFO increments ADC overruns;
-SD admission and storage errors have separate counters. Polling and firmware
-service delays can still miss hardware conversions before FIFO admission.
-The host SCAN/DRDY accounting test includes auto-zero, auxiliary/temperature
-passes, a 600 ms SD-worker stall and a deliberate acquisition stall; it proves
-software ownership/accounting under that model, not real-card throughput.
+The driver owns a 128-entry fresh-conversion FIFO (42 ms at 3000
+conversions/s). Acquisition drains up to 11 records every 2 ms into copied SD
+batches. A full FIFO increments ADC overruns;
+SD admission and storage errors have separate counters. A frame whose SPI is still
+busy at the next tick is skipped and counted (`g_mcp3564r_diag`, also in
+DAQ_INPUT_HEALTH v2). The host frame-engine simulator (tests/acq_engine_sim.c)
+runs the production driver against a modelled ADC, SPI DMA and TIM2; it proves
+the schedule and fault handling as coded, not the hardware conversion times.
 
 PC4/+12VA_EN drives U17 TPS7A4501 SHDN directly: HIGH enables the analog rail.
 Startup already asserts HIGH once, waits 10 ms, and now reads the GPIO back

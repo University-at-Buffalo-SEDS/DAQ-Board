@@ -19,7 +19,8 @@ class DaqTimestampTests(unittest.TestCase):
     def test_production_rows_use_fallback_and_identify_clock(self):
         source = (ROOT / "Core/Src/sd_card.c").read_text()
         self.assertIn("sd_format_csv_raw_record(line, sizeof(line),", source)
-        self.assertIn("sample->network_unix_ms, captured_uptime, sensor", source)
+        self.assertIn("sample->network_unix_ms, captured_uptime,", source)
+        self.assertIn("fine ? captured_uptime * 1000U + sample->sample_us : captured_uptime", source)
         raw_formatter = (ROOT / "Core/Inc/sd_raw_record_format.h").read_text()
         self.assertIn("network_ms ? network_ms : uptime", raw_formatter)
         self.assertIn('network_ms ? "network" : "local"', raw_formatter)

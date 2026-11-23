@@ -1,6 +1,7 @@
 #include "sd_card.h"
 #include "DAQ-Threads.h"
 #include "daq_chamber_pressure.h"
+#include "daq_channel_stats.h"
 #include "daq_rates.h"
 
 #include "fx_api.h"
@@ -30,11 +31,11 @@
 /* Bench build only: time the writer's encode, FileX and media calls in place. */
 volatile sd_profile_t g_sd_profile;
 static inline int sd_prof_format_raw(char *dst, size_t capacity, uint64_t network_ms, uint64_t uptime,
-    const char *sensor, int32_t raw_code, float raw_value, float calibrated_value, float temperature,
+    uint64_t uptime_ticks, uint32_t uptime_hz, const char *sensor, int32_t raw_code, float raw_value, float calibrated_value, float temperature,
     int32_t temperature_code, uint64_t sequence, sd_raw_format_cache_t *cache)
 {
   SD_PROF_BEGIN(t);
-  const int length = sd_format_csv_raw_record(dst, capacity, network_ms, uptime, sensor, raw_code,
+  const int length = sd_format_csv_raw_record(dst, capacity, network_ms, uptime, uptime_ticks, uptime_hz, sensor, raw_code,
       raw_value, calibrated_value, temperature, temperature_code, sequence, cache);
   SD_PROF_END(encode_cycles, t); SD_PROF_COUNT(records, 1U);
   return length;
@@ -819,7 +820,9 @@ static VOID sd_filex_driver(FX_MEDIA *media)
  * FAT updates therefore never shed a row; the pool guard still reserves a
  * quarter of the raw pool for essential channels. */
 #define SD_OPTIONAL_STALL_MS 500U
-#define SD_OPTIONAL_RAW_ADMIT_LIMIT ((DAQ_ADC_READ_RATE_HZ * SD_OPTIONAL_STALL_MS + 999U) / 1000U)
+/* Sized for 1.5x the nominal conversion rate (DAQ_ADC_READ_RATE_HZ is the
+ * exact frame-schedule rate, no longer an over-estimate). */
+#define SD_OPTIONAL_RAW_ADMIT_LIMIT ((DAQ_ADC_READ_RATE_HZ * 3U / 2U * SD_OPTIONAL_STALL_MS + 999U) / 1000U)
 #if DAQ_SD_PREALLOCATE_ENABLE && (defined(FX_UPDATE_FILE_SIZE_ON_ALLOCATE) || defined(FX_ENABLE_FAULT_TOLERANT))
 #error "Review SD preallocation: this FileX mode extends logical file size on allocate"
 #endif
@@ -1011,12 +1014,13 @@ static int sd_format_calibration_line(char *line, size_t size, const daq_calibra
   sd_format_float(coefficients[16], calibration->filter_tau_ms[1]);
   const int len = snprintf(
       line, size,
-      "# calibration,kg1000_slope=%s,kg1000_intercept=%s,iadc_slope=%s,iadc_intercept=%s,kg50_c0=%s,kg50_c1=%s,kg50_c2=%s,kg50_c3=%s,kg50_c4=%s,kg50_x0=%s,kg50_tare=%s,kg1000_temp_ref=%s,kg1000_raw_per_c=%s,kg50_temp_ref=%s,kg50_raw_per_c=%s,kg1000_filter_tau_ms=%s,kg50_filter_tau_ms=%s,loadcell_input=adc_volts,loadcell_boxcar_ms=%u\r\n",
+      "# calibration,kg1000_slope=%s,kg1000_intercept=%s,iadc_slope=%s,iadc_intercept=%s,kg50_c0=%s,kg50_c1=%s,kg50_c2=%s,kg50_c3=%s,kg50_c4=%s,kg50_x0=%s,kg50_tare=%s,kg1000_temp_ref=%s,kg1000_raw_per_c=%s,kg50_temp_ref=%s,kg50_raw_per_c=%s,kg1000_filter_tau_ms=%s,kg50_filter_tau_ms=%s,loadcell_input=adc_volts,loadcell_report=median_bin,kg1000_median=%u,kg1000_bin_us=%u,kg50_median=%u,kg50_bin_us=%u,adc_uptime_hz=1000000\r\n",
       coefficients[0], coefficients[1], coefficients[2], coefficients[3],
       coefficients[4], coefficients[5], coefficients[6], coefficients[7],
       coefficients[8], coefficients[9], coefficients[10],
       coefficients[11], coefficients[12], coefficients[13], coefficients[14], coefficients[15], coefficients[16],
-      (unsigned)DAQ_BROADCAST_PERIOD_MS);
+      (unsigned)DAQ_FAST_MEDIAN, (unsigned)DAQ_FAST_REPORT_US, (unsigned)DAQ_KG50_MEDIAN,
+      (unsigned)DAQ_KG50_REPORT_US);
   return len > 0 && (size_t)len < size ? len : -1;
 }
 
@@ -2033,14 +2037,20 @@ void sd_card_writer_thread_entry(ULONG initial_input)
         {
           const sd_raw_adc_record_t *sample = &slot->samples[i];
           const uint64_t captured_uptime = board_uptime_project(slot->uptime_reference, sample->monotonic_ms);
-          const char *sensor = daq_chamber_is_channel(sample->channel) ? "chamber_pressure_v" : sample->channel < 8U ? (const char *const[]){
+          const char *sensor = daq_chamber_is_channel(sample->channel) ? "chamber_pressure_v" :
+              daq_stats_index(sample->channel, 0xFFU) == (int)DAQ_STATS_EXCITATION ? "excitation_v" :
+              sample->channel < 8U ? (const char *const[]){
               "kg1000_v", "kg50_v", "mcp3564r_ch2_v", "mcp3564r_ch3_v",
               "mcp3564r_ch4_v", "mcp3564r_ch5_v", "mcp3564r_ch6_v", "mcp3564r_ch7_v"
           }[sample->channel] : sample->channel == 9U ? "kg50_p6_v" :
               sample->channel == SD_RAW_CHANNEL_INPUT_VOLTAGE ? "input_voltage_v" :
               sample->channel == SD_RAW_CHANNEL_INPUT_CURRENT ? "input_current_a" : "invalid_adc_channel";
+          if (raw_format_cache.owner != log) { raw_format_cache.temperature_valid = 0U; raw_format_cache.owner = log; }
+          const int fine = sd_raw_channel_has_us(sample->channel);
           const int len = sd_format_csv_raw_record(line, sizeof(line),
-              sample->network_unix_ms, captured_uptime, sensor, sample->raw_adc_code,
+              sample->network_unix_ms, captured_uptime,
+              fine ? captured_uptime * 1000U + sample->sample_us : captured_uptime,
+              fine ? 1000000U : BOARD_UPTIME_FREQUENCY_HZ, sensor, sample->raw_adc_code,
               sample->raw_value, sample->calibrated_value, sample->adc_temperature_c,
               sample->adc_temperature_code, sample->record_sequence, &raw_format_cache);
           if (len <= 0 || (size_t)len >= sizeof(line)) {

@@ -373,8 +373,12 @@ class InputFaultTests(unittest.TestCase):
 
     def test_counters_saturate_and_unknown_readings_are_marked(self):
         reports = self.run_ops(['R'])
-        self.assertEqual(reports[0].words[0], 1)
+        self.assertEqual(reports[0].words[0], 2)
+        self.assertEqual(len(reports[0].words), 18)
         self.assertEqual(reports[0].words[6:9], [0xFFFFFFFF] * 3)
+        # v2: per-channel statistics unknown, no excitation reading.
+        self.assertEqual(reports[0].words[10:14], [0x8000FFFF] * 4)
+        self.assertEqual(reports[0].words[14], 0xFFFFFFFF)
         ops = []
         for i in range(70000):
             ops += [f'K {i * 4} 3.0', f'K {i * 4 + 2} 0.2']
@@ -391,7 +395,7 @@ class InputHealthWiringTests(unittest.TestCase):
     def test_schema_header_and_firmware_agree(self):
         definitions = json.loads((ROOT / 'config/sedsnet.json').read_text())
         entry = next(t for t in definitions['types'] if t['name'] == 'DAQ_INPUT_HEALTH')
-        self.assertEqual(entry['element'], dict(kind='Static', data_type='UInt32', count=10))
+        self.assertEqual(entry['element'], dict(kind='Static', data_type='UInt32', count=18))
         self.assertEqual((entry['reliable'], entry['endpoints']), ('Off', ['ActuatorGroundStation']))
         hashed = 0x811c9dc5 ^ 0x5459
         for byte in b'DAQ_INPUT_HEALTH':

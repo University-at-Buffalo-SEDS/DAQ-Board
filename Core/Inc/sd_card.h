@@ -45,7 +45,10 @@ typedef struct
   float adc_temperature_c;
   int32_t adc_temperature_code;
   uint8_t channel;
+  uint16_t sample_us; /* sub-millisecond part of the capture time, 0..999 */
 } sd_raw_adc_record_t;
+/* MCP3564R records carry microsecond capture times (uptime_ticks in us). */
+static inline int sd_raw_channel_has_us(uint8_t channel) { return channel < 8U || channel == 9U; }
 /* Raw-record channels beyond the MCP3564R (0..7, 9): the board supply from
  * ADC1, in the same record stream, clock and sequence as the load cells.
  * raw_adc_code/raw_value are the ADC1 code and pin volts; calibrated_value

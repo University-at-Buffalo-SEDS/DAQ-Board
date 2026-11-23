@@ -105,7 +105,7 @@ int main(void){const float values[]={-5,-0.015f,-0.0f,0,0.015f,0.0225f,2.5f,6};
     for(unsigned j=0;j<sizeof(inputs)/sizeof(inputs[0]);++j){
       memset(records,0,sizeof(records));
       snapshot=(daq_snapshot_t){.ext_adc_sample_valid=1,.ext_adc_channel=channels[i],
-        .ext_adc_monotonic_ms=90,.ext_adc_code=-1234,.ext_adc_voltage_v=inputs[j],
+        .ext_adc_sample_us=90000,.ext_adc_code=-1234,.ext_adc_voltage_v=inputs[j],
         .ext_adc_loadcell_kg1000=inputs[j],.ext_adc_temp_c=25};
       assert(daq_drain_ext_adc(&snapshot,records,4,&cal,&window,1,NULL,NULL)==1);
       assert(records[0].raw_adc_code==-1234);
@@ -145,40 +145,58 @@ int main(void){const float values[]={-5,-0.015f,-0.0f,0,0.015f,0.0225f,2.5f,6};
 
     def test_actual_report_prepare_never_fabricates_missing_stale_or_invalid_zero(self):
         source=(ROOT/'Core/Src/daq_thread.c').read_text()
-        start=source.index('    for (unsigned channel = 6U; channel <= 7U; ++channel)')
-        end=source.index('    /* SEDSnet receives the boxcar mean',start)
+        start=source.index('    /* The chamber PT shares')
+        end=source.index('#if (DISABLE_SD_CARD == 0U)\n    daq_observe_input_faults',start)
         actual=source[start:end]
+        offer=source[source.index('static void daq_offer_kg1000('):source.index('static void daq_enqueue_analog(const daq_snapshot_t *snapshot,\n                               const daq_calibration_t *calibration,\n                               const daq_loadcell_window_t *window, sd_capture_t capture);\n\nvoid daq_thread_entry')]
         self.compile_run(r'''#include "daq_rates.h"
-#include "daq_downsample.h"
 #include "mcp3564r_board_config.h"
 #include <assert.h>
 #include <float.h>
 #include <string.h>
-static daq_downsample_t downsample_chamber;
-static float chamber[2];static uint8_t chamber_seen;static uint32_t chamber_sample_ms;
-static struct {float chamber[2];unsigned chamber_valid;} report;
-static void prepare(uint32_t report_ms,unsigned count,float adc_v) {
- struct {unsigned count[10];float voltage_sum[10];} window={0};
- window.count[6]=count;window.voltage_sum[6]=adc_v*count;
- report.chamber_valid=0;report.chamber[0]=report.chamber[1]=NAN;
-'''+actual+r'''
+#define DAQ_REPORT_KG1000 1U
+typedef struct { float value; uint64_t captured_ms; uint8_t ready; } daq_bin_output_t;
+typedef struct { daq_bin_output_t kg1000, kg50, chamber_v; } daq_loadcell_bins_t;
+typedef struct { uint64_t monotonic_ms, kg1000_ms, kg50_ms; float kg1000, kg50, temperature;
+                 float chamber[2]; uint8_t chamber_valid; uint32_t flags; uint8_t kg50_input; } daq_report_t;
+static daq_report_t offered[8]; static unsigned offers;
+static void daq_offer_live_report(const daq_report_t *r) { offered[offers++] = *r; }
+''' + offer + r'''
+static daq_bin_output_t chamber_bin, kg1000_pending; static uint8_t kg1000_wait;
+static void cycle(daq_bin_output_t kg1000, daq_bin_output_t chamber_v) {
+ daq_loadcell_bins_t bins = {.kg1000 = kg1000, .chamber_v = chamber_v};
+ daq_report_t report = {.monotonic_ms = 1};
+''' + actual + r'''
+ (void)report;
 }
+static daq_bin_output_t bin(float v, uint64_t ms) { return (daq_bin_output_t){v, ms, 1}; }
+static const daq_bin_output_t none = {0};
 int main(void) {
- prepare(0,0,0);assert(!report.chamber_valid && isnan(report.chamber[0]));
- prepare(1,1,0.015f/11.0f);assert(!report.chamber_valid);
- const uint32_t fresh=1+DAQ_BROADCAST_PERIOD_MS;
- prepare(fresh,1,0.015f/11.0f);
- assert(report.chamber_valid && report.chamber[0]==0 && report.chamber[1]>0);
- const float raw=report.chamber[1];
- prepare(fresh+100,0,0);assert(report.chamber_valid && report.chamber[1]==raw);
- prepare(fresh+101,0,0);assert(!report.chamber_valid && isnan(report.chamber[0]));
- prepare(fresh+110,1,NAN);assert(!report.chamber_valid && isnan(report.chamber[0]));
- prepare(fresh+120,1,INFINITY);assert(!report.chamber_valid && isnan(report.chamber[0]));
- prepare(fresh+130,1,FLT_MAX);assert(!report.chamber_valid && isnan(report.chamber[0]));
- const float voltage=0.025f/11.0f;
- prepare(fresh+140,1,voltage);assert(report.chamber_valid);
- float old=mcp3564r_connector_voltage(6,voltage)*200.0f;
- assert(memcmp(&old,&report.chamber[0],sizeof(float))==0);
+ /* Matching bins in one cycle: one combined report, below-floor psi is 0. */
+ cycle(bin(0.2f, 10), bin(0.015f, 10));
+ assert(offers == 1 && offered[0].chamber_valid && offered[0].chamber[0] == 0 && offered[0].chamber[1] == 0.015f);
+ assert(offered[0].kg1000 == 0.2f && offered[0].kg1000_ms == 10);
+ /* The chamber bin closes one drain later: the KG1000 bin waits for it. */
+ cycle(bin(0.3f, 30), none); assert(offers == 1);
+ cycle(none, bin(1.0f, 30));
+ assert(offers == 2 && offered[1].chamber_valid && offered[1].chamber[0] == 200.0f && offered[1].kg1000_ms == 30);
+ /* No chamber bin within one cycle: the scalar KG1000, never a zero. */
+ cycle(bin(0.4f, 50), none); cycle(none, none);
+ assert(offers == 3 && !offered[2].chamber_valid && offered[2].kg1000 == 0.4f);
+ /* Invalid chamber values are never published as pressure. */
+ cycle(bin(0.5f, 70), bin(NAN, 70));
+ assert(offers == 4 && !offered[3].chamber_valid);
+ cycle(bin(0.6f, 90), bin(FLT_MAX, 90));
+ assert(offers == 5 && !offered[4].chamber_valid);
+ cycle(bin(0.7f, 110), bin(INFINITY, 110));
+ assert(offers == 6 && !offered[5].chamber_valid);
+ /* A stale chamber bin (older centre) never pairs with a newer KG1000 bin. */
+ cycle(bin(0.8f, 150), none); cycle(none, none);
+ assert(offers == 7 && !offered[6].chamber_valid);
+ const float voltage = 0.025f;
+ cycle(bin(0.9f, 170), bin(voltage, 170));
+ float old = voltage * 200.0f;
+ assert(offers == 8 && memcmp(&old, &offered[7].chamber[0], sizeof(float)) == 0);
 }
 ''')
 
@@ -186,18 +204,18 @@ int main(void) {
         source='''#include "daq_rates.h"
 #include "mcp3564r_board_config.h"
 #include <assert.h>
-int main(void) { assert(DAQ_ADC_READ_INTERVAL_US<=180); assert(MCP3564R_BOARD_SCAN==(3U|DAQ_CHAMBER_SCAN_MASK));
- assert(!(MCP3564R_AUX_SCAN&DAQ_CHAMBER_SCAN_MASK));
+int main(void) { assert(DAQ_ACQ_FAST_SCAN==(1U|DAQ_CHAMBER_SCAN_MASK)); assert(DAQ_ACQ_FAST_CHANNELS==2);
+ uint8_t items[DAQ_ACQ_AUX_ROTATION];
+ for (unsigned p=0;p<2;++p) for (unsigned k=0;k<2;++k) { const unsigned n=daq_acq_aux_items(p,k,items);
+   for (unsigned i=0;i<n;++i) assert(!daq_chamber_is_channel(items[i])); }
  assert(daq_chamber_is_channel(DAQ_CHAMBER_ADC_CHANNEL)); }
 '''
         for pin in (6,7):
-            self.compile_run(source,[f'DAQ_CHAMBER_ADC_CHANNEL={pin}','DAQ_ADC_READ_RATE_HZ=5556','DAQ_ADC_OSR=512'])
             self.compile_run(source,[f'DAQ_CHAMBER_ADC_CHANNEL={pin}'])
-            self.compile_run(source,[f'DAQ_CHAMBER_ADC_CHANNEL={pin}','DAQ_ADC_OSR=1024'],valid=False)
         self.compile_run(source,['DAQ_CHAMBER_ADC_CHANNEL=5'],valid=False)
 
     def test_explicit_unassigned_opt_out_preserves_legacy_two_channel_profile(self):
-        self.compile_run('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_CHAMBER_SCAN_MASK==0); assert(!daq_chamber_is_channel(6)); assert(DAQ_ADC_OSR==1024); assert(DAQ_ADC_READ_RATE_HZ==3700);}', ['DAQ_CHAMBER_ADC_CHANNEL=-1'])
+        self.compile_run('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_CHAMBER_SCAN_MASK==0); assert(!daq_chamber_is_channel(6)); assert(DAQ_ACQ_FAST_CHANNELS==1); assert(DAQ_ACQ_FAST_SCAN==1U); assert(DAQ_ADC_READ_RATE_HZ==2500);}', ['DAQ_CHAMBER_ADC_CHANNEL=-1'])
 
     def test_combined_publication_keeps_aggregate_slot_cadence_and_control_isolation(self):
         self.compile_run('''#include "daq_network_schedule.h"
@@ -205,13 +223,16 @@ int main(void) { assert(DAQ_ADC_READ_INTERVAL_US<=180); assert(MCP3564R_BOARD_SC
 int main(void) { daq_network_schedule_t s={0}; unsigned counts[DAQ_NETWORK_STREAMS]={0};
  for(unsigned now=0; now<10000; ++now) {
    for(unsigned k=0;k<DAQ_NETWORK_STREAMS;++k) {
+     if(k==DAQ_NETWORK_KG1000 && now%20) continue;
+     if(k==DAQ_NETWORK_KG50 && now%50) continue;
      float v[]={1,1000,1.25}; assert(daq_network_schedule_offer(&s,k,k,v,k==DAQ_NETWORK_KG1000?3:1,now)>=0);
    }
    unsigned stream; daq_network_sample_t sample;
    if(daq_network_schedule_take(&s,now,&stream,&sample)) {counts[stream]++;if(stream==DAQ_NETWORK_KG1000) assert(sample.count==3);}
  }
  unsigned sum=0;for(unsigned i=0;i<DAQ_NETWORK_STREAMS;++i)sum+=counts[i];
- assert(sum==1000); assert(counts[DAQ_NETWORK_KG1000]==400); assert(counts[DAQ_NETWORK_KG50]==400);
+ /* Every fast and KG50 bin, the rest of the cap to the auxiliary streams. */
+ assert(sum==1000); assert(counts[DAQ_NETWORK_KG1000]==500); assert(counts[DAQ_NETWORK_KG50]==200);
 }''')
 
     def test_raw_sd_path_precedes_network_and_keeps_both_clocks_and_raw_code(self):
@@ -227,9 +248,8 @@ int main(void) { daq_network_schedule_t s={0}; unsigned counts[DAQ_NETWORK_STREA
         self.assertIn('noise_floor_millipsi=%u',logger)
         self.assertIn('noise_floor_rule=finite_raw_psig<floor_millipsi/1000:0',logger)
         self.assertIn('(unsigned)DAQ_CHAMBER_NOISE_FLOOR_MILLIPSI',logger)
-        self.assertIn('chamber_seen = isfinite(chamber[0])',source)
-        self.assertIn('window.count[channel] != 0U',source)
-        self.assertIn('(uint32_t)(report_ms - chamber_sample_ms) <= 100U',source)
+        self.assertIn('chamber_bin.captured_ms == kg1000_pending.captured_ms',source)
+        self.assertIn('kg1000_wait >= 1U',source)
         self.assertIn('Retain this exact record and batch',logger)
 
     def test_wire_contract_is_additive_and_fixed(self):

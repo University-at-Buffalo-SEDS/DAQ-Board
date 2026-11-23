@@ -26,10 +26,15 @@ class RtosAcquisitionClockTests(unittest.TestCase):
         self.assertIn('HAL_GPIO_EXTI_IRQHandler(ADC_IRQ_Pin)',irq)
         self.assertNotIn('HAL_TIM_Base_Start_IT',source)
         self.assertNotIn('TX_TIMER_TICKS_PER_SECOND',source)
-        read=source.split('static HAL_StatusTypeDef mcp3564r_start_read_dma(void)',1)[1].split('static HAL_StatusTypeDef mcp3564r_clear_stale_ready',1)[0]
-        self.assertIn('HAL_SPI_TransmitReceive_DMA',read)
-        self.assertNotRegex(read,r'HAL_SPI_TransmitReceive\s*\(')
-        self.assertNotIn('HAL_Delay',read)
+        # Every interrupt-context SPI transfer (read, configuration, START) goes
+        # through acq_spi, which only starts a DMA; blocking SPI is confined to
+        # the thread-context device setup with the frame engine stopped.
+        interrupt=source.split('/* ---- SPI ----',1)[1].split('/* ---- Thread-context device access',1)[0]
+        self.assertIn('HAL_SPI_TransmitReceive_DMA',interrupt)
+        self.assertNotRegex(interrupt,r'HAL_SPI_TransmitReceive\s*\(')
+        self.assertNotIn('HAL_Delay',interrupt)
+        self.assertNotIn('mcp3564r_blocking(',interrupt)
+        self.assertIn('mcp3564r_timer_irq();',irq)
 
     def test_acquisition_sd_admission_cannot_wait_on_a_shared_allocator(self):
         source=(ROOT/'Core/Src/sd_card.c').read_text()

@@ -17,7 +17,7 @@ Physical wiring, rail capacity, calibration and operating envelope remain unveri
 
 The checked-in default selects `DAQ_CHAMBER_ADC_CHANNEL=6`: the installed
 HVAIN1 input. Explicit `-1` disables chamber conversion and restores scalar
-KG1000 publication plus the legacy OSR1024/read3700 profile. A real zero-pressure
+KG1000 publication; KG1000 is then the only fast channel. A real zero-pressure
 sample remains valid; lack of a sample never creates a zero-pressure reading.
 
 The checked-in schematic sheet 9 traces P4/3 HVAIN1 through R27/R31 (10k/1k),
@@ -27,31 +27,22 @@ outputs are not signal inputs; the PX309 requires 9–30 V excitation, not 3.3 V
 The GPIO enable state does not establish a measured excitation voltage or
 calibrated measurement range; see the README analog-power notes.
 
-The assigned channel joins the unity-gain fast scan and is removed from the
-slow auxiliary scan. It is excluded from the alternate P6 differential gain 16
-scan. Raw chamber conversions use the same owned acquisition FIFO, timestamps,
-and copied SD batches as the load cells.
+The assigned channel is a **fast channel**: it is converted with KG1000 in
+scan A of every 1 ms frame (TIM2-timed, unity gain, AZ_MUX), so it is sampled
+at exactly 1 kHz with a microsecond timestamp, and it never shares a scan with
+the P6 gain-16 slot or the auxiliary rotation. FILL converts the fast pair at
+OSR 128 (192 us per channel), LAUNCH (launch window and its 0.5 s pre-roll) at
+OSR 256 (384 us per channel). Every conversion goes to SD as a
+`chamber_pressure_v` raw record; the network gets the mean of each 20 ms bin of
+the 3-sample running median (50 Hz, in `DAQ_LOADCELL_CHAMBER` with the KG1000
+bin of the same centre). Schedule, bandwidth and latency:
+[data pipeline](data-pipeline.md).
 
-**Settled conversion budget:** polling frequency is not fresh sample rate.
-The MCP3564R SCAN filter settles separately for every channel, and the retained
-AZ_MUX setting doubles conversion time. At 16 MHz MCLK, the legacy OSR1024
-profile takes 1024 us per channel before service overhead. Three channels at
-OSR512 take 768 us each, reducing the two load cells' density. The default is
-therefore OSR256/read5556:384 us per settled channel, nominal 1152 us per
-three-channel cycle before diagnostics and service overhead. Clock, gain,
-auto-zero and calibration scales remain unchanged. OSR256 provides less
-oversampling/noise rejection than OSR1024; equal noise or effective resolution
-is not promised. Physical noise and achieved cadence still need measurement.
-See [MCP3564R SCAN/AZ_MUX and filter timing](https://ww1.microchip.com/downloads/aemDocuments/documents/APID/ProductDocuments/DataSheets/MCP3561_2_4R-Data-Sheet-DS200006391C.pdf).
-
-The production-driver SCAN/DRDY model includes full per-channel settling,
-auxiliary/temperature passes and 2 ms acquisition service. It compares the
-legacy two-channel profile to the default three-channel profile, requires
-at least the original fresh load-cell density, and uses the actual SD enqueue
-routine to verify immutable ownership through a 600 ms writer stall. A deliberate
-acquisition stall must expose exact FIFO overrun accounting. Virtual SPI service
-is instantaneous in this model; hardware CPU timing and real-card bandwidth
-are separate qualification measurements.
+The PX309's response time (under 1 ms) is covered by the 500 Hz Nyquist band of
+the 1 kHz stream. There is no analog anti-alias filter ahead of the ADC; the
+sinc3 conversion window (192 or 384 us) is the only one, so content above
+500 Hz aliases. The fast stream is never smoothed beyond the 3-sample median on
+the published values; SD keeps the unfiltered conversions.
 
 The original 230976-byte variable SD raw pool remains intact. An assertion checks
 that 800 ms of configured raw conversions plus per-batch ownership/allocation

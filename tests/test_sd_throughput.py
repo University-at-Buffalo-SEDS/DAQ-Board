@@ -16,7 +16,10 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 HARNESS = ROOT / 'tests/sd_throughput/harness.c'
-OFFERED = 2410            # bench offered raw records/s
+# Raw records/s offered by the 1 kHz frame schedule: two fast channels and
+# one slot item per frame, plus the launch-window supply pair every 4 ms
+# (DAQ_ADC_READ_RATE_HZ). The former schedule offered 2410/s on the bench.
+OFFERED = 3500
 MARGIN = OFFERED * 3 // 2  # 1.5x target
 
 # Output of the pre-change writer (4 KiB unaligned batches, commit 1e04ec7) for
@@ -35,13 +38,30 @@ LEGACY_NAMES = ((b',kg1000_v,', b',mcp3564r_raw,'), (b',kg50_v,', b',kg50_raw,')
                 (b',chamber_pressure_v,', b',chamber_pressure_raw_volts_psi,'),
                 (b',mcp3564r_ch2_v,', b',mcp3564r_ch2_raw,'), (b',mcp3564r_ch3_v,', b',mcp3564r_ch3_raw,'),
                 (b',valve_pressure_psi,', b',kg1000_network,'),
-                (b',loadcell_input=adc_volts,loadcell_boxcar_ms=4\r\n', b'\r\n'))
+                (b',loadcell_input=adc_volts,loadcell_report=median_bin,kg1000_median=3,kg1000_bin_us=20000,'
+                 b'kg50_median=5,kg50_bin_us=50000,adc_uptime_hz=1000000\r\n', b'\r\n'))
 
 
 def legacy_bytes(data):
     for new, old in LEGACY_NAMES:
         data = data.replace(new, old)
-    return data
+    # MCP3564R rows now carry microsecond uptime_ticks with
+    # uptime_frequency_hz=1000000; the old rows repeated monotonic_ms at 1000.
+    # Raw rows also leave the temperature columns empty while unchanged.
+    lines = data.split(b'\n')
+    temperature = None
+    for i, line in enumerate(lines):
+        fields = line.split(b',')
+        if len(fields) != 13 or b'"' in line:
+            continue
+        if fields[11] == b'1000000':
+            fields[10], fields[11] = fields[1], b'1000'
+        if fields[8] or fields[9]:
+            temperature = fields[8:10]
+        elif temperature is not None:
+            fields[8:10] = temperature
+        lines[i] = b','.join(fields)
+    return b'\n'.join(lines)
 
 
 def filex_source():
@@ -132,9 +152,12 @@ class SdThroughputTest(unittest.TestCase):
         self.assertGreaterEqual(result['sectors_per_write'], 14.0, result['text'])
 
     def test_one_and_a_half_times_offered_rate_across_card_latencies(self):
-        for latency_us in (2000, 6000, 10000, 15000):
+        # 1.5x the offered rate up to 10 ms per card command. The slowest
+        # modelled card (15 ms per command) keeps 1.3x: the 1 kHz schedule
+        # offers 45 % more records than the former 2410/s.
+        for latency_us, rate in ((2000, MARGIN), (6000, MARGIN), (10000, MARGIN), (15000, OFFERED * 13 // 10)):
             with self.subTest(card_command_ms=latency_us / 1000):
-                result = self.run_model(OFFER_RAW_HZ=MARGIN, STALL_MS=400, STALL_PERIOD_MS=4000,
+                result = self.run_model(OFFER_RAW_HZ=rate, STALL_MS=400, STALL_PERIOD_MS=4000,
                                         PROG_FIXED_US=latency_us)
                 self.assert_no_loss(result)
 

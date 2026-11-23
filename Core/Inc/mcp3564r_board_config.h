@@ -3,39 +3,20 @@
 
 #include <stdint.h>
 #include "daq_chamber_pressure.h"
+#include "daq_acq_schedule.h"
 
 /* Schematic sheets 1, 9, 10: P7 -> AMP1 -> CH0; P8 -> AMP2 -> CH1.
  * Both inputs are amplified, ground-referenced outputs. CONFIG0 selects the
  * internal 2.4 V reference, also used for bridge excitation and amplifier bias.
- * CONFIG2 GAIN[2:0]=001 is unity gain, not 16x. */
-#define MCP3564R_BOARD_CONFIG0 0x82U
-#define MCP3564R_BOARD_CONFIG2 0xCFU
-/* CONFIG2.GAIN=101: analog PGA x16, only during P6 CH2-CH3 scan. */
-#define MCP3564R_P6_CONFIG2 0xEFU
-#define MCP3564R_P6_GAIN 16.0f
-#define MCP3564R_BOARD_SCAN (0x000003U | DAQ_CHAMBER_SCAN_MASK) /* CH1, CH0 at the load-cell clock/filter. */
-/* One auxiliary pass per period, then resume the two load cells. */
-#ifndef MCP3564R_AUX_SCAN
-#define MCP3564R_AUX_SCAN (0x0000FCU & ~DAQ_CHAMBER_SCAN_MASK) /* CH2..7, single-ended. Set 0 to disable. */
-#endif
-#if (MCP3564R_AUX_SCAN & ~0x0000FCU) != 0U
-#error "Auxiliary mask must contain only CH2..7"
-#endif
-#define MCP3564R_AUX_INTERVAL_MS 100U
-#define MCP3564R_AUX_TIMEOUT_MS 25U
-/* The die sensor reads about -33 C on this board at 16 MHz, even with long
- * settling and TEMP-only scans. Measure it separately at MCLK/4 = 4 MHz,
- * close to the datasheet's 4.9152 MHz characterization, OSR 256, gain 1.
- * Keep the load-cell clock/filter/gain and voltage calibration unchanged. */
-#define MCP3564R_TEMPERATURE_CONFIG1 0x8cU
-#define MCP3564R_TEMPERATURE_SCAN 0x001000U
-#define MCP3564R_TEMPERATURE_INTERVAL_MS 100U
+ * CONFIG2 GAIN[2:0]=001 is unity gain, not 16x; P6 (CH2-CH3) uses x16.
+ * Scan contents, filters and timing: daq_acq_schedule.h. */
+#define MCP3564R_P6_GAIN DAQ_ACQ_P6_GAIN
 #define MCP3564R_NOMINAL_VREF_V 2.4f
 
-#if ((MCP3564R_BOARD_CONFIG2 >> 3U) & 7U) != 1U
+#if ((DAQ_ACQ_CONFIG2_GAIN1 >> 3U) & 7U) != 1U
 #error "Update ADC voltage conversion when changing the board PGA gain"
 #endif
-#if (MCP3564R_BOARD_CONFIG0 & 0x80U) == 0U
+#if (DAQ_ACQ_CONFIG0_STANDBY & 0x80U) == 0U
 #error "Board voltage conversion requires the internal reference"
 #endif
 

@@ -28,9 +28,10 @@ import webbrowser
 
 ROOT = Path(__file__).resolve().parents[1]
 DEPTH = 128
-RING_OFFSET = 60
+RING_OFFSET = 100
+HAL_OFFSET_OFFSET = 56  # mcp3564r_context_t.hal_offset_us: TIM2 - offset = HAL microseconds
 ENTRY_SIZE = 16
-CONTEXT_SIZE = RING_OFFSET + DEPTH * ENTRY_SIZE
+CONTEXT_SIZE = RING_OFFSET + DEPTH * ENTRY_SIZE + 4  # padded to the 8-byte alignment of now_state_us
 CALIBRATION_WORDS = 17
 CHANNELS = tuple(range(8)) + (9,)
 FIELDS = ['sequence', 'host_unix_ms', 'board_ms', 'channel', 'adc_code',
@@ -149,8 +150,13 @@ def read_stable_ring(debugger, base):
     return stable
 
 
-def decode_ring(payload, head_before, head_after, board_ms, seen):
-    """Decode current16-byte ring entries, excluding changing/stale slots."""
+def decode_ring(payload, head_before, head_after, board_ms, seen, hal_offset_us=0):
+    """Decode current16-byte ring entries, excluding changing/stale slots.
+
+    An entry is (raw32, TIM2 microseconds at the conversion midpoint, frame,
+    flags). The TIM2 time minus hal_offset_us is the HAL microsecond clock, so
+    a sample's age against uwTick is exact while it is under 71 minutes old.
+    The ring no longer carries the die temperature (temperature is None)."""
     if len(payload) != DEPTH * ENTRY_SIZE:
         raise ValueError('Invalid ADC ring layout')
     changing = set()
@@ -164,9 +170,9 @@ def decode_ring(payload, head_before, head_after, board_ms, seen):
         if slot in changing:
             continue
         entry = bytes(payload[slot * ENTRY_SIZE:(slot + 1) * ENTRY_SIZE])
-        word, stamp, temperature, _ = struct.unpack('<IIfi', entry)
+        word, t_us, _frame, _flags = struct.unpack('<IIII', entry)
         channel = word >> 28
-        age = (board_ms - stamp) & 0xFFFFFFFF
+        age = (((board_ms * 1000) - (t_us - hal_offset_us)) & 0xFFFFFFFF) // 1000
         if channel not in CHANNELS or age > 1000 or entry == bytes(ENTRY_SIZE):
             continue
         if seen.get(slot) == entry:
@@ -175,7 +181,7 @@ def decode_ring(payload, head_before, head_after, board_ms, seen):
         code = word & 0x01FFFFFF
         if code & 0x01000000:
             code -= 0x02000000
-        result.append((age, stamp, channel, code, temperature))
+        result.append((age, (board_ms - age) & 0xFFFFFFFF, channel, code, None))
     result.sort(key=lambda item: -item[0])
     return result
 
@@ -320,8 +326,10 @@ class Capture:
             self.calibration, self.counts = list(calibration), counts
             for age, stamp, channel, code, temperature in points:
                 self.sequence += 1
-                voltage, raw, kg = convert(code, channel, calibration, temperature)
-                row = [self.sequence, now - age, stamp, channel, code, voltage, raw, kg, temperature]
+                voltage, raw, kg = convert(code, channel, calibration,
+                                           math.nan if temperature is None else temperature)
+                row = [self.sequence, now - age, stamp, channel, code, voltage, raw, kg,
+                       '' if temperature is None else temperature]
                 self.rows.append(row)
                 self.writer.writerow(row)
             self.file.flush()
@@ -384,7 +392,8 @@ def monitor(capture, args, stop):
                     next_calibration = started + 1
                 # Stable per-block reads allow sampling even if a full scan spans a wrap.
                 if calibration is not None:
-                    points = decode_ring(payload, None, None, tick, seen)
+                    hal_offset = debugger.word(base + HAL_OFFSET_OFFSET)
+                    points = decode_ring(payload, None, None, tick, seen, hal_offset)
                     capture.add(points, calibration, counts)
                 stop.wait(max(0, 1 / args.rate - (time.monotonic() - started)))
         except (OSError, ValueError, RuntimeError, struct.error) as exc:

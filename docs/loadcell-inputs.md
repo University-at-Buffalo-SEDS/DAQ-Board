@@ -9,9 +9,9 @@ maps the load-cell connectors as follows:
 | P8 | AMP2, U11/U12 | CH1 | KG50 |
 
 Both amplifiers accept differential bridge signals and produce voltages
-referenced to ground. The ADC must scan CH0 and CH1 as separate single-ended
-inputs (`SCAN=0x000003`). Selecting CH0 minus CH1 would subtract the outputs
-of two different load cells.
+referenced to ground. The ADC converts CH0 and CH1 as separate single-ended
+inputs (CH0 in the fast scan, CH1 in the slot). Selecting CH0 minus CH1 would
+subtract the outputs of two different load cells.
 
 ## Comparison with the working input
 
@@ -85,35 +85,29 @@ type, or excitation rating.
 ## ADC configuration and voltage units
 
 `CONFIG0=0x82` enables the internal nominal 2.4 V reference. `CONFIG2=0xCF`
-selects PGA gain 1 (`GAIN[2:0]=001`). Both scan channels use that configuration;
-the register is shared. `CONFIG3=0xF0` includes the channel ID and signed
-25-bit result in each 32-bit read. Nominal ADC input voltage is:
+selects PGA gain 1 (`GAIN[2:0]=001`) for both load-cell channels (P6 uses
+0xEF, gain 16, in its own scan). `CONFIG3=0xB0` includes the channel ID and
+signed 25-bit result in each 32-bit read. Nominal ADC input voltage is:
 
 ```text
 volts = signed_code * 2.4 / 8388608
 ```
 
-The shared setup retains the clock, gain, auto-zero and calibration scales.
-The default pressure-enabled profile lowers OSR to preserve fresh load-cell
-density with a third channel; see [chamber pressure](chamber-pressure.md) for
-the noise tradeoff. Explicitly disabled pressure retains the legacy filter:
+Register values per scan (written as one 10-byte burst from CONFIG0 while the
+ADC is in standby; [data pipeline](data-pipeline.md) has the schedule):
 
-
-| Register | Written value | Applies to both inputs |
+| Register | Value | Meaning |
 | --- | --- | --- |
-| CONFIG0 | 0x82, then START makes it 0x83 | Internal reference, external MCLK, bias current sources off |
-| CONFIG1 | 0x0C (legacy 0x14) | MCLK/1, OSR256 (legacy 1024) |
-| CONFIG2 | 0xCF | Gain 1, boost 2, MUX/reference auto-zero enabled |
-| CONFIG3 | 0xF0 | Continuous scan cycles, tagged 32-bit data, hardware calibration off |
-| SCAN | 0x000043 (legacy 0x000003) | CH6 pressure, CH1-AGND and CH0-AGND |
-| TIMER | 0x000000 | No extra delay between scan cycles |
+| CONFIG0 | 0x82, then START makes it 0x83 | Internal reference, external MCLK, standby until START |
+| CONFIG1 | 0x08 FILL fast pair, 0x0C FILL slot / LAUNCH fast pair, 0x04 LAUNCH slot, 0x84 temperature | MCLK/1 (MCLK/4 for TEMP), OSR 128 / 256 / 64 |
+| CONFIG2 | 0xCF (0xEF for P6) | Gain 1 (16), boost 2, MUX auto-zero enabled |
+| CONFIG3 | 0xB0 | One-shot SCAN cycle (back to standby), tagged 32-bit data, no digital calibration |
+| SCAN | 0x000041 fast pair; 0x000002 CH1 (AMP2 KG50); 0x000200 P6; one CH2..7 bit; 0x001000 TEMP | One scan cycle per START |
+| TIMER | 0x000000 | Scan timing comes from TIM2, not the ADC timer |
 
-SCAN overrides the MUX register, so its retained `MUX=0x08` does not restrict
-conversions to CH0. The scanner visits CH6, CH1 then CH0 with pressure enabled, and each result is routed
-by its returned channel ID. The driver sends START once; it does not restart
-the scan at each read. There is no separate CH1 gain/reference/filter register
-to initialize. Auto-zero and scan settling consume conversion time, and the
-two inputs share the available conversion rate.
+SCAN overrides the MUX register. The scanner converts the scan's channels in
+descending order (CH6 then CH0 in the fast pair) and each result is routed by
+its returned channel ID.
 
 The previous voltage calculation included a divide by 16 despite configuring
 gain 1, and used 2.2104 V rather than the nominal internal reference voltage.
@@ -142,22 +136,18 @@ sections 5.6, 5.15, 6.2–6.4, and 8.2–8.8.
 
 ## Software verification
 
-`tests/test_mcp3564r_driver.py` compiles the complete production driver against
-a mocked HAL/SPI boundary. It verifies the actual transmitted register writes,
-identical scaling for identical codes on either channel, sign extension,
-changing CH1 samples with CH0 held constant, ring-buffer wrap, spurious/busy
-PB10 edges, full five-byte DMA ownership, active-low STATUS/address validation,
-scan/configuration races, stale-low recovery, POR register restoration and
-failed/missing DMA completion recovery (including tick wrap and abort failure).
-The DRDY cadence model drives conversions independently of the2 ms worker and
-checks owned SD batches and explicit ring losses during injected worker stalls.
+`tests/test_acq_schedule.py` runs the complete production driver
+(`tests/acq_engine_sim.c`) against a modelled TIM2, SPI DMA, DRDY pin and ADC.
+It verifies the register bursts per scan, strict 1 kHz fast-pair timing in
+both profiles, the slot rotation, spurious DRDY edges, active-low STATUS
+validation and recovery, lost DMA completion recovery, lost DRDY edges and
+the analog-enable failure path.
 The mock supplies
 ADC frames; it does not prove that physical bridge voltages change under load.
 
 `tests/test_kg50_acquisition.py` checks separation of interleaved samples into
-independent averages and calibrated SD records. Both network streams then use
-the same `daq_downsample_add` function and reporting interval, with separate
-state. Both publish raw float32 values and retain their own GS calibration.
+independent averages and calibrated SD records. The network streams use the
+median and microsecond-bin filters of `daq_median.h`, with separate state. Both publish raw float32 values and retain their own GS calibration.
 
 ## Checking a flat reading
 

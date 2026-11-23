@@ -2,39 +2,45 @@
 #define DAQ_RATES_H
 #include <stdint.h>
 #include "daq_chamber_pressure.h"
+#include "daq_acq_schedule.h"
 
 /* Board-local settings. No network variables; rebuild/reflash to change.
- * MCLK is the physical CubeMX MCO output and must match the board clock. */
-#ifndef DAQ_ADC_OSR
-#if DAQ_CHAMBER_SCAN_MASK != 0U
-/* SCAN conversions settle per channel, doubled by AZ_MUX. At16MHz,
- * OSR256 allows three fresh channels without reducing either load cell's
- * former OSR1024/two-channel fresh-sample density. Gain/scale stay unchanged. */
-#define DAQ_ADC_OSR 256U
-#else
-#define DAQ_ADC_OSR 1024U
-#endif
-#endif
-#ifndef DAQ_ADC_READ_RATE_HZ
-#if DAQ_CHAMBER_SCAN_MASK != 0U
-#define DAQ_ADC_READ_RATE_HZ 5556U
-#else
-#define DAQ_ADC_READ_RATE_HZ 3700U
-#endif
-#endif
+ * The MCP3564R frame schedule (conversion instants, OSR, gains) lives in
+ * daq_acq_schedule.h; this file sizes the software around it. docs/
+ * data-pipeline.md has the whole pipeline with diagrams. */
+
+/* Conversions per second reaching the acquisition thread: the fast pair and
+ * one slot item per frame, plus the launch-window supply pair (two ADC1
+ * records every DAQ_SUPPLY_LAUNCH_PERIOD_MS). Sizes batches and SD reserves;
+ * it programs nothing. */
+#define DAQ_ACQ_FRAME_HZ (1000000U / DAQ_ACQ_FRAME_US)
+#define DAQ_ADC_READ_RATE_HZ (DAQ_ACQ_FRAME_HZ * (DAQ_ACQ_FAST_CHANNELS + 1U) + 2U * 1000U / 4U)
+
+/* Acquisition thread period: drains the conversion queue, builds SD records,
+ * runs the report filters. It does not time any conversion. */
 #ifndef DAQ_ACQUISITION_PERIOD_MS
 #define DAQ_ACQUISITION_PERIOD_MS 2U
 #endif
-#ifndef DAQ_BROADCAST_RATE_HZ
-#define DAQ_BROADCAST_RATE_HZ 250U
-#endif
-/* DRDY controls actual reads. This legacy rate setting conservatively sizes
- * acquisition drains/batches; it does not program a timer or ADC conversion.
- * Three-channel defaults also budget settled SCAN time and AZ_MUX above. */
-#if DAQ_CHAMBER_SCAN_MASK != 0U && DAQ_ADC_READ_RATE_HZ < 5556U
-#error "Chamber fast scan requires DAQ_ADC_READ_RATE_HZ>=5556 and a compatible OSR; current settings would slow load cells"
-#endif
-#define DAQ_ADC_MCLK_HZ 16000000U
+
+/* Published (network/display) streams. SD keeps every raw conversion; these
+ * filters only shape what is published. Each report is the mean of one bin
+ * of median-filtered samples, binned on the microsecond sample clock.
+ *
+ * Fast pair (KG1000, chamber PT): 3-sample median (rejects any single-sample
+ * spike, 1 sample = 1 ms delay, a step passes intact), 20 ms bins -> 50 Hz.
+ * Selected KG50: 5-sample median (~2.2 ms delay at ~900 Hz), 50 ms bins ->
+ * 20 Hz; 50 ms is three 60 Hz periods, so mains pickup averages out.
+ * Auxiliary MCP3564R channels: 3-sample median of their ~14 Hz slots,
+ * reported with the 10 Hz analog packet. */
+#define DAQ_FAST_MEDIAN 3U
+#define DAQ_FAST_REPORT_US 20000U
+#define DAQ_KG50_MEDIAN 5U
+#define DAQ_KG50_REPORT_US 50000U
+#define DAQ_AUX_MEDIAN 3U
+_Static_assert(DAQ_FAST_REPORT_US % (DAQ_ACQ_FRAME_US * DAQ_ACQ_AUX_EVERY) == 0U &&
+               DAQ_KG50_REPORT_US % (DAQ_ACQ_FRAME_US * DAQ_ACQ_AUX_EVERY) == 0U,
+               "report bins must hold whole auxiliary rotations (no beat with the schedule)");
+
 /* Board supply (VMAIN/IMON on ADC1) logging period inside the launch window;
  * outside it the supply follows DAQ_ANALOG_REPORT_PERIOD_MS. Two polled
  * conversions (~60 us) per period; 4 ms resolves sub-100 ms supply dips. */
@@ -44,15 +50,21 @@
 #if DAQ_SUPPLY_LAUNCH_PERIOD_MS < DAQ_ACQUISITION_PERIOD_MS || DAQ_SUPPLY_LAUNCH_PERIOD_MS > 10U
 #error "Launch supply period must be from one acquisition period to 10 ms (100 Hz)"
 #endif
+/* The MCP3564R LAUNCH profile follows sd_card_launch_window_active(): from
+ * the same 0.5 s supply pre-roll before the launch window until it closes. */
 /* Temperature must refresh independently of acquisition-loop overruns. */
 #define DAQ_TEMPERATURE_REPORT_PERIOD_MS 100U
-/* Auxiliary channels run at 10 Hz; they do not need the load-cell cadence. */
+/* Auxiliary channels and internal ADCs report at 10 Hz. */
 #ifndef DAQ_ANALOG_REPORT_PERIOD_MS
 #define DAQ_ANALOG_REPORT_PERIOD_MS 100U
 #endif
 #if DAQ_ANALOG_REPORT_PERIOD_MS < 100U || DAQ_ANALOG_REPORT_PERIOD_MS > 1000U
 #error "Auxiliary analog period must be 100..1000 ms"
 #endif
+/* P6 leg pairing window: CH2 and CH3 are converted 10 ms apart. */
+#define DAQ_P6_LEG_PAIR_MS 20U
+/* An auxiliary value older than this is reported as NaN (stale). */
+#define DAQ_AUX_STALE_MS 300U
 /* Acquisition outranks the I/O workers so reporting or SD backlogs cannot
  * consume its service budget. Live I/O workers share a bounded slice; storage
  * runs below them and sleeps for DMA. ADC interrupts remain independent. */
@@ -61,8 +73,7 @@
 #define DAQ_SD_WRITER_THREAD_PRIORITY 7U
 #define DAQ_ACQUISITION_THREAD_PRIORITY 5U
 #define DAQ_IO_THREAD_SLICE_MS 1U
-/* Size each SD batch for the service interval plus bounded scheduling slack.
- * Keeping 96 records per 2 ms slot would waste most of the RAM reserve. */
+/* Records per acquisition cycle plus bounded scheduling slack. */
 #define DAQ_RAW_BATCH_CAPACITY (((DAQ_ADC_READ_RATE_HZ * DAQ_ACQUISITION_PERIOD_MS + 999U) / 1000U) + 4U)
 /* Reserve for intermittent card/filesystem stalls, independent of network
  * cadence. The former 200 ms reserve overflowed during sustained bench runs. */
@@ -75,44 +86,7 @@
 #if DAQ_SD_RAW_QUEUE_DEPTH < 2 || DAQ_SD_RAW_QUEUE_DEPTH > 512
 #error "SD raw reserve must fit between 2 and 512 batches"
 #endif
-
-#if DAQ_ADC_OSR == 32
-#define DAQ_ADC_OSR_BITS 0U
-#elif DAQ_ADC_OSR == 64
-#define DAQ_ADC_OSR_BITS 1U
-#elif DAQ_ADC_OSR == 128
-#define DAQ_ADC_OSR_BITS 2U
-#elif DAQ_ADC_OSR == 256
-#define DAQ_ADC_OSR_BITS 3U
-#elif DAQ_ADC_OSR == 512
-#define DAQ_ADC_OSR_BITS 4U
-#elif DAQ_ADC_OSR == 1024
-#define DAQ_ADC_OSR_BITS 5U
-#elif DAQ_ADC_OSR == 2048
-#define DAQ_ADC_OSR_BITS 6U
-#elif DAQ_ADC_OSR == 4096
-#define DAQ_ADC_OSR_BITS 7U
-#else
-#error "Unsupported DAQ_ADC_OSR (choose a power of two from 32 to 4096)"
+#if DAQ_ACQUISITION_PERIOD_MS < 1 || DAQ_ACQUISITION_PERIOD_MS > 20
+#error "DAQ_ACQUISITION_PERIOD_MS must be from 1 to 20 (the conversion queue holds 42 ms)"
 #endif
-#if DAQ_ADC_READ_RATE_HZ < 1 || DAQ_ADC_READ_RATE_HZ > 12000
-#error "DAQ_ADC_READ_RATE_HZ must be from 1 to 12000"
-#endif
-#if DAQ_ADC_READ_RATE_HZ > DAQ_ADC_MCLK_HZ / (4U * DAQ_ADC_OSR)
-#error "ADC read rate exceeds conversion rate; reduce DAQ_ADC_OSR or read rate"
-#endif
-#if DAQ_ACQUISITION_PERIOD_MS < 1 || DAQ_ACQUISITION_PERIOD_MS > 1000
-#error "DAQ_ACQUISITION_PERIOD_MS must be from 1 to 1000"
-#endif
-#if (DAQ_ADC_READ_RATE_HZ * DAQ_ACQUISITION_PERIOD_MS + 999U) / 1000U > DAQ_RAW_BATCH_CAPACITY
-#error "ADC drain batch too small; reduce DAQ_ACQUISITION_PERIOD_MS"
-#endif
-#if DAQ_BROADCAST_RATE_HZ < 1 || DAQ_BROADCAST_RATE_HZ > 1000 / DAQ_ACQUISITION_PERIOD_MS
-#error "DAQ_BROADCAST_RATE_HZ must not exceed the acquisition service rate"
-#endif
-#define DAQ_ADC_READ_INTERVAL_US ((1000000U + DAQ_ADC_READ_RATE_HZ - 1U) / DAQ_ADC_READ_RATE_HZ)
-/* Datasheet Table 5-15: initial SINC3/SINC1 conversion settling. */
-#define DAQ_ADC_SETTLE_CLOCKS ((DAQ_ADC_OSR <= 512U) ? (3U * DAQ_ADC_OSR) : (DAQ_ADC_OSR + 1024U))
-#define DAQ_ADC_FIRST_CONVERSION_US ((DAQ_ADC_SETTLE_CLOCKS * 1000000ULL * 4U + DAQ_ADC_MCLK_HZ - 1U) / DAQ_ADC_MCLK_HZ + 32U)
-#define DAQ_BROADCAST_PERIOD_MS ((1000U + DAQ_BROADCAST_RATE_HZ - 1U) / DAQ_BROADCAST_RATE_HZ)
 #endif

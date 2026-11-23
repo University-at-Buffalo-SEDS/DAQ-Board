@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "sd_storage_io.h"
+#include "mcp3564r.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -261,18 +262,21 @@ void FDCAN1_IT1_IRQHandler(void)
   /* USER CODE END FDCAN1_IT1_IRQn 1 */
 }
 
-/**
-  * @brief This function handles TIM2 global interrupt.
-  */
 void EXTI10_IRQHandler(void)
 {
   HAL_GPIO_EXTI_IRQHandler(ADC_IRQ_Pin);
 }
 
+/**
+  * @brief This function handles TIM2 global interrupt.
+  */
 void TIM2_IRQHandler(void)
 {
   /* USER CODE BEGIN TIM2_IRQn 0 */
-
+  /* TIM2 is the MCP3564R acquisition clock: frame tick (CC1) and slot
+   * start (CC2), registers serviced directly by the frame engine. */
+  mcp3564r_timer_irq();
+  return;
   /* USER CODE END TIM2_IRQn 0 */
   HAL_TIM_IRQHandler(&htim2);
   /* USER CODE BEGIN TIM2_IRQn 1 */

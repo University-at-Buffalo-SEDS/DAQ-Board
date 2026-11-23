@@ -12,7 +12,7 @@ class Kg50AcquisitionTests(unittest.TestCase):
         source = (ROOT / 'Core/Src/daq_thread.c').read_text()
         drain = source[source.index('typedef struct\n'):source.index('static void daq_store_snapshot_csv')]
         adc = (ROOT / 'Core/Src/mcp3564r.c').read_text()
-        decode = adc[adc.index('static int32_t mcp3564r_decode_code'):adc.index('static void mcp3564r_store_raw32')]
+        decode = adc[adc.index('static int32_t mcp3564r_decode_code'):adc.index('UINT mcp3564r_get_sample')]
         calibration = (ROOT / 'Core/Src/daq_calibration.c').read_text().split('float daq_calibration_apply_kg50', 1)[1]
         harness = r'''
 #include <assert.h>
@@ -25,7 +25,12 @@ class Kg50AcquisitionTests(unittest.TestCase):
 #include "daq_filter.h"
 #include "mcp3564r_board_config.h"
 #include "daq_rates.h"
-#include "daq_downsample.h"
+#include "daq_median.h"
+#include "daq_channel_stats.h"
+static uint32_t primask;
+static uint32_t __get_PRIMASK(void) { return primask; }
+static void __disable_irq(void) { primask = 1U; }
+static void __set_PRIMASK(uint32_t v) { primask = v; }
 #define TX_SUCCESS 0
 #define SD_RAW_CHANNEL_INPUT_VOLTAGE 10U
 #define SD_RAW_CHANNEL_INPUT_CURRENT 11U
@@ -34,7 +39,7 @@ static unsigned g_daq_nonzero_raw_sample_count, g_daq_raw_samples_drained_count;
 typedef struct { float kg1000_slope, kg1000_intercept, iadc_slope, iadc_intercept, kg50[7], thermal[4], filter_tau_ms[2]; } daq_calibration_t;
 typedef struct {
   uint8_t ext_adc_sample_valid, ext_adc_channel;
-  uint64_t ext_adc_monotonic_ms;
+  uint64_t ext_adc_sample_us;
   int32_t ext_adc_code;
   float ext_adc_voltage_v, ext_adc_loadcell_kg1000, ext_adc_temp_c;
   int32_t ext_adc_temp_code;
@@ -45,6 +50,7 @@ typedef struct {
   int32_t code;
   float voltage_v, raw_value, temperature_c;
   int32_t temperature_code;
+  uint64_t sample_us;
 } mcp3564r_sample_t;
 typedef struct {
   uint8_t channel;
@@ -53,6 +59,7 @@ typedef struct {
   int32_t raw_adc_code;
   float raw_value, calibrated_value, adc_temperature_c;
   int32_t adc_temperature_code;
+  uint16_t sample_us;
 } sd_raw_adc_record_t;
 static mcp3564r_sample_t queued[8];
 static unsigned next, queued_count;
@@ -70,11 +77,11 @@ int main(void) {
   daq_calibration_t cal = { .kg1000_slope=2, .kg1000_intercept=1,
                            .kg50={4,3,0,0,0,0,10} };
   daq_snapshot_t snapshot = { .ext_adc_sample_valid=1, .ext_adc_channel=1,
-      .ext_adc_monotonic_ms=90, .ext_adc_code=10,
+      .ext_adc_sample_us=90000, .ext_adc_code=10,
       .ext_adc_voltage_v=1, .ext_adc_loadcell_kg1000=10 };
-  queued[0]=(mcp3564r_sample_t){1,0,91,100,1,100,25,305656};
-  queued[1]=(mcp3564r_sample_t){1,1,92,20,2,20,26,306695};
-  queued[2]=(mcp3564r_sample_t){1,0,93,200,3,200,27,307734};
+  queued[0]=(mcp3564r_sample_t){1,0,91,100,1,100,25,305656,91000};
+  queued[1]=(mcp3564r_sample_t){1,1,92,20,2,20,26,306695,92250};
+  queued[2]=(mcp3564r_sample_t){1,0,93,200,3,200,27,307734,93500};
   queued_count=3;
   sd_raw_adc_record_t records[4];
   daq_loadcell_window_t window;
@@ -88,6 +95,8 @@ int main(void) {
   assert(records[0].calibrated_value==24 && records[0].network_unix_ms==9990);
   assert(records[1].channel==0 && records[1].calibrated_value==201);
   assert(records[1].adc_temperature_c==25 && records[1].adc_temperature_code==305656);
+  /* Microsecond capture time: the sub-millisecond part rides in the record. */
+  assert(records[0].sample_us==0 && records[2].sample_us==250 && records[3].sample_us==500);
   assert(records[2].calibrated_value==54 && records[3].calibrated_value==401);
   assert(g_daq_raw_samples_drained_count==4);
   /* A KG50-only batch cannot become a KG1000 report. */
@@ -130,7 +139,7 @@ int main(void) {
   daq_supply_sample_t supply={.monotonic_ms=95,.input_voltage_v=14.2f,.input_current_a=0.5f,
       .pin_v={1.29f,0.24f},.code={6400,1190}};
   snapshot=(daq_snapshot_t){ .ext_adc_sample_valid=1, .ext_adc_channel=0,
-      .ext_adc_monotonic_ms=94, .ext_adc_loadcell_kg1000=1 };
+      .ext_adc_sample_us=94000, .ext_adc_loadcell_kg1000=1 };
   next=0; queued_count=3;
   assert(daq_drain_ext_adc(&snapshot,records,4,&cal,&window,1,NULL,&supply)==4);
   assert(records[0].channel==0 && records[1].channel==0 && next==1);
@@ -148,7 +157,7 @@ int main(void) {
         with tempfile.TemporaryDirectory() as tmp:
             binary = pathlib.Path(tmp) / 'kg50-test'
             result = subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
-                                     '-I', str(ROOT / 'Core/Inc'), '-x', 'c', '-', '-o', str(binary)],
+                                     '-I', str(ROOT / 'Core/Inc'), '-x', 'c', '-', '-o', str(binary), '-lm'],
                                     input=harness, text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             subprocess.run([str(binary)], check=True)
@@ -161,8 +170,8 @@ int main(void) {
 #include <string.h>
 #include "mcp3564r_board_config.h"
 int main(void) {
-  assert(MCP3564R_BOARD_SCAN == (3U | (1U<<6)));
-  assert(((MCP3564R_BOARD_CONFIG2 >> 3) & 7) == 1);
+  assert(DAQ_ACQ_FAST_SCAN == (1U | (1U<<6)));
+  assert(((DAQ_ACQ_CONFIG2_GAIN1 >> 3) & 7) == 1 && ((DAQ_ACQ_CONFIG2_GAIN16 >> 3) & 7) == 5);
   assert(mcp3564r_code_to_voltage(0) == 0);
   /* AMP2's nominal 0.6 V bias is one quarter of the 2.4 V reference. */
   assert(mcp3564r_code_to_voltage(2097152) == 0.6f);

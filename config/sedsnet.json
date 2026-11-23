@@ -832,7 +832,7 @@
     {
       "rust": "DaqKg50Input",
       "name": "DAQ_KG50_INPUT",
-      "doc": "Managed source: 0 AMP2/CH1, 1 P6 differential CH2-CH3. Selected input uses the fast scan.",
+      "doc": "Managed source: 0 AMP2/CH1, 1 P6 differential CH2-CH3. The selected input takes the MCP3564R slot in nine of every ten 1 ms frames.",
       "reliable": "Ordered",
       "priority": 16,
       "class": "Data",
@@ -896,7 +896,7 @@
     {
       "rust": "DaqLoadcellChamber",
       "name": "DAQ_LOADCELL_CHAMBER",
-      "doc": "One KG1000 network slot: [uncalibrated KG1000, OMEGA PX309-1KG5V chamber psig (connector V * 200), chamber connector volts]. Only fresh assigned pressure; no extra packet slot.",
+      "doc": "Fast-pair network slot, 50 Hz: [uncalibrated KG1000 ADC volts, OMEGA PX309-1KG5V chamber psig (connector V * 200), chamber connector volts]. Each value is the mean of one 20 ms bin of 3-sample-median 1 kHz conversions, stamped at the bin centre; SD keeps the raw conversions.",
       "class": "Data",
       "element": {
         "kind": "Static",
@@ -928,12 +928,12 @@
     {
       "rust": "DaqInputHealth",
       "name": "DAQ_INPUT_HEALTH",
-      "doc": "DAQ live input faults, 1 Hz and early on a new episode: active and latched fault masks, u16 episode counters, VMAIN/chamber/P6 mV, configured levels. Layout in daq_input_faults.h. Warnings only.",
+      "doc": "DAQ live input faults, 1 Hz and early on a new episode (v2): active and latched fault masks, u16 episode counters, VMAIN/chamber/P6 mV, configured levels, per-channel noise/drift, excitation mV, MCP3564R frame-engine counters. Layout in daq_input_faults.h. Warnings only.",
       "class": "Data",
       "element": {
         "kind": "Static",
         "data_type": "UInt32",
-        "count": 10
+        "count": 18
       },
       "endpoints": [
         "ActuatorGroundStation"

@@ -275,7 +275,8 @@ static void offer_raw(uint64_t t)
     const uint64_t seq = ++g_raw_seq;
     batch[i] = (sd_raw_adc_record_t){0U, (uint32_t)(t / 1000U), (uint32_t)seq,
         (int32_t)(4123456 - (int32_t)(seq % 9000U) * 917), 0.123456789f + (float)(seq % 977U) * 1.0e-5f,
-        12.3456789f + (float)(seq % 613U) * 0.01f, 25.0625f, 41234, k_channels[seq % sizeof k_channels]};
+        12.3456789f + (float)(seq % 613U) * 0.01f, 25.0625f, 41234, k_channels[seq % sizeof k_channels],
+        (uint16_t)((t + seq * 333U) % 1000U)};
   }
   g_raw_offered += count;
   if (sd_raw_backlog_records() > g_backlog_peak) g_backlog_peak = sd_raw_backlog_records();

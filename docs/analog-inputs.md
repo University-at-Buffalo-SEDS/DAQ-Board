@@ -65,16 +65,19 @@ NaN and does not prevent the other inputs or external ADC queue from being read.
 The current sensor's unconnected *current path* should nominally report near
 zero amps; open voltage inputs may float and are not detected as disconnected.
 
-MCP CH0/CH1 and the assigned chamber input (default CH6) form the normal scan.
-Every 100 ms, a bounded CH2–7 pass excludes that fast pressure channel, uses the
-same reference, gain, clock and OSR, then restores the normal scan. Temperature has a
-separate, higher-priority slow-clock measurement. The auxiliary pass shares
-conversion time with load cells; their achieved rate must be measured again.
-A 25 ms auxiliary timeout restores the normal scan if a conversion is missing.
-`MCP3564R_AUX_SCAN` in `mcp3564r_board_config.h` can mask individual CH2–7 inputs
-or be zero to disable the auxiliary pass. Unread/stale fields report NaN after
-300 ms. Load cells use the same ADC-pin volts scale (see
-[load-cell inputs](loadcell-inputs.md) for the legacy raw scale).
+KG1000 (CH0) and the assigned chamber input (default CH6) are the fast pair,
+converted in every 1 ms frame. The other MCP inputs share the frame's slot:
+the selected KG50 input in 8 of 10 frames (9 in LAUNCH), the die temperature
+in one (FILL only), and one auxiliary channel in the last, rotating through a
+10-entry list every 100 ms (`daq_acq_aux_items`): CH2 and CH3 (the P6 legs)
+open each half, so each is converted every 50 ms; CH1 (when P6 is the KG50
+input), CH4, CH5 and CH7 fill the other slots, each at least every 100 ms.
+Auxiliary conversions use the same reference and unity gain as the fast pair,
+OSR 256 in FILL and OSR 64 in LAUNCH. SDADC values are the latest 3-sample
+median of each channel (the chamber entry is its 20 ms fast bin), reported at
+10 Hz; a value older than `DAQ_AUX_STALE_MS` (300 ms) reports NaN. Load cells
+use the same ADC-pin volts scale (see [load-cell inputs](loadcell-inputs.md)
+for the legacy raw scale). Schedule and rates: [data pipeline](data-pipeline.md).
 
 Each drained MCP sample is offered to SD with its channel and original timestamp:
 CH0 `kg1000_v`, CH1 `kg50_v`, CH2–7 `mcp3564r_chN_v`. Internal analog
@@ -192,17 +195,14 @@ regressions and ARM builds; physical qualification is still required.
 ## Network and GroundStation
 
 Loadcell report windows and SD mirrors default to **250 records/s each**, with
-a 4 ms downsampling window. `Core/Inc/daq_network_config.h` sets an independent
-**100-packet/s aggregate live sensor cap** and editable stream weights. Both
-loadcells have equal top priority: 40 packets/s each at default weights; the
-five auxiliary streams each get 4 packets/s. One latest NETWORK sample per
-stream is coalesced between sends. ADC acquisition and raw/calibrated SD
+median-filtered report bins (20 ms fast pair, 50 ms KG50).
+`Core/Inc/daq_network_config.h` sets an independent **100-packet/s aggregate
+live sensor cap**. Every fast-pair bin (50/s) and every KG50 bin (20/s) is
+sent; the five auxiliary streams share the remaining slots by weight. One
+latest NETWORK sample per auxiliary stream is coalesced between sends. ADC acquisition and raw/calibrated SD
 records are unchanged. `--network-rate-hz` optionally overrides
 the total; normal builds use the header. Heartbeats/ACKs/control/discovery are
 outside this sensor scheduler.
-
-`cmake -S . -B build/Release_Script -DDAQ_BROADCAST_RATE_HZ=500` enables an
-explicit 500 Hz-per-channel test; use `250` to restore the normal setting.
 
 Acquisition offers loadcell and temperature values straight to the network
 worker's latest-value slots; there is no separate SD report path (the raw
@@ -245,8 +245,9 @@ physical sensor response or real SD/network throughput.
 
 ## Validation status
 
-Host tests cover independent channel selection, nominal scaling, auxiliary scan
-restore/timeout, stale values, wire/layout mappings and queued snapshot ownership.
+Host tests cover independent channel selection, nominal scaling, the frame
+schedule and auxiliary rotation, stale values, wire/layout mappings and queued
+snapshot ownership.
 The production release/factory build succeeds. The local simulator rebuilt from
 FirmwareSimulator `a916318` reports both load-cell streams, 40 analog packets/s,
 and no analog-queue, SD-row or raw-batch drops in the two-second diagnostic run.
@@ -261,17 +262,17 @@ validation remains required, especially for ADC accuracy and sustained throughpu
 GroundStation's 50 kg selector switches between AMP2/P8 (source 0) and P6
 pin 3 (+) minus pin 4 (-), MCP differential scan channel 9 (source 1).
 The managed `DAQ_KG50_INPUT` UInt8 packet (ID 147) selects the source.
-P6 uses CONFIG2=0xEF, PGA **16x**. Since the gain register is shared, its
-single-channel scan alternates with CH0 at unity gain; temperature and auxiliary
-scans also restore unity gain. Configuration changes run only in the acquisition
-thread with DMA idle, followed by the first-conversion settling interval.
+P6 uses CONFIG2=0xEF, PGA **16x**, in its own slot scan after the unity-gain
+fast pair; every configuration change is a DMA burst written while the ADC is
+in standby, followed by a settling gap of at least 10 us before START.
 The nominal differential full-scale range is +/-2.4/16 = +/-0.15 V.
 
 P6 reports `DAQ_KG50_SELECTED` (ID 148), two Float32 values `[1, volts]`, at
-the same 250 Hz reporting target as normal KG50. Input volts divide ADC codes
+the same 20 Hz report rate as normal KG50. Input volts divide ADC codes
 by 16; queued samples retain this conversion after the gain changes again.
-Gain switching costs conversion time, so achieved rates require hardware
-measurement. Source tags let GroundStation reject late packets from another
+Conversion times are modelled (datasheet table 5-15); DAQ_INPUT_HEALTH v2
+words 15-17 report skipped frames/slots and the measured scan end times on
+hardware. Source tags let GroundStation reject late packets from another
 input. The 1000 kg raw coordinate and saved calibration are unchanged.
 
 GroundStation keeps separate mass/temperature/filter profiles for P8 and P6.

@@ -9,10 +9,15 @@ timestamp_ms,monotonic_ms,sensor,value,raw_adc_code,raw_value,calibrated_value,t
 `timestamp_ms` is network UTC when available; otherwise it is boot uptime.
 `time_source` identifies `network` or `local`. `uptime_ticks` is independent of
 network UTC changes and extends the HAL millisecond counter across its 32-bit
-wrap. `uptime_frequency_hz` is the nominal counter scale, currently 1000. It is
-not the CPU frequency or an oscillator calibration. Its resolution is 1 ms;
-multiple ADC samples can share a tick. `monotonic_ms` carries the same elapsed
-time in milliseconds. Uptime resets on reboot; identify separate
+wrap; `uptime_frequency_hz` is its nominal scale (not the CPU frequency or an
+oscillator calibration). DAQ MCP3564R raw rows (load cells, chamber PT,
+auxiliary channels) carry microseconds, `uptime_frequency_hz=1000000`: the
+conversion midpoint on TIM2, which counts from the same clock as the HAL tick,
+so `uptime_ticks / 1000` is `monotonic_ms`. Every other row (ADC1 supply
+records, scalar rows, FC rows) carries milliseconds at 1000. Use
+`uptime_ticks / uptime_frequency_hz` for intervals (for example impulse
+integration); `timestamp_ms` keeps 1 ms resolution. `monotonic_ms` carries the
+elapsed time in milliseconds. Uptime resets on reboot; identify separate
 boots by their files rather than joining uptime values across boots.
 
 `record_sequence` is a per-boot, per-stream counter. Raw DAQ and FC counters
@@ -21,7 +26,13 @@ sample rate. Compare sequences within their own log stream. Raw DAQ records assi
 while serializing. Loss before serialization must be checked with the queue,
 acquisition and storage counters as well as sequence gaps.
 
-DAQ raw rows populate ADC code, raw/calibrated values and ADC temperature.
+DAQ raw rows populate ADC code and raw/calibrated values. Their
+`adc_temperature_c`/`adc_temperature_code` columns are written when the die
+temperature changes, when the writer switches between the session and launch
+logs, and at least every 256 rows (a quarter second at 1 kHz); an empty pair
+means "unchanged since the previous row that had one", so a file's first rows
+may be empty until the next repeat (the
+temperature also has its own 10 Hz `mcp3564r_temp_c` row).
 FC leaves those DAQ-specific columns empty and preserves its complete vector
 in the quoted `value` field, separated by spaces. Text values quote commas,
 quotes and newlines using CSV escaping; use a CSV parser rather than splitting
@@ -56,11 +67,12 @@ ADC records (empty `value`; `raw_adc_code`, `raw_value`, `calibrated_value`):
 | `kg50_p6_v` | MCP3564R CH2-CH3 differential, P6 (gain 16) | input V | input V |
 | `chamber_pressure_v` | chamber PT channel (CH6 or CH7) | connector V | psig |
 | `mcp3564r_ch2_v` .. `mcp3564r_ch7_v` | other MCP3564R inputs | ADC-pin V | connector V |
+| `excitation_v` | HVAIN2 (CH7) when `DAQ_EXCITATION_ADC_CHANNEL=7` (load-cell excitation wired to P4/4) | ADC-pin V | connector V |
 | `input_voltage_v` | VMAIN through VMON, ADC1 (PB2) | VMON pin V | board input V |
 | `input_current_a` | LM74202 IMON, ADC1 (PB1) | IMON pin V | board input A |
 
-`input_voltage_v`/`input_current_a` share the load-cell record stream, clock
-and `record_sequence`. They are written every 100 ms, and every
+`input_voltage_v`/`input_current_a` share the load-cell record stream and
+`record_sequence` (millisecond `uptime_ticks`). They are written every 100 ms, and every
 `DAQ_SUPPLY_LAUNCH_PERIOD_MS` (4 ms) from 0.5 s before the launch window
 until it closes, so supply dips line up with load-cell samples.
 
@@ -73,13 +85,20 @@ drained in one acquisition cycle.
 `valve_pressure_psi` carries VB OX-tank pressure (ADC code and psi).
 
 The SEDSnet `KG1000`/`KG50` values are not stored separately. Each one is the
-mean of one `loadcell_boxcar_ms` bin of `kg1000_v` (or of the selected
-`kg50_v`/`kg50_p6_v`) records, where bin = `uptime_ticks` / bin width. The bin
-is summed in double precision in record order and the quotient is rounded once
-to binary32 (`daq_bin_average_add`), so a reader repeating this on the raw
-records gets the network values bit for bit. A bin closes when the first record
-of a later bin arrives, and the value carries the time of the bin's last record.
-The `# calibration` line gives `loadcell_boxcar_ms`.
+mean of one bin of a running median of `kg1000_v` (or of the selected
+`kg50_v`/`kg50_p6_v`) `raw_value`s: KG1000 a 3-sample median and 20000 us bins,
+KG50 a 5-sample median and 50000 us bins, bin = `uptime_ticks` (us) / bin
+width. The median is taken in record order over the last N values of that
+sensor (fewer at the start); the bin sums the medians in double precision and
+rounds the quotient once to binary32 (`daq_median_add`, `daq_bin_us_add`), so a
+reader repeating this on the raw records gets the network values bit for bit.
+A bin closes when the first record of a later bin arrives; the value is dated
+at the bin centre. The chamber value in `DAQ_LOADCELL_CHAMBER` is built the
+same way from `chamber_pressure_v` (3-sample median, 20000 us bins). The
+`# calibration` line states the filters:
+`loadcell_report=median_bin,kg1000_median=3,kg1000_bin_us=20000,kg50_median=5,kg50_bin_us=50000,adc_uptime_hz=1000000`.
+Files from earlier firmware state `loadcell_boxcar_ms` instead (a 4 ms boxcar
+of the raw records dated at the last record, millisecond `uptime_ticks`).
 
 ### Older files
 

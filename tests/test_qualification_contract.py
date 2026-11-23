@@ -177,12 +177,16 @@ class QualificationContractTests(unittest.TestCase):
         adc = (root / "Core" / "Src" / "mcp3564r.c").read_text(encoding="utf-8")
         header = (root / "Core" / "Inc" / "mcp3564r.h").read_text(encoding="utf-8")
 
-        # The configured filter/OSR and gain remain independent of the
-        # worker cadence; conversion-ready edges drive actual DMA reads.
-        self.assertIn(".config1_reg = (DAQ_ADC_OSR_BITS << 2U)", adc)
+        # Conversions start on the TIM2 frame tick, independent of the worker
+        # cadence; conversion-ready edges drive the DMA reads. The schedule
+        # (OSR, gain, scan) is in daq_acq_schedule.h.
+        schedule = (root / "Core" / "Inc" / "daq_acq_schedule.h").read_text(encoding="utf-8")
+        self.assertIn("daq_acq_config_burst(&fast, burst);", adc)
+        self.assertIn("#define DAQ_ACQ_IRQ 0x06U", schedule)
         self.assertIn("MCP3564R_DMA_FRAME_SIZE (5U)", adc)
-        self.assertIn(".irq_reg = 0x06U", adc)
         self.assertIn("mcp3564r_data_ready_callback(uint16_t pin)", adc)
+        self.assertIn("void mcp3564r_timer_irq(void)", adc)
+        self.assertIn("TIM2->CCR1 = g_mcp3564r.frame_start_us + DAQ_ACQ_FRAME_US;", adc)
         self.assertNotIn("HAL_TIM_Base_Start_IT", adc)
         self.assertIn("MCP3564R_SAMPLE_QUEUE_DEPTH (128U)", adc)
         self.assertIn("overrun_count++", adc)
@@ -201,7 +205,7 @@ class QualificationContractTests(unittest.TestCase):
         # on those same records, so there is no second SD copy to write.
         self.assertNotIn("sd_card_enqueue_csv_row", daq)
         self.assertNotIn("_network\"", daq)
-        self.assertIn("daq_bin_average_add(channel == 0U ? &kg1000_bins : &kg50_bins, raw, captured_uptime,", daq)
+        self.assertIn("daq_report_bin(&kg1000_bin, &kg1000_median, raw, captured_us, DAQ_FAST_REPORT_US,", daq)
         self.assertIn("calibration->kg1000_slope * corrected", daq)
         self.assertIn("const sd_capture_t capture = sd_card_capture_begin(NULL, &calibration);", daq)
         self.assertLess(

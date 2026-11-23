@@ -171,6 +171,14 @@ static int log_telemetry_asynchronous(SedsDataType type,const float *data,size_t
 static void daq_network_offer(unsigned stream,uint32_t type,const float *data,size_t count,uint64_t time){
  (void)stream;(void)time;(void)log_telemetry_asynchronous(type,data,count,sizeof(float));
 }
+/* Latest median-filtered auxiliary values, written by acquisition. */
+static float g_daq_aux_value[8];
+static uint32_t g_daq_aux_ms[8];
+static uint8_t g_daq_aux_valid;
+static uint32_t primask;
+static uint32_t __get_PRIMASK(void){return primask;}
+static void __disable_irq(void){primask=1;}
+static void __set_PRIMASK(uint32_t v){primask=v;}
 ''' + publish + r'''
 int main(void) {
  daq_snapshot_t snapshot={.monotonic_ms=100,.analog_sample_fresh=1,
@@ -178,7 +186,8 @@ int main(void) {
    .input_voltage_v=12,.input_current_a=0.4f};
  for(unsigned i=0;i<8;i++)snapshot.analog_inputs_v[i]=i*0.1f;
  daq_loadcell_window_t window={0};
- window.count[6]=2;window.voltage_sum[6]=1.2f;
+ /* CH6 (chamber) connector volts from its 20 ms bin; CH2 never sampled. */
+ g_daq_aux_value[6]=6.6f;g_daq_aux_ms[6]=100;g_daq_aux_valid=1U<<6;
  daq_publish_analog(&snapshot,&window);
  assert(calls==4 && counts[0]==8 && counts[1]==6 && counts[2]==4 && counts[3]==4);
  assert(isnan(packets[1][0]) && fabsf(packets[1][4]-6.6f)<1e-6f);
@@ -188,7 +197,8 @@ int main(void) {
  snapshot.monotonic_ms=200;daq_publish_analog(&snapshot,&window);
  assert(calls==5 && isfinite(packets[1][4]));
  snapshot.monotonic_ms=401;daq_publish_analog(&snapshot,&window);
- assert(calls==6 && isnan(packets[1][4]));
+ assert(calls==6 && isnan(packets[1][4])); /* older than DAQ_AUX_STALE_MS */
+ assert(!primask);
  assert(g_daq_analog_publish_fail_count==0 && g_daq_analog_publish_ok_count==0); /* offers are not completed sends */
 }
 '''

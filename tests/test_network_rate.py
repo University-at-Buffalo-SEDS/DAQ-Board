@@ -48,7 +48,6 @@ class NetworkRateTests(unittest.TestCase):
 #define SEDS_OK 0
 #define SEDS_IO (-14)
 #define SD_CARD_STATUS_OK 0
-#define MCP3564R_AUX_INTERVAL_MS 100
 #define SEDS_DT_DAQ_LOADCELL_CHAMBER 141
 #define SEDS_DT_KG1000 0
 #define SEDS_DT_KG50 1
@@ -91,7 +90,9 @@ static float expected_value;
 static uint32_t __get_PRIMASK(void){return irq;}
 static void __disable_irq(void){irq=1;}
 static void __set_PRIMASK(uint32_t value){irq=value;}
-static float mcp3564r_connector_voltage(unsigned i,float value){(void)i;return value;}
+static float g_daq_aux_value[8];
+static uint32_t g_daq_aux_ms[8];
+static uint8_t g_daq_aux_valid;
 static int log_telemetry_captured(unsigned type,const void*value,size_t n,size_t width,uint64_t captured){
  assert(!irq && width==sizeof(float) && actual_ms!=last_send_ms);
  last_send_ms=actual_ms;
@@ -129,16 +130,22 @@ static void publish_temperature(float value,uint64_t ms){
  daq_offer_live_report(&report);
 }
 int main(void){
- assert(DAQ_ADC_READ_RATE_HZ==5556 && DAQ_ACQUISITION_PERIOD_MS==2 && DAQ_BROADCAST_PERIOD_MS==4);
+ assert(DAQ_ACQUISITION_PERIOD_MS==2 && DAQ_FAST_REPORT_US==20000 && DAQ_KG50_REPORT_US==50000);
  daq_calibration_t calibration={.kg1000_slope=3,.kg1000_intercept=-7};daq_snapshot_t snapshot={.ext_adc_sample_valid=1};
  daq_loadcell_window_t window={.count={0,0,1}};
- const unsigned weights[7]={DAQ_NETWORK_WEIGHT_KG50,DAQ_NETWORK_WEIGHT_KG1000,DAQ_NETWORK_WEIGHT_TEMPERATURE,
+ const unsigned weights[7]={0,0,DAQ_NETWORK_WEIGHT_TEMPERATURE,
    DAQ_NETWORK_WEIGHT_SDADC,DAQ_NETWORK_WEIGHT_SAR,DAQ_NETWORK_WEIGHT_CURRENT,DAQ_NETWORK_WEIGHT_POWER};
+ unsigned slots_seen=0;
  for(actual_ms=0;actual_ms<10000;actual_ms++){
-  if(actual_ms%4==0){
-   expected_ms=10000+actual_ms;
+  /* One fast-pair bin every 20 ms and one KG50 bin every 50 ms, offered by
+   * acquisition 0-2 ms after the bin closes and stamped at its centre. */
+  if(actual_ms%20==1){
+   expected_ms=10000+actual_ms-11;
    expected_value=100000+(float)expected_ms;snapshot.ext_adc_loadcell_kg1000=expected_value;snapshot.monotonic_ms=expected_ms;
    capture_loadcell(&snapshot,&calibration,NULL);
+  }
+  if(actual_ms%50==2){
+   expected_ms=10000+actual_ms-27;
    expected_value=200000+(float)expected_ms;
    capture_kg50(expected_value,actual_ms>=5000,expected_ms,&calibration);
   }
@@ -148,28 +155,36 @@ int main(void){
    snapshot.analog_inputs_v[0]=400000+(float)expected_ms;
    snapshot.current_sense_v[0]=500000+(float)expected_ms;
    snapshot.power_monitor_v[0]=600000+(float)expected_ms;
-   window.voltage_sum[2]=700000+(float)expected_ms;
+   g_daq_aux_value[2]=700000+(float)expected_ms;g_daq_aux_ms[2]=(uint32_t)expected_ms;g_daq_aux_valid=1U<<2;
    daq_publish_analog(&snapshot,&window);
   }
   daq_network_process_once(actual_ms);
  }
- const unsigned total=10*DAQ_NETWORK_RATE_HZ;
+ (void)slots_seen;
  unsigned sum=0;
- for(unsigned i=0;i<7;i++){
-   sum+=sent[i];const float ideal=(float)(total*weights[i])/DAQ_NETWORK_WEIGHT_TOTAL;
-   assert(fabsf((float)sent[i]-ideal)<=1.0f);
-   assert(g_daq_network_sent[i]==sent[i] && !g_daq_network_failed[i]);
-   assert(g_daq_network_offered[i]==(i<2?2500:100));
-   assert(g_daq_network_coalesced[i]>=g_daq_network_offered[i]-sent[i]-1);
+ for(unsigned i=0;i<7;i++){sum+=sent[i];assert(g_daq_network_sent[i]==sent[i] && !g_daq_network_failed[i]);}
+ /* Every load-cell bin is sent: none replaced before its slot. */
+ assert(sent[DAQ_NETWORK_KG1000]==500 && g_daq_network_offered[DAQ_NETWORK_KG1000]==500 && !g_daq_network_coalesced[DAQ_NETWORK_KG1000]);
+ assert(sent[DAQ_NETWORK_KG50]==200 && g_daq_network_offered[DAQ_NETWORK_KG50]==200 && !g_daq_network_coalesced[DAQ_NETWORK_KG50]);
+ /* The rest of the aggregate cap goes to the auxiliary interleave. */
+ const unsigned total=10*DAQ_NETWORK_RATE_HZ, aux=total-700;
+ /* An interleave slot whose stream has nothing new stays empty (no stream
+  * can borrow another's share), so the total may fall short of the cap. */
+ assert(sum<=total && (float)sum>=700.0f+0.8f*(float)(aux<500?aux:500));
+ for(unsigned i=2;i<7;i++){
+   const float ideal=(float)(aux*weights[i])/DAQ_NETWORK_WEIGHT_TOTAL;
+   const float expect=ideal<100.0f?ideal:100.0f;
+   assert((float)sent[i]<=expect+1.0f && (float)sent[i]>=0.8f*expect);
+   assert(g_daq_network_offered[i]==100);
  }
- assert(sum==total && !g_daq_network_invalid);
- for(unsigned i=0;i<10;i++)assert(buckets[i]==DAQ_NETWORK_RATE_HZ);
+ assert(!g_daq_network_invalid);
+ for(unsigned i=0;i<10;i++)assert(buckets[i]<=DAQ_NETWORK_RATE_HZ && buckets[i]>=70);
  assert(!g_daq_loadcell_publish_fail_count && !g_daq_kg50_publish_fail_count && !g_daq_analog_publish_fail_count);
  /* A paused network worker can emit only one packet when it resumes; newer
   * offers replace NETWORK work (SD holds every raw conversion separately). */
  actual_ms=50000;
  for(unsigned i=0;i<20;i++){
-  expected_ms=59000+i*4;expected_value=100000+(float)expected_ms;
+  expected_ms=59000+i*20;expected_value=100000+(float)expected_ms;
   snapshot.monotonic_ms=expected_ms;snapshot.ext_adc_loadcell_kg1000=expected_value;
   capture_loadcell(&snapshot,&calibration,NULL);
  }
@@ -191,7 +206,7 @@ int main(void){
         self.compile(code)
 
     def test_global_cap_priority_weights_capture_time_and_input_switch(self):
-        for rate in (None, 83, 37):
+        for rate in (None, 83, 150):
             with self.subTest(rate=rate):
                 self.compile(self.harness(), () if rate is None else (f'DAQ_NETWORK_RATE_HZ={rate}',))
 
@@ -216,14 +231,20 @@ int main(void){
         self.compile(code, ('SEDS_FIRMWARE_SIM_TEST=1',))
 
     def test_header_weights_and_disabled_auxiliary_streams(self):
+        # Load-cell weights are unused (their bins have their own slot classes);
+        # disabling some auxiliary streams leaves the others the interleave.
         definitions = ['DAQ_NETWORK_WEIGHT_KG50=3', 'DAQ_NETWORK_WEIGHT_KG1000=1']
-        definitions += ['DAQ_NETWORK_WEIGHT_' + name + '=0' for name in ['TEMPERATURE','SDADC','SAR','CURRENT','POWER']]
-        self.compile(self.harness(), definitions)
+        definitions += ['DAQ_NETWORK_WEIGHT_' + name + '=0' for name in ['TEMPERATURE','SAR','CURRENT']]
+        code = self.harness().replace('assert((float)sent[i]<=expect+1.0f && (float)sent[i]>=0.8f*expect);',
+                                      'assert(weights[i] ? (float)sent[i]<=expect+1.0f && (float)sent[i]>=0.8f*expect : sent[i]==0);')
+        code = code.replace('assert(sum<=total && (float)sum>=700.0f+0.8f*(float)(aux<500?aux:500));', 'assert(sum<=total);')
+        self.compile(code, definitions)
 
     def test_invalid_configurations(self):
         cases = [['DAQ_NETWORK_RATE_HZ=0'], ['DAQ_NETWORK_RATE_HZ=-1'], ['DAQ_NETWORK_RATE_HZ=1001'],
+                 ['DAQ_NETWORK_RATE_HZ=79'],  # must carry every load-cell bin (70/s) plus 10/s
                  ['DAQ_NETWORK_WEIGHT_KG50=1001'], ['DAQ_NETWORK_WEIGHT_POWER=-1']]
-        cases += [['DAQ_NETWORK_WEIGHT_'+n+'=0' for n in ['KG50','KG1000','TEMPERATURE','SDADC','SAR','CURRENT','POWER']]]
+        cases += [['DAQ_NETWORK_WEIGHT_'+n+'=0' for n in ['TEMPERATURE','SDADC','SAR','CURRENT','POWER']]]
         for case in cases:
             self.compile('#include "daq_network_schedule.h"\nint main(void){}', case, False)
 
@@ -236,10 +257,11 @@ int main(void){
   for(unsigned i=0;i<7;i++){float value=(float)elapsed;assert(daq_network_schedule_offer(&s,i,i,&value,1,elapsed)>=0);}
   sent+=daq_network_schedule_take(&s,UINT32_MAX-500+elapsed,&stream,&out);
  }
- assert(sent==370);
+ /* Load-cell slot classes are always waiting here: every slot is sent. */
+ assert(sent==830);
  assert(daq_network_schedule_offer(&s,7,0,out.values,1,0)==-1);
  assert(daq_network_schedule_offer(&s,0,0,out.values,9,0)==-1);
  assert(daq_network_schedule_offer(&s,0,0,0,1,0)==-1);
  s=(daq_network_schedule_t){0};for(unsigned t=0;t<10000;t++)assert(!daq_network_schedule_take(&s,t,&stream,&out));
  assert(sizeof(s)<512);
-}''', ['DAQ_NETWORK_RATE_HZ=37'])
+}''', ['DAQ_NETWORK_RATE_HZ=83'])

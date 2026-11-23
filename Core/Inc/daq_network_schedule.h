@@ -55,14 +55,23 @@ static inline int daq_network_schedule_take(daq_network_schedule_t *s,
         /* A stalled worker gets one slot, never a catch-up burst. */
         s->credit = credit >= 2000U ? 0U : (uint16_t)(credit - 1000U);
     }
-    /* Smooth weighted interleave. Empty scheduled slots stay empty: another
-     * stream cannot steal bandwidth or exceed the aggregate cap. */
+    /* Slot classes: a waiting fast-pair bin, then a waiting KG50 bin, then the
+     * smooth weighted interleave of the auxiliary streams. An empty
+     * interleave slot stays empty: no stream exceeds the aggregate cap. */
+    unsigned selected = DAQ_NETWORK_STREAMS;
+    if (s->latest[DAQ_NETWORK_KG1000].pending) selected = DAQ_NETWORK_KG1000;
+    else if (s->latest[DAQ_NETWORK_KG50].pending) selected = DAQ_NETWORK_KG50;
+    if (selected != DAQ_NETWORK_STREAMS) {
+        *stream = selected;
+        *sample = s->latest[selected];
+        s->latest[selected].pending = 0U;
+        return 1;
+    }
     static const uint16_t weights[DAQ_NETWORK_STREAMS] = {
-        DAQ_NETWORK_WEIGHT_KG50, DAQ_NETWORK_WEIGHT_KG1000, DAQ_NETWORK_WEIGHT_TEMPERATURE,
+        0U, 0U, DAQ_NETWORK_WEIGHT_TEMPERATURE,
         DAQ_NETWORK_WEIGHT_SDADC, DAQ_NETWORK_WEIGHT_SAR, DAQ_NETWORK_WEIGHT_CURRENT,
         DAQ_NETWORK_WEIGHT_POWER
     };
-    unsigned selected = DAQ_NETWORK_STREAMS;
     for (unsigned i = 0; i < DAQ_NETWORK_STREAMS; ++i) {
         if (weights[i] == 0U) continue;
         s->current[i] += weights[i];

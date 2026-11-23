@@ -133,7 +133,7 @@ UINT daq_board_sample(daq_snapshot_t *snapshot)
   snapshot->ext_adc_channel = ext_adc_sample.channel;
   snapshot->ext_adc_sample_valid = ext_adc_sample.sample_valid;
   snapshot->ext_adc_dma_busy = ext_adc_sample.dma_busy;
-  snapshot->ext_adc_monotonic_ms = ext_adc_sample.monotonic_ms;
+  snapshot->ext_adc_sample_us = ext_adc_sample.sample_us;
   snapshot->ext_adc_code = ext_adc_sample.code;
   snapshot->ext_adc_voltage_v = ext_adc_sample.voltage_v;
   snapshot->ext_adc_loadcell_kg1000 = ext_adc_sample.raw_value;

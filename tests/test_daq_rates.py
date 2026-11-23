@@ -47,42 +47,33 @@ class DaqRateTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
 
     def test_default_and_fast_settings(self):
-        self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_ADC_OSR_BITS == 3); assert(DAQ_ADC_READ_INTERVAL_US == 180); assert(DAQ_BROADCAST_PERIOD_MS == 4); assert(DAQ_ACQUISITION_PERIOD_MS == 2); assert(DAQ_SD_RAW_QUEUE_DEPTH == 401); assert(DAQ_RAW_BATCH_CAPACITY == 16);}')
-        self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_ADC_OSR_BITS == 5); assert(DAQ_ADC_READ_INTERVAL_US == 271); assert(DAQ_BROADCAST_PERIOD_MS == 4); assert(DAQ_ACQUISITION_PERIOD_MS == 2); assert(DAQ_SD_RAW_QUEUE_DEPTH == 401); assert(DAQ_RAW_BATCH_CAPACITY == 12);}', ['DAQ_CHAMBER_ADC_CHANNEL=-1'])
-        self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_ADC_OSR_BITS == 3); assert(DAQ_ADC_READ_INTERVAL_US == 84); assert(DAQ_BROADCAST_PERIOD_MS == 100);}',
-                     ['DAQ_ADC_OSR=256', 'DAQ_ADC_READ_RATE_HZ=12000', 'DAQ_ACQUISITION_PERIOD_MS=5', 'DAQ_BROADCAST_RATE_HZ=10'])
+        # 1 kHz frames: two fast conversions plus one slot item, plus the
+        # launch-window supply pair every 4 ms (sizing only).
+        self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_ACQ_FRAME_HZ == 1000); assert(DAQ_ADC_READ_RATE_HZ == 3500); assert(DAQ_ACQUISITION_PERIOD_MS == 2); assert(DAQ_SD_RAW_QUEUE_DEPTH == 401); assert(DAQ_RAW_BATCH_CAPACITY == 11); assert(DAQ_FAST_REPORT_US == 20000); assert(DAQ_KG50_REPORT_US == 50000);}')
+        self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_ACQ_FAST_CHANNELS == 1); assert(DAQ_ADC_READ_RATE_HZ == 2500);}', ['DAQ_CHAMBER_ADC_CHANNEL=-1'])
 
     def test_unsafe_configurations_fail_compilation(self):
-        for defines in [['DAQ_ADC_READ_RATE_HZ=0'], ['DAQ_ADC_READ_RATE_HZ=12000', 'DAQ_ADC_OSR=1024'],
-                        ['DAQ_SD_RAW_BUFFER_MS=2000'],
-                        ['DAQ_BROADCAST_RATE_HZ=1000'], ['DAQ_ADC_OSR=123']]:
+        for defines in [['DAQ_SD_RAW_BUFFER_MS=2000'], ['DAQ_ACQUISITION_PERIOD_MS=0'],
+                        ['DAQ_ACQUISITION_PERIOD_MS=21'], ['DAQ_ACQ_FRAME_US=900'], ['DAQ_ACQ_FRAME_US=1100']]:
             with self.subTest(defines=defines):
                 self.compile('#include "daq_rates.h"\nint main(void) {}', defines, False)
 
-    def test_report_phase_survives_scheduler_jitter(self):
-        self.compile(r'''#include "daq_downsample.h"
-#include <assert.h>
-int main(void) {
-  daq_downsample_t s = {0}; float out;
-  assert(!daq_downsample_add(&s, 1, 1, 0, 20, &out));
-  for (unsigned i = 1; i <= 50; ++i)
-    assert(daq_downsample_add(&s, 1, 1, i*20 + (i%2), 20, &out));
-  assert(daq_downsample_add(&s, 1, 1, 2000, 20, &out));
-  assert(!daq_downsample_add(&s, 1, 1, 2001, 20, &out));
-}''')
-
-    def test_250_hz_reports_each_second_without_catchup_bursts(self):
-        self.compile(r'''#include "daq_downsample.h"
+    def test_report_bins_per_second_without_catchup_bursts(self):
+        # 1 kHz conversions: 50 fast-pair bins and 20 KG50 bins per second, each
+        # stamped at its bin centre; a gap produces one late bin, no burst.
+        self.compile(r"""#include "daq_median.h"
 #include "daq_rates.h"
 #include <assert.h>
 int main(void) {
-  daq_downsample_t state = {0}; float out; unsigned reports = 0;
-  for (unsigned ms=0; ms<=1000; ms+=DAQ_ACQUISITION_PERIOD_MS)
-    reports += daq_downsample_add(&state, 1, 1, ms, DAQ_BROADCAST_PERIOD_MS, &out);
-  assert(reports == 250);
-  assert(daq_downsample_add(&state, 1, 1, 2000, DAQ_BROADCAST_PERIOD_MS, &out));
-  assert(!daq_downsample_add(&state, 1, 1, 2001, DAQ_BROADCAST_PERIOD_MS, &out));
-}''')
+  daq_bin_us_t fast = {0}, kg50 = {0}; daq_bin_out_t out; unsigned f = 0, k = 0;
+  for (uint64_t us = 1000000; us < 2000000; us += 1000) {
+    if (daq_bin_us_add(&fast, 1.0f, us + 288, DAQ_FAST_REPORT_US, &out)) { ++f; assert(out.centre_us % 20000 == 10000 && out.count == 20); }
+    if (daq_bin_us_add(&kg50, 2.0f, us + 600, DAQ_KG50_REPORT_US, &out)) { ++k; assert(out.centre_us % 50000 == 25000 && out.count == 50); }
+  }
+  assert(f == 49 && k == 19); /* the last bins close at the next sample */
+  assert(daq_bin_us_add(&fast, 3.0f, 5000000, DAQ_FAST_REPORT_US, &out) && out.mean == 1.0f);
+  assert(!daq_bin_us_add(&fast, 3.0f, 5001000, DAQ_FAST_REPORT_US, &out));
+}""")
 
     def test_power_loss_does_not_throttle_reporting(self):
         source = (ROOT / "Core/Src/daq_thread.c").read_text()
@@ -90,67 +81,17 @@ int main(void) {
         self.assertNotIn("tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND / 10U)", source)
         self.assertIn("tx_thread_sleep(DAQ_SAMPLE_PERIOD_TICKS - elapsed)", source)
 
-    def test_weighting_noise_rejection_and_clock_wrap(self):
-        self.compile(r'''#include "daq_downsample.h"
-#include <assert.h>
-int main(void) {
-  daq_downsample_t state = {0}; float out = 0;
-  assert(!daq_downsample_add(&state, 2, 3, 0, 20, &out));
-  assert(daq_downsample_add(&state, 10, 1, 20, 20, &out));
-  assert(out == 4); /* Weighted samples, not an average of batch averages. */
-  state = (daq_downsample_t){0};
-  for (unsigned i=0; i<100; ++i)
-    assert(!daq_downsample_add(&state, (i&1) ? 101 : 99, 1, i, 100, &out));
-  assert(daq_downsample_add(&state, NAN, 1, 100, 100, &out));
-  assert(out == 100 && state.count == 0); /* Noise averaged, NaN excluded. */
-  state = (daq_downsample_t){0};
-  assert(!daq_downsample_add(&state, 7, 1, UINT32_MAX-9, 20, &out));
-  assert(daq_downsample_add(&state, 7, 1, 10, 20, &out));
-  assert(out == 7);
-}
-''')
-
     def test_supply_launch_period_defaults_and_bounds(self):
         self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_SUPPLY_LAUNCH_PERIOD_MS == 4);}')
         self.compile('#include "daq_rates.h"\n#include <assert.h>\nint main(void) {assert(DAQ_SUPPLY_LAUNCH_PERIOD_MS == 5);}',
-                     ['DAQ_ACQUISITION_PERIOD_MS=5', 'DAQ_BROADCAST_RATE_HZ=10'])
+                     ['DAQ_ACQUISITION_PERIOD_MS=5'])
         for value in ('1', '11'):
             self.compile('#include "daq_rates.h"\nint main(void) {}', ['DAQ_SUPPLY_LAUNCH_PERIOD_MS=' + value], False)
-
-    def test_loadcell_bins_are_fixed_on_uptime_and_close_on_the_next_bin(self):
-        self.compile(r'''#include "daq_downsample.h"
-#include <assert.h>
-#include <string.h>
-int main(void) {
-  daq_bin_average_t s = {0}; float out = 0; uint64_t at = 0;
-  /* Bin [8,12): 9, 9, 11 ms. The first sample of [12,16) closes it. */
-  assert(!daq_bin_average_add(&s, 1.0f, 9, 4, &out, &at));
-  assert(!daq_bin_average_add(&s, 2.0f, 9, 4, &out, &at));
-  assert(!daq_bin_average_add(&s, NAN, 10, 4, &out, &at)); /* skipped */
-  assert(!daq_bin_average_add(&s, 6.0f, 11, 4, &out, &at));
-  assert(daq_bin_average_add(&s, 100.0f, 12, 4, &out, &at));
-  assert(out == 3.0f && at == 11);
-  /* A gap of several bins emits once, then starts the new bin. */
-  assert(daq_bin_average_add(&s, 7.0f, 40, 4, &out, &at));
-  assert(out == 100.0f && at == 12);
-  /* Double sum in order, one binary32 rounding of sum/count. */
-  s = (daq_bin_average_t){0};
-  const float v[] = {0.1f, 0.2f, 0.30000001f};
-  double sum = 0;
-  for (unsigned i = 0; i < 3; ++i) { sum += (double)v[i]; assert(!daq_bin_average_add(&s, v[i], 100 + i, 4, &out, &at)); }
-  assert(daq_bin_average_add(&s, 0, 104, 4, &out, &at));
-  const float expected = (float)(sum / 3);
-  assert(memcmp(&out, &expected, sizeof(out)) == 0 && at == 102);
-  /* 64-bit uptime past the 32-bit HAL wrap keeps fixed bins. */
-  s = (daq_bin_average_t){0};
-  assert(!daq_bin_average_add(&s, 1, UINT64_C(0x100000000) - 1, 4, &out, &at));
-  assert(daq_bin_average_add(&s, 1, UINT64_C(0x100000000), 4, &out, &at));
-}''')
 
     def test_temperature_publication_uses_elapsed_time_not_loop_count(self):
         source = (ROOT / 'Core/Src/daq_thread.c').read_text()
         block = source[source.index('    const uint32_t report_ms ='):
-                       source.index('    /* Pressure shares', source.index('    const uint32_t report_ms ='))]
+                       source.index('    /* The chamber PT shares', source.index('    const uint32_t report_ms ='))]
         self.compile(r'''#include <stdint.h>
 #include <assert.h>
 #include "daq_rates.h"

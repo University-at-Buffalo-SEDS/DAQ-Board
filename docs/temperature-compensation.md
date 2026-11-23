@@ -32,15 +32,16 @@ legacy points; use live capture for temperature-aware calibration.
 
 ## Acquisition and wire contract
 
-MCP3564R normally scans CH6 (chamber), CH1 and CH0 at the existing 16 MHz
-clock and OSR256. Explicitly disabling the chamber input restores the legacy
-CH1/CH0 OSR1024 profile.
-Every 100 ms, the acquisition thread briefly selects TEMP only (bit 12,
-channel ID 12), with the clock prescaled to 4 MHz and OSR 256. After one TEMP
-result it restores the load-cell scan, clock, and filter. Gain remains unity.
+The die temperature is one slot item of the 1 ms frame schedule (FILL only):
+frame 8 of every 10, so once every 10 ms, TEMP only (bit 12, channel ID 12)
+with the clock prescaled to MCLK/4 and OSR 64, unity gain. Its fixed place in
+every 10 ms pattern makes any settling it causes repeat at 100 Hz, which the
+20 ms and 50 ms report bins average out. The LAUNCH profile has no
+temperature conversion; the last value stays valid for 60 s instead of 2 s.
 The first-order datasheet conversion is
 `T = 0.00040096 * code * 2.4 - 269.13` (Celsius). Invalid/out-of-range readings
-(outside -40..125 C), or readings older than 2 s, are unavailable. Each queued
+(outside -40..125 C), or readings older than 2 s (60 s in LAUNCH), are
+unavailable. Each queued
 load sample retains its acquisition-time temperature. Temperature measurements
 are never queued as a load cell.
 
