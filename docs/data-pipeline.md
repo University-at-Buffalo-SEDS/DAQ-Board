@@ -18,7 +18,7 @@ Related pages:
 
 - [sd-record-format.md](sd-record-format.md): CSV columns and sensor names.
 - [sd-log-sessions.md](sd-log-sessions.md): session and launch files.
-- [sd-network-download.md](sd-network-download.md): SD file download.
+- [sd-network-download.md](sd-network-download.md): SD file transfer (protocol v2).
 - [loadcell-inputs.md](loadcell-inputs.md), [chamber-pressure.md](chamber-pressure.md),
   [analog-inputs.md](analog-inputs.md): wiring and scaling.
 - [dac-validation.md](dac-validation.md): the DAC signal generator. See the DAC generator section below.
@@ -59,7 +59,7 @@ flowchart LR
   LINEQ --> W
   W --> FILES["DAQ_*.CSV session file<br/>DAQ_LAUNCH_*.CSV launch file"]
   NET -->|"CAN FD"| GB["gateway -> Pico-Fi"] --> GS["Ground Station"]
-  FILES -.->|"SD stream, port 4511<br/>after the launch, 16 KiB/s"| GS
+  FILES -.->|"SD transfer v2, port 4511<br/>after the launch, SDX-encoded"| GS
   GS --> REC["rolling segments, event captures,<br/>board_sd attachments, lead-up"]
 ```
 
@@ -524,12 +524,21 @@ writer and FileX against a virtual card, with a 400 ms stall every 4 s):
 
 **On the GS.**
 
-- After a launch capture, the GS downloads `/LAUNCH` over the fill link at
-  16 KiB/s. A ~30 s launch file of ≈ 13 MB takes about 14 min (former:
-  ≈ 10 MB, 10 min).
-- The 60 s lead-up from the session file is cut by range reads at 8 KiB/s
-  (≈ 22 MB of rows in that window). It comes from a local copy when one
-  exists.
+- The GS copies files over SEDSnet P2P port 4511 with SD transfer protocol
+  v2 (GroundStation26 `docs/backend/sd-transfer.md`; DAQ side in
+  [sd-network-download.md](sd-network-download.md)): LIST, then OPEN of a
+  byte range, after which the DAQ streams DATA messages of up to 1 KiB at the
+  rate and window the station sets, and the station answers with selective
+  ACKs. Each block of 1–64 KiB is independent and carries its CRC-32; only
+  missing messages are regenerated. SDX encodes the CSV rows losslessly at
+  about a quarter of their size on the wire; the card keeps CSV. A HASH
+  (SHA-256 of the file on the card) confirms the finished copy.
+- The DAQ serves only in Idle, Landed or Recovery, in otherwise idle SD writer
+  turns, never while a launch file is open or its close flush is pending.
+- After a launch capture, the GS downloads `/LAUNCH` over the fill link. A
+  ~30 s launch file of ≈ 13 MB is about 3 MB on the wire.
+- The 60 s lead-up from the session file is cut by range reads (≈ 22 MB of
+  rows in that window). It comes from a local copy when one exists.
 - See GroundStation26 `docs/data-pipeline.md` §3.3–3.5.
 
 ## 8. Network
