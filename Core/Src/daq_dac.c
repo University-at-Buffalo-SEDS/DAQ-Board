@@ -73,6 +73,22 @@ volatile uint32_t g_daq_dac_status_failed __attribute__((used));
 volatile uint32_t g_daq_dac_table_chunks __attribute__((used));
 volatile uint32_t g_daq_dac_table_rejected __attribute__((used));
 
+/* DAC state is shared only between threads (service, router, acquisition),
+ * never with an interrupt handler. Masking NVIC priorities 1 and below
+ * (BASEPRI) excludes every context switch while the priority-0 acquisition
+ * interrupts (TIM2 frame engine, SPI2 and its GPDMA channels 0-3) keep their
+ * latency: no DAC critical section can delay a 1 ms frame. */
+static inline uint32_t dac_lock(void)
+{
+  const uint32_t previous = __get_BASEPRI();
+  __set_BASEPRI_MAX(1U << (8U - __NVIC_PRIO_BITS));
+  __DSB();
+  __ISB();
+  return previous;
+}
+
+static inline void dac_unlock(uint32_t previous) { __set_BASEPRI(previous); }
+
 static uint32_t timer_clock_hz(unsigned c)
 {
   const uint32_t pclk = c == 0U ? HAL_RCC_GetPCLK1Freq() : HAL_RCC_GetPCLK2Freq();
@@ -87,20 +103,22 @@ static uint32_t timer_clock_hz(unsigned c)
 static void hw_stop(unsigned c)
 {
   const uint32_t shift = c == 0U ? 0U : 16U;
-  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  const uint32_t mask = dac_lock();
   if (g_hw_active & (1U << c)) k_tim[c]->CR1 &= ~TIM_CR1_CEN;
   DAC1->CR &= ~((DAC_CR_EN1 | DAC_CR_DMAEN1 | DAC_CR_TEN1 | DAC_CR_TSEL1) << shift);
   DMA_Channel_TypeDef *dma = k_dma[c];
   if (dma->CCR & DMA_CCR_EN) {
     dma->CCR |= DMA_CCR_SUSP;
-    for (unsigned i = 0U; i < 1000U && (dma->CSR & DMA_CSR_SUSPF) == 0U; ++i) {}
+    /* Timer and DMAEN are already off, so no request is in flight and the
+     * suspend acknowledges at once; the bound only guards a faulted channel. */
+    for (unsigned i = 0U; i < 64U && (dma->CSR & DMA_CSR_SUSPF) == 0U; ++i) {}
   }
   dma->CCR = DMA_CCR_RESET;
   dma->CFCR = DAQ_DAC_DMA_FLAGS;
   g_hw_active &= (uint8_t)~(1U << c);
   g_output_v[c] = NAN;
   g_readback_v[c] = NAN;
-  __set_PRIMASK(mask);
+  dac_unlock(mask);
   ++g_daq_dac_stops;
 }
 
@@ -153,13 +171,13 @@ static bool hw_start(unsigned c, const daq_dac_plan_t *plan, const uint16_t *src
 
   /* An abort or flight-state change that raced this start wins: it already
    * stopped the hardware, or it stops it before the timer runs. */
-  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  const uint32_t mask = dac_lock();
   const bool killed = g_kill_reason != 0U;
   if (!killed) {
     g_hw_active |= (uint8_t)(1U << c);
     if (plan->samples > 1U) k_tim[c]->CR1 |= TIM_CR1_CEN;
   }
-  __set_PRIMASK(mask);
+  dac_unlock(mask);
   if (killed) hw_stop(c);
   else ++g_daq_dac_starts;
   return true;
@@ -189,9 +207,9 @@ UINT daq_dac_sample(daq_dac_sample_t *sample, uint8_t read_back)
     const bool ok = daq_adc4_read_internal(k_adc_channel[c], &readback) == TX_SUCCESS;
     g_readback_ok = ok ? 1U : 0U;
     /* Store only while still active, so a concurrent stop leaves NaN. */
-    const uint32_t mask = __get_PRIMASK(); __disable_irq();
+    const uint32_t mask = dac_lock();
     if (g_hw_active & (1U << c)) { g_output_v[c] = output; g_readback_v[c] = ok ? readback : NAN; }
-    __set_PRIMASK(mask);
+    dac_unlock(mask);
   }
   return TX_SUCCESS;
 }
@@ -201,7 +219,7 @@ void daq_dac_submit_command(const uint8_t *payload, size_t len)
   daq_dac_command_t command;
   if (daq_dac_command_decode(payload, len, &command) != 0) { ++g_daq_dac_malformed; return; }
   ++g_daq_dac_commands;
-  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  const uint32_t mask = dac_lock();
   if (command.channel == DAQ_DAC_CHANNEL_ALL) {
     g_pending_mask = 0U; /* Older per-channel requests are superseded. */
     g_pending_all_off = 1U;
@@ -210,14 +228,14 @@ void daq_dac_submit_command(const uint8_t *payload, size_t len)
     g_pending[command.channel] = command;
     g_pending_mask |= (uint8_t)(1U << command.channel);
   }
-  __set_PRIMASK(mask);
+  dac_unlock(mask);
 }
 
 void daq_dac_submit_table(const uint8_t *payload, size_t len)
 {
   daq_dac_table_msg_t msg;
   if (daq_dac_table_decode(payload, len, &msg) != 0) { ++g_daq_dac_table_rejected; return; }
-  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  const uint32_t mask = dac_lock();
   if (msg.op == DAQ_DAC_TABLE_OP_DATA) {
     /* Only a LOADING shape accepts chunks; the DMA reads the channels' own
      * play tables, never the shape. */
@@ -227,16 +245,16 @@ void daq_dac_submit_table(const uint8_t *payload, size_t len)
     g_table_op = msg; /* Latest control op wins; the station repeats it. */
     g_table_op_pending = 1U;
   }
-  __set_PRIMASK(mask);
+  dac_unlock(mask);
 }
 
 void daq_dac_emergency_off(uint8_t reason)
 {
-  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  const uint32_t mask = dac_lock();
   if (g_kill_reason == 0U) g_kill_reason = reason;
   g_pending_mask = 0U; /* Requests from before the abort never start later. */
   g_pending_all_off = 0U;
-  __set_PRIMASK(mask);
+  dac_unlock(mask);
   for (unsigned c = 0U; c < DAQ_DAC_CHANNELS; ++c) hw_stop(c);
   ++g_daq_dac_emergency_offs;
 }
@@ -309,11 +327,11 @@ static bool service_table(void)
   static uint8_t last_state;
   static uint64_t last_chunks;
   daq_dac_table_msg_t op;
-  uint32_t mask = __get_PRIMASK(); __disable_irq();
+  uint32_t mask = dac_lock();
   const uint8_t pending = g_table_op_pending;
   op = g_table_op;
   g_table_op_pending = 0U;
-  __set_PRIMASK(mask);
+  dac_unlock(mask);
   if (pending && (op.op == DAQ_DAC_TABLE_OP_BEGIN || op.op == DAQ_DAC_TABLE_OP_CLEAR)) {
     /* A repeated BEGIN for the upload in progress changes nothing. */
     const bool repeat = op.op == DAQ_DAC_TABLE_OP_BEGIN && g_tab.state == DAQ_DAC_TABLE_LOADING &&
@@ -321,21 +339,21 @@ static bool service_table(void)
                         g_tab.expected_crc == op.value;
     if (!repeat) {
       /* Running arbitrary outputs keep playing their own scaled copies. */
-      mask = __get_PRIMASK(); __disable_irq();
+      mask = dac_lock();
       if (op.op == DAQ_DAC_TABLE_OP_BEGIN) daq_dac_table_begin(&g_tab, op.upload_id, op.index, op.value);
       else daq_dac_table_clear(&g_tab);
-      __set_PRIMASK(mask);
+      dac_unlock(mask);
     }
   } else if (pending && op.op == DAQ_DAC_TABLE_OP_COMMIT) {
-    mask = __get_PRIMASK(); __disable_irq();
+    mask = dac_lock();
     const int verify = daq_dac_table_commit_begin(&g_tab, op.upload_id, op.index, op.value);
-    __set_PRIMASK(mask);
+    dac_unlock(mask);
     if (verify) daq_dac_table_commit_finish(&g_tab); /* Chunk writes now refused. */
   }
-  mask = __get_PRIMASK(); __disable_irq();
+  mask = dac_lock();
   const uint8_t state_now = g_tab.state;
   const uint64_t chunks_now = g_tab.chunks;
-  __set_PRIMASK(mask);
+  dac_unlock(mask);
   const bool changed = pending || state_now != last_state || chunks_now != last_chunks;
   last_state = state_now;
   last_chunks = chunks_now;
@@ -370,14 +388,14 @@ void daq_dac_service(uint32_t now_ms)
   last_service_ms = now_ms;
 
   daq_dac_command_t pending[DAQ_DAC_CHANNELS];
-  uint32_t mask = __get_PRIMASK(); __disable_irq();
+  uint32_t mask = dac_lock();
   const uint8_t kill = g_kill_reason;
   const uint8_t pending_mask = g_pending_mask;
   const uint8_t all_off = g_pending_all_off;
   const uint32_t all_sequence = g_pending_all_sequence;
   memcpy(pending, g_pending, sizeof(pending));
   g_kill_reason = 0U; g_pending_mask = 0U; g_pending_all_off = 0U;
-  __set_PRIMASK(mask);
+  dac_unlock(mask);
 
   uint8_t actions[DAQ_DAC_CHANNELS];
   if (kill) {

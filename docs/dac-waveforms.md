@@ -289,6 +289,15 @@ the upload `bad_sample`. RAM use:
 Codes are stored as 16 bits, and the GPDMA pads each one to the 32-bit
 DHR12Rx write.
 
+## Coexistence with acquisition
+
+The 1 ms frame engine owns TIM2 and SPI2 GPDMA channels 0/1 at NVIC priority
+0. The DAC owns TIM7, TIM15 and GPDMA channels 10/11.
+- The DAC uses no interrupts, and its DMA has the lowest arbitration priority.
+- The DAC's critical sections use BASEPRI, masking priority 1 and below, so
+  they never delay the frame ISR.
+- See [data-pipeline.md](data-pipeline.md) for the CPU budget.
+
 ## Not yet verified on silicon
 
 - GPDMA half-word-to-word padding into DHR12Rx (`SDW = half-word`,

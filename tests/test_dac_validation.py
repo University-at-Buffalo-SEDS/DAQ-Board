@@ -280,10 +280,14 @@ uint32_t HAL_DAC_GetValue(const DAC_HandleTypeDef *, uint32_t);
 uint32_t HAL_RCC_GetPCLK1Freq(void); uint32_t HAL_RCC_GetPCLK2Freq(void);
 #define __HAL_RCC_TIM7_CLK_ENABLE() ((void)0)
 #define __HAL_RCC_TIM15_CLK_ENABLE() ((void)0)
+/* mock_primask holds the mocked BASEPRI (0 = nothing masked). */
 extern uint32_t mock_primask;
-static inline uint32_t __get_PRIMASK(void){return mock_primask;}
-static inline void __disable_irq(void){mock_primask=1;}
-static inline void __set_PRIMASK(uint32_t m){mock_primask=m;}
+#define __NVIC_PRIO_BITS 4U
+static inline uint32_t __get_BASEPRI(void){return mock_primask;}
+static inline void __set_BASEPRI_MAX(uint32_t v){if(v&&(mock_primask==0||v<mock_primask))mock_primask=v;}
+static inline void __set_BASEPRI(uint32_t v){mock_primask=v;}
+static inline void __DSB(void){}
+static inline void __ISB(void){}
 #endif
 '''
 

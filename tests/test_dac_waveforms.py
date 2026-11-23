@@ -342,6 +342,22 @@ int main(void){
 
 
 class GlueTests(unittest.TestCase):
+    def test_critical_sections_leave_the_acquisition_interrupts_alone(self):
+        # DAC state is thread-only: BASEPRI masks priorities >= 1 so the
+        # priority-0 TIM2/SPI2/GPDMA acquisition ISRs never wait on the DAC.
+        source = (ROOT / 'Core/Src/daq_dac.c').read_text()
+        self.assertNotIn('__disable_irq', source)
+        self.assertNotIn('PRIMASK', source)
+        self.assertIn('__set_BASEPRI_MAX(1U << (8U - __NVIC_PRIO_BITS))', source)
+        msp = (ROOT / 'Core/Src/stm32u5xx_hal_msp.c').read_text()
+        self.assertIn('HAL_NVIC_SetPriority(TIM2_IRQn, 0, 0)', msp)
+        # The DAC uses no interrupt and none of the acquisition resources.
+        self.assertNotRegex(source, r'HAL_NVIC|IRQHandler|TIM2->|GPDMA1_Channel[0-3]\b')
+        main = (ROOT / 'Core/Src/main.c').read_text()
+        for resource in ('TIM7', 'TIM15', 'GPDMA1_Channel10', 'GPDMA1_Channel11'):
+            self.assertNotIn(resource, main)
+
+
     def test_upload_and_chirp_on_register_mocks(self):
         with tempfile.TemporaryDirectory() as d:
             stub = pathlib.Path(d)

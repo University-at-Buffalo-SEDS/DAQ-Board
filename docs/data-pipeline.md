@@ -591,3 +591,20 @@ GPDMA channels 10/11. Readback goes through ADC4 at the 10 Hz analog pass, and
 status goes in `DAQ_DAC_STATUS`. The acquisition schedule uses none of these
 resources, and the DAC uses none of the acquisition's: TIM2 and GPDMA channels
 0/1.
+
+[dac-waveforms.md](dac-waveforms.md) defines the waveforms, rates and the
+uploaded-shape protocol.
+- The DAC enables no interrupt: TIM7/TIM15 TRGO paces the DAC and GPDMA reloads
+  its own linked-list item, so even 200 kS/s on both channels costs no CPU.
+- The DAC's GPDMA channels run at the lowest arbitration priority and weight
+  (CCR PRIO = 0). SPI2's channels 0/1 run at low priority with mid weight, so
+  acquisition transfers win arbitration. At 2 x 200 kS/s the DAC makes about
+  0.4 M single-beat transfers per second, a small fraction of the AHB.
+- DAC state is shared only between threads. Its critical sections mask NVIC
+  priorities 1 and below through BASEPRI, not PRIMASK. The priority-0 frame
+  engine (TIM2, SPI2 and GPDMA 0-3) therefore never waits on the DAC.
+- The DAC's thread-side cost is small, all in the live network thread's
+  50 ms DAC service:
+  - planning on a start: soft double, up to a few ms once;
+  - a chirp retune: under 0.5 ms per 50 ms;
+  - CRC of an uploaded shape: 1 KiB bitwise at commit.
