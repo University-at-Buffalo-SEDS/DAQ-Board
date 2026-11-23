@@ -30,7 +30,7 @@ DRIVER = r'''
 #include <string.h>
 static uint8_t *data; static uint32_t size; static unsigned reads;
 static bool rd(void *ctx, uint32_t off, uint8_t *dst, uint32_t len)
-{ (void)ctx; ++reads; if (off + len > size || len > SD_XFER_RAW_WINDOW) return false; memcpy(dst, data + off, len); return true; }
+{ (void)ctx; ++reads; if (!len || off + len > size || len > SD_XFER_RAW_WINDOW) return false;  /* FileX: no zero-length reads */ memcpy(dst, data + off, len); return true; }
 static void hex(char tag, const uint8_t *p, size_t n)
 { printf("%c ", tag); for (size_t i = 0; i < n; ++i) printf("%02x", p[i]); printf("\n"); fflush(stdout); }
 int main(int argc, char **argv)
@@ -240,6 +240,9 @@ class TransferTests(unittest.TestCase):
         tail, _, _, _, _ = run_transfer(self.exe, self.path, self.data, start=len(self.data) - 1000, length=1000)
         self.assertEqual(bytes(tail.out), self.data[-1000:])
         mid, _, _, _, _ = run_transfer(self.exe, self.path, self.data, start=12345, length=777, msg=64)
+        # A range ending on a sector boundary: the window slides onto the end without a zero-length read.
+        edge, _, _, _, _ = run_transfer(self.exe, self.path, self.data, start=1000, length=2072)
+        self.assertEqual(bytes(edge.out), self.data[1000:3072])
         self.assertEqual(bytes(mid.out), self.data[12345:12345 + 777])
 
     def test_raw_mode_and_odd_sizes(self):

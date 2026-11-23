@@ -95,7 +95,7 @@ static bool load_window(sd_xfer_t *x, sd_xfer_work_t *w, sd_xfer_read_fn read, v
     if (x->raw_base == base && x->raw_len == want) return true;
     if (x->raw_base + 512U == base && x->raw_len == SD_XFER_RAW_WINDOW) {
         memmove(w->raw, w->raw + 512, 512U);
-        if (!read(ctx, base + 512U, w->raw + 512, want - 512U)) { x->raw_base = UINT32_MAX; return false; }
+        if (want > 512U && !read(ctx, base + 512U, w->raw + 512, want - 512U)) { x->raw_base = UINT32_MAX; return false; }
     } else if (!read(ctx, base, w->raw, want)) {
         x->raw_base = UINT32_MAX;
         return false;
