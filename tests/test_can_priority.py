@@ -42,7 +42,7 @@ static int can_bus_send_large(const uint8_t *p,size_t n,uint32_t id){(void)p;(vo
 static void sim_probe_observe_can_tx(const uint8_t *p,size_t n){(void)p;(void)n;}
 """ + callback + r"""
 int main(void) {
- uint8_t opaque[][8]={{83,68,84,1},{83,68,84,2},{83,68,7,1}};
+ uint8_t opaque[][8]={{0x60,8,0,1},{0x70,8,0,2},{0x0b,68,7,1}}; /* SEDSnet 7 FULL, COMPACT, canonical */
  for(unsigned i=0;i<3;i++) {
    for(unsigned p=0;p<256;p++) {
      result=HAL_OK;

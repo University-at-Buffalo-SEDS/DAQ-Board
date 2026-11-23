@@ -60,10 +60,20 @@ static inline uint8_t sim_probe_skip_uleb(const uint8_t *data, size_t len,
 
 static inline uint32_t sim_probe_packed_data_type(const uint8_t *data,
                                                   size_t len) {
-  size_t offset = 2U;
+  /* SEDSnet 7: canonical frames start flags, type ULEB128. A FULL template
+   * frame (0x60) prefixes template id/generation and base delta ULEB128s.
+   * Other side-transport kinds name no type. */
+  size_t offset = 0U;
   uint32_t data_type = 0U;
-  if (data != NULL && len >= 3U &&
-      sim_probe_read_id(data, len, &offset, &data_type)) {
+  if (data == NULL || len < 2U) return UINT32_MAX;
+  if ((data[0] & 0x60U) == 0x60U) {
+    if (data[0] != 0x60U) return UINT32_MAX;
+    offset = 1U;
+    if (!sim_probe_skip_uleb(data, len, &offset) ||
+        !sim_probe_skip_uleb(data, len, &offset)) return UINT32_MAX;
+  }
+  offset += 1U;
+  if (sim_probe_read_id(data, len, &offset, &data_type)) {
     return data_type;
   }
   return UINT32_MAX;
@@ -80,7 +90,7 @@ static inline void sim_probe_observe_can_tx(const uint8_t *data, size_t len) {
 #endif
 }
 
-/* Allocation-free observation of SEDSNet v4's packed source-address field. */
+/* Allocation-free observation of SEDSnet 7's packed source-address field. */
 static inline void sim_probe_observe_packed(const uint8_t *data, size_t len) {
 #ifdef SEDS_FIRMWARE_SIM_TEST
   /* Stable SEDSNet source addresses for RF, PB, FC, GB, AB, VB, DAQ.
@@ -91,13 +101,9 @@ static inline void sim_probe_observe_packed(const uint8_t *data, size_t len) {
   size_t offset = 0U;
   uint32_t source_address = 0U;
   if (data == NULL || len < 3U) return;
-  const uint8_t flags = data[offset++];
-  offset++; /* selected endpoint count */
-  if (!sim_probe_skip_uleb(data, len, &offset) ||
-      !sim_probe_skip_uleb(data, len, &offset) ||
-      !sim_probe_skip_uleb(data, len, &offset)) return;
-  if ((flags & 0x08U) != 0U &&
-      !sim_probe_skip_uleb(data, len, &offset)) return;
+  /* SEDSnet 7 canonical prelude: flags, type, source address. */
+  if ((data[offset++] & 0x60U) == 0x60U) return;
+  if (!sim_probe_skip_uleb(data, len, &offset)) return;
   if (!sim_probe_read_id(data, len, &offset, &source_address)) return;
   for (size_t i = 0U; i < sizeof(peer_addresses) / sizeof(peer_addresses[0]); ++i) {
     if (source_address == peer_addresses[i]) {

@@ -32,8 +32,14 @@ def uleb(value):
 
 
 def frame(address, timestamp=0, nonce=False, data_type=3):
-    return (bytes((8 if nonce else 0, 1)) + uleb(data_type) + uleb(0)
-            + uleb(timestamp) + (uleb(65535) if nonce else b"") + uleb(address))
+    # SEDSnet 7 canonical prelude: flags, type, source, then the timestamp
+    # and nonce after the static header.
+    return (bytes((8 if nonce else 0,)) + uleb(data_type) + uleb(address)
+            + uleb(timestamp) + (uleb(65535) if nonce else b""))
+
+
+def header_len(address, data_type=3):
+    return 1 + len(uleb(data_type)) + len(uleb(address))
 
 
 class SimulationProbeParser(unittest.TestCase):
@@ -92,7 +98,10 @@ int seds_router_log_bytes_ex(SedsRouter *r, int t, const uint8_t *p,
                 for nonce in (False, True):
                     wire = frame(source_address(name), timestamp, nonce)
                     cases.append((wire, 1 << index))
-                    cases.extend((wire[:end], 0) for end in range(len(wire)))
+                    # A prefix that holds the source identifies the peer.
+                    known = header_len(source_address(name))
+                    cases.extend((wire[:end], (1 << index) if end >= known else 0)
+                                 for end in range(len(wire)))
         cases.extend((frame(address), 0) for address in (0, 1, 0xFFFFFFFF, 123456789))
         self.compile_and_run(cases)
 
@@ -100,8 +109,8 @@ int seds_router_log_bytes_ex(SedsRouter *r, int t, const uint8_t *p,
         self.compile_and_run([(frame(source_address(name) + (1 << 32)), 0)
                               for name in PEERS])
 
-    def test_overflowing_timestamp_does_not_mark_peer_alive(self):
-        wire = b"\x00\x01\x03\x00" + b"\x80" * 9 + b"\x02" + uleb(source_address("RF"))
+    def test_overflowing_source_does_not_mark_peer_alive(self):
+        wire = b"\x00\x03" + b"\x80" * 9 + b"\x02" + uleb(source_address("RF"))
         self.compile_and_run([(wire, 0)])
 
     def test_type_ids_and_heartbeat_counter_keep_full_u32_range(self):
@@ -111,8 +120,10 @@ int seds_router_log_bytes_ex(SedsRouter *r, int t, const uint8_t *p,
         cases = [(frame(1, data_type=value), value) for value in values]
         for value in (1 << 32, 1 << 40, (1 << 64) - 1):
             cases.append((frame(1, data_type=value), 0xFFFFFFFF))
-        for length in range(1, 3):
-            cases.append((b"\x00" * length, 0xFFFFFFFF))
+        cases.append((b"\x00", 0xFFFFFFFF))
+        cases.append((b"\x00\x80", 0xFFFFFFFF))
+        # Side-transport kinds other than FULL name no type.
+        cases.append((b"\x70\x08\x03", 0xFFFFFFFF))
         self.compile_and_run(cases, check_type=True)
 
 
