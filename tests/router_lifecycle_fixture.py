@@ -77,9 +77,10 @@ def assemble(root):
                  'RF_RADIO_SIDE_TRANSPORT_TEMPLATES', 'GATEWAY_UART_MAX_FRAME_BYTES',
                  'GATEWAY_SIDE_TRANSPORT_TEMPLATES', 'TELEMETRY_ROUTER_RETRY_MS',
                  'CAN_TX_FRAGMENT_PAYLOAD_BYTES', 'CAN_TX_ALIGNED_FRAME_BYTES',
+                 'CAN_LINK_FRAME_BYTES', 'CAN_LINK_MAX_PACKET',
                  'TELEMETRY_UART_MAX_PAYLOAD')
     inputs = [source]
-    for header in ('can_tx_queue.h', 'telemetry_uart.h'):
+    for header in ('can_link.h', 'can_tx_queue.h', 'telemetry_uart.h'):
         path = root / 'Core/Inc' / header
         if path.is_file():
             inputs.append(path.read_text())

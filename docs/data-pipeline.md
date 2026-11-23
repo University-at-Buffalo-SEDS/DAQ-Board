@@ -77,6 +77,19 @@ the board supply.
 - Each still has every raw conversion on SD.
 - Their published values are filtered more heavily.
 
+
+**CAN link format v2** (`Core/Inc/can_link.h`, identical on every board): frames
+carry no payload header. The 11-bit identifier is band (bits 8..7: `0x000`
+controls/ACKs/heartbeat, `0x080` metadata, `0x100` data) | board token (bits
+6..3) | frame kind (bits 2..0: SINGLE, FIRST, MIDDLE, LAST, plus a PAD bit whose
+frame ends in its pad length). A side frame of up to 64 B is one frame; up to
+128 B (`CAN_LINK_MAX_PACKET`, the SDK CAN side frame cap) is FIRST + LAST of 64
+B each. Band and board order arbitration exactly as the version 1 identifiers
+`band | board` did. Reassembly keeps one 128-byte slot per (board, band) stream
+(`CAN_BUS_REASM_SLOTS`); a lost fragment leaves an orphan or a packet that
+fails its SEDSnet CRC32. Version 1 sent a 9-byte `'S' 'D'` header in every
+frame (55 B per fragment).
+
 ## 2. The acquisition schedule
 
 ### 2.1 One 1 ms frame
