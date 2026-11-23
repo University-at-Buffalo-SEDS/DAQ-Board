@@ -1785,15 +1785,21 @@ static void sd_complete_manual_retry(void)
   __set_PRIMASK(saved);
 }
 
-/* Network SD download service. Runs only inside an otherwise idle writer turn
- * (no queued raw, telemetry or pressure rows serviced), never while a launch
- * file is open or its close flush is pending, and only in Idle, Landed or
- * Recovery. Each turn performs at most one sector read or a short bounded
- * directory step into the single 512-byte download block. The read handle is
- * a separate FX_OPEN_FOR_READ owner; it never writes and never alters a log. */
+/* Network SD transfer service v2 (sd_file_stream.c, sd_xfer.c;
+ * GroundStation26 docs/backend/sd-transfer.md). Runs only inside an otherwise
+ * idle writer turn (no queued raw, telemetry or pressure rows serviced), never
+ * while a launch file is open or its close flush is pending, and only in
+ * Idle, Landed or Recovery. Each turn does at most one bounded step: a
+ * directory step of at most 32 entries, one DATA message (at most 1 KiB of
+ * reads and the re-encoding of at most one block), or 8 sectors of a HASH.
+ * The read handle is a separate FX_OPEN_FOR_READ owner; it never writes and
+ * never alters a log. */
+#ifdef TELEMETRY_ENABLED
+#include "sd_file_sha256.h"
 #define SD_DL_IDLE_CLOSE_MS 3000U
 #define SD_DL_LIST_SCAN_PER_TURN 32U
-/* The read handle lives in the on-demand download workspace (see
+#define SD_DL_HASH_SECTORS_PER_TURN 8U
+/* The read handle lives in the on-demand transfer area (see
  * sd_file_stream.c); it exists only while a station session or open handle does. */
 #define g_sd_dl_file (*(FX_FILE *)sd_file_stream_handle())
 static uint8_t g_sd_dl_open, g_sd_dl_dir;
@@ -1805,11 +1811,17 @@ static uint8_t g_sd_dl_list_valid, g_sd_dl_list_dir;
 static uint16_t g_sd_dl_list_next;
 static ULONG g_sd_dl_list_entry;
 static uint32_t g_sd_dl_last_ms;
-volatile uint32_t g_sd_dl_reads, g_sd_dl_lists, g_sd_dl_errors;
+static struct { uint8_t active, growing; uint32_t ticket, pos, size; } g_sd_dl_hash;
+volatile uint32_t g_sd_dl_reads, g_sd_dl_lists, g_sd_dl_opens, g_sd_dl_hashes, g_sd_dl_errors;
+
+static void sd_dl_close(void)
+{
+  if (g_sd_dl_open) { (void)fx_file_close(&g_sd_dl_file); sd_dl_mark(0U); }
+}
 
 static void sd_dl_release(void)
 {
-  if (g_sd_dl_open) { (void)fx_file_close(&g_sd_dl_file); sd_dl_mark(0U); }
+  sd_dl_close();
   g_sd_dl_list_valid = 0U;
 }
 
@@ -1819,17 +1831,16 @@ static uint8_t sd_dl_name_is_open_log(const char *path)
          (g_sd_launch_log.open && strcmp(g_sd_launch_log.name, path) == 0);
 }
 
-/* LIST answers place the name in the download block (unused by LIST). */
-static void sd_dl_list(const sd_file_request_t *request, sd_file_result_t *result, uint8_t *block)
+/* LIST places the name at the start of the block (unused by LIST). */
+static uint8_t sd_dl_list(const sd_file_request_t *request, uint8_t *block, uint32_t *size_out, uint8_t *flags)
 {
-  result->status = SD_FILE_STATUS_IO_ERROR;
+  uint8_t result = SD_FILE_STATUS_IO_ERROR;
   const UINT set = fx_directory_default_set(&g_sd_media, (CHAR *)sd_file_directory(request->dir));
   if (set != FX_SUCCESS) {
     (void)fx_directory_default_set(&g_sd_media, FX_NULL);
     g_sd_dl_list_valid = 0U;
-    result->status = (set == FX_INVALID_PATH || set == FX_NOT_FOUND || set == FX_NOT_DIRECTORY)
+    return (set == FX_INVALID_PATH || set == FX_NOT_FOUND || set == FX_NOT_DIRECTORY)
         ? SD_FILE_STATUS_END : SD_FILE_STATUS_IO_ERROR;
-    return;
   }
   if (!g_sd_dl_list_valid || g_sd_dl_list_dir != request->dir || request->index < g_sd_dl_list_next) {
     g_sd_dl_list_valid = 1U; g_sd_dl_list_dir = request->dir; g_sd_dl_list_next = 0U; g_sd_dl_list_entry = 0U;
@@ -1842,7 +1853,7 @@ static void sd_dl_list(const sd_file_request_t *request, sd_file_result_t *resul
     const UINT status = fx_directory_next_full_entry_find(&g_sd_media, name, &attributes, &size,
                                                           &year, &month, &day, &hour, &minute, &second);
     g_sd_dl_list_entry = g_sd_media.fx_media_default_path.fx_path_current_entry;
-    if (status == FX_NO_MORE_ENTRIES) { result->status = SD_FILE_STATUS_END; break; }
+    if (status == FX_NO_MORE_ENTRIES) { result = SD_FILE_STATUS_END; break; }
     if (status != FX_SUCCESS) { g_sd_dl_list_valid = 0U; break; }
     name[FX_MAX_LONG_NAME_LEN - 1U] = '\0';
     const size_t length = strlen(name);
@@ -1851,82 +1862,158 @@ static void sd_dl_list(const sd_file_request_t *request, sd_file_result_t *resul
     if (g_sd_dl_list_next++ != request->index) continue;
     char path[72];
     (void)sd_file_path(path, sizeof path, request->dir, name, length);
-    result->status = SD_FILE_STATUS_OK;
-    result->file_size = (uint32_t)size;
-    result->flags = sd_dl_name_is_open_log(path) ? SD_FILE_ENTRY_OPEN : 0U;
-    result->name_len = (uint8_t)length;
+    result = SD_FILE_STATUS_OK;
+    *size_out = (uint32_t)size;
+    *flags = sd_dl_name_is_open_log(path) ? SD_FILE_ENTRY_OPEN : 0U;
     break;
   }
   (void)fx_directory_default_set(&g_sd_media, FX_NULL);
   /* A long skip continues on the station's retry; no turn scans unbounded. */
-  if (result->status == SD_FILE_STATUS_IO_ERROR && g_sd_dl_list_valid) result->status = SD_FILE_STATUS_BUSY;
+  if (result == SD_FILE_STATUS_IO_ERROR && g_sd_dl_list_valid) result = SD_FILE_STATUS_BUSY;
+  return result;
 }
 
-static void sd_dl_read(const sd_file_request_t *request, sd_file_result_t *result, uint8_t *block)
+/* Opens (or keeps) the read handle on request's file; *size is the size it
+ * sees. A file still being written is reopened so the size is current. */
+static uint8_t sd_dl_open_file(const sd_file_request_t *request, uint32_t *size, uint8_t *growing)
 {
   char path[72];
-  result->status = SD_FILE_STATUS_BAD_MESSAGE;
-  if (!sd_file_path(path, sizeof path, request->dir, request->name, request->name_len)) return;
-  const uint8_t growing = sd_dl_name_is_open_log(path);
-  if (g_sd_dl_open && (g_sd_dl_dir != request->dir ||
-      strcmp(request->name, g_sd_dl_file.fx_file_name_buffer) != 0 ||
-      (growing && request->offset >= g_sd_dl_file.fx_file_current_file_size))) {
-    (void)fx_file_close(&g_sd_dl_file); sd_dl_mark(0U);
-  }
+  if (!sd_file_path(path, sizeof path, request->dir, request->name, request->name_len))
+    return SD_FILE_STATUS_BAD_MESSAGE;
+  *growing = sd_dl_name_is_open_log(path);
+  if (g_sd_dl_open && (g_sd_dl_dir != request->dir || *growing ||
+      strcmp(request->name, g_sd_dl_file.fx_file_name_buffer) != 0))
+    sd_dl_close();
   if (!g_sd_dl_open) {
     const UINT status = fx_file_open(&g_sd_media, &g_sd_dl_file, path, FX_OPEN_FOR_READ);
-    if (status != FX_SUCCESS) {
-      result->status = status == FX_NOT_FOUND ? SD_FILE_STATUS_NOT_FOUND : SD_FILE_STATUS_IO_ERROR;
-      return;
-    }
+    if (status != FX_SUCCESS) return status == FX_NOT_FOUND ? SD_FILE_STATUS_NOT_FOUND : SD_FILE_STATUS_IO_ERROR;
     sd_dl_mark(1U); g_sd_dl_dir = request->dir;
   }
   const uint64_t size64 = g_sd_dl_file.fx_file_current_file_size;
-  const uint32_t size = size64 > UINT32_MAX ? UINT32_MAX : (uint32_t)size64;
-  result->file_size = size; result->offset = request->offset; result->flags = growing ? SD_FILE_ENTRY_OPEN : 0U;
-  if (request->offset > size) { result->status = SD_FILE_STATUS_BAD_OFFSET; return; }
-  if (request->offset == size) { result->status = SD_FILE_STATUS_END; return; }
-  const uint32_t start = request->offset & ~(uint32_t)(SD_FILE_BLOCK_BYTES - 1U);
-  const uint32_t want = size - start < SD_FILE_BLOCK_BYTES ? size - start : SD_FILE_BLOCK_BYTES;
-  ULONG actual = 0U;
-  UINT status = fx_file_seek(&g_sd_dl_file, start);
-  if (status == FX_SUCCESS) status = fx_file_read(&g_sd_dl_file, block, want, &actual);
-  if (status != FX_SUCCESS || actual <= request->offset - start) {
-    (void)fx_file_close(&g_sd_dl_file); sd_dl_mark(0U);
-    result->status = SD_FILE_STATUS_IO_ERROR;
-    return;
-  }
-  result->status = SD_FILE_STATUS_OK;
-  result->data_start = (uint16_t)(request->offset - start);
-  result->data_len = (uint16_t)(actual - result->data_start);
+  *size = size64 > UINT32_MAX ? UINT32_MAX : (uint32_t)size64;
+  return SD_FILE_STATUS_OK;
 }
 
+/* sd_xfer read callback: exactly len bytes at offset (whole sectors, or the
+ * file tail); FileX reads whole sectors without cycling its small cache. The
+ * engine asks for 0 bytes when its window slides onto a range end that is a
+ * sector boundary; FileX would answer FX_END_OF_FILE there. */
+static bool sd_dl_read(void *ctx, uint32_t offset, uint8_t *dst, uint32_t len)
+{
+  (void)ctx;
+  if (len == 0U) return g_sd_dl_open != 0U;
+  ULONG actual = 0U;
+  if (g_sd_dl_open && fx_file_seek(&g_sd_dl_file, offset) == FX_SUCCESS &&
+      fx_file_read(&g_sd_dl_file, dst, len, &actual) == FX_SUCCESS && actual == len) {
+    ++g_sd_dl_reads;
+    return true;
+  }
+  ++g_sd_dl_errors;
+  sd_dl_close();
+  return false;
+}
+
+static void sd_dl_hash_step(void)
+{
+  if (!sd_file_stream_ticket_current(g_sd_dl_hash.ticket)) { g_sd_dl_hash.active = 0U; return; }
+  launchcore_sha256_ctx_t *sha = sd_file_stream_scratch();
+  uint8_t *const block = sd_file_stream_block();
+  uint8_t answer[SD_FILE_HASH_ANSWER] = {SD_FILE_OP_HASH | SD_FILE_RESPONSE_FLAG, SD_FILE_STATUS_OK};
+  for (uint32_t i = 0U; i < SD_DL_HASH_SECTORS_PER_TURN && g_sd_dl_hash.pos < g_sd_dl_hash.size; ++i) {
+    const uint32_t n = g_sd_dl_hash.size - g_sd_dl_hash.pos > SD_FILE_BLOCK_BYTES
+        ? SD_FILE_BLOCK_BYTES : g_sd_dl_hash.size - g_sd_dl_hash.pos;
+    if (!sd_dl_read(NULL, g_sd_dl_hash.pos, block, n)) {
+      answer[1] = SD_FILE_STATUS_IO_ERROR;
+      sd_file_stream_answer(g_sd_dl_hash.ticket, answer, sizeof answer);
+      g_sd_dl_hash.active = 0U;
+      return;
+    }
+    sd_file_sha256_update(sha, block, n);
+    g_sd_dl_hash.pos += n;
+  }
+  if (g_sd_dl_hash.pos < g_sd_dl_hash.size) return;
+  answer[2] = g_sd_dl_hash.growing ? SD_XFER_ANSWER_GROWING : 0U;
+  sd_file_put_u32(answer + 3, g_sd_dl_hash.size);
+  sd_file_sha256_final(sha, answer + 7);
+  sd_file_stream_answer(g_sd_dl_hash.ticket, answer, sizeof answer);
+  ++g_sd_dl_hashes;
+  g_sd_dl_hash.active = 0U;
+}
+
+static void sd_dl_request(const sd_file_request_t *request, uint32_t ticket, uint8_t allowed)
+{
+  uint8_t frame[SD_FILE_ANSWER_MAX];
+  uint32_t size = 0U;
+  uint8_t status = SD_FILE_STATUS_BAD_STATE;
+  uint8_t *const block = sd_file_stream_block();
+  if (!allowed || block == NULL) {
+    /* refused below */
+  } else if (request->op == SD_FILE_OP_LIST) {
+    uint8_t flags = 0U;
+    status = sd_dl_list(request, block, &size, &flags); ++g_sd_dl_lists;
+    const size_t name_len = status == SD_FILE_STATUS_OK ? strlen((const char *)block) : 0U;
+    if (status == SD_FILE_STATUS_IO_ERROR) ++g_sd_dl_errors;
+    sd_file_stream_answer(ticket, frame, sd_file_encode_list(frame, status, request->dir, request->index, size,
+                                                             flags, (const char *)block, name_len));
+    return;
+  } else if (request->op == SD_FILE_OP_HASH && sd_file_stream_transfer_active()) {
+    status = SD_FILE_STATUS_BUSY;
+  } else {
+    uint8_t growing = 0U;
+    status = sd_dl_open_file(request, &size, &growing);
+    if (status == SD_FILE_STATUS_OK && request->op == SD_FILE_OP_OPEN) {
+      ++g_sd_dl_opens;
+      sd_file_stream_open(ticket, &request->open, size, growing != 0U);
+      return;
+    }
+    if (status == SD_FILE_STATUS_OK) {
+      g_sd_dl_hash.active = 1U; g_sd_dl_hash.ticket = ticket; g_sd_dl_hash.pos = 0U;
+      g_sd_dl_hash.size = size; g_sd_dl_hash.growing = growing;
+      sd_file_sha256_init(sd_file_stream_scratch());
+      sd_dl_hash_step();
+      return;
+    }
+  }
+  if (status == SD_FILE_STATUS_IO_ERROR) ++g_sd_dl_errors;
+  const size_t n = sd_file_encode_status(frame, request->op, status);
+  if (request->op == SD_FILE_OP_OPEN) frame[2] = request->open.xfer;
+  sd_file_stream_answer(ticket, frame, n);
+}
+
+/* Returns 1 when the turn did transfer work (the writer then skips its idle
+ * sleep), 0 when there was nothing to do. */
 static uint8_t sd_file_service_turn(void)
 {
   const uint32_t now = HAL_GetTick();
   const uint8_t allowed = sd_file_stream_state_allowed() && g_sd_launch_log.open == 0U &&
                           g_sd_launch_flush_pending == 0U;
-  if ((!allowed || !sd_file_stream_session_active() || now - g_sd_dl_last_ms >= SD_DL_IDLE_CLOSE_MS) &&
+  const uint8_t session = sd_file_stream_session_active() ? 1U : 0U;
+  const uint8_t busy = g_sd_dl_hash.active || sd_file_stream_transfer_active();
+  if ((!allowed || !session || (!busy && now - g_sd_dl_last_ms >= SD_DL_IDLE_CLOSE_MS)) &&
       (g_sd_dl_open || g_sd_dl_list_valid))
     sd_dl_release();
+  if (!session) { g_sd_dl_hash.active = 0U; return 0U; }
   sd_file_request_t request;
   uint32_t ticket = 0U;
-  if (!sd_file_stream_claim(&request, &ticket)) return 0U;
-  sd_file_result_t result;
-  memset(&result, 0, sizeof result);
-  uint8_t *const block = sd_file_stream_block();
-  if (!allowed || block == NULL) {
-    result.status = SD_FILE_STATUS_BAD_STATE;
-  } else if (request.op == SD_FILE_OP_LIST) {
-    sd_dl_list(&request, &result, block); ++g_sd_dl_lists;
-  } else {
-    sd_dl_read(&request, &result, block); ++g_sd_dl_reads;
+  if (!g_sd_dl_hash.active && sd_file_stream_claim(&request, &ticket)) {
+    /* A request is always answered, BAD_STATE included, so the station never
+     * waits. Its answer (and a HASH's first step) is this turn's work. */
+    sd_dl_request(&request, ticket, allowed);
+    g_sd_dl_last_ms = now;
+    return 1U;
   }
-  if (result.status == SD_FILE_STATUS_IO_ERROR) ++g_sd_dl_errors;
-  g_sd_dl_last_ms = HAL_GetTick();
-  sd_file_stream_finish(ticket, &result);
-  return 1U;
+  if (!allowed) { g_sd_dl_hash.active = 0U; return 0U; }
+  if (g_sd_dl_hash.active) { sd_dl_hash_step(); g_sd_dl_last_ms = now; return 1U; }
+  /* A transfer whose handle was closed (gate, I/O error) ends at its next read. */
+  if (sd_file_stream_transfer_active() && sd_file_stream_produce(sd_dl_read, NULL, now)) {
+    g_sd_dl_last_ms = now;
+    return 1U;
+  }
+  return 0U;
 }
+#else
+static uint8_t sd_file_service_turn(void) { return 0U; }
+#endif
 
 void sd_card_writer_thread_entry(ULONG initial_input)
 {

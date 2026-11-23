@@ -252,14 +252,7 @@ void HAL_NVIC_ClearPendingIRQ(IRQn_Type irq) { (void)irq; }
 
 /* ---- Board services the writer reads ---- */
 daq_calibration_t daq_calibration_current(void) { return g_sd_calibration; }
-bool sd_file_stream_claim(sd_file_request_t *request, uint32_t *ticket) { (void)request; (void)ticket; return false; }
-uint8_t *sd_file_stream_block(void) { return NULL; }
-static uint8_t g_dl_handle[sizeof(FX_FILE)];
-void *sd_file_stream_handle(void) { return g_dl_handle; }
-void sd_file_stream_handle_open(bool open) { (void)open; }
-void sd_file_stream_finish(uint32_t ticket, const sd_file_result_t *result) { (void)ticket; (void)result; }
-bool sd_file_stream_session_active(void) { return false; }
-bool sd_file_stream_state_allowed(void) { return false; }
+/* The SD transfer service is telemetry-only: compiled out of this model. */
 
 /* ---- Producers: the acquisition thread every 2 ms, loadcell rows at 250 Hz each ---- */
 static const uint8_t k_channels[] = {0U, 1U, 6U, 9U, 2U, 3U};

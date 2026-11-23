@@ -244,6 +244,22 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "${CMAKE_SOURCE_DIR}/Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_hash.c"
     "${CMAKE_SOURCE_DIR}/Drivers/STM32U5xx_HAL_Driver/Src/stm32u5xx_hal_hash_ex.c")
 
+# SD transfer service v2 on SEDSnet P2P port 4511 (sd_file_stream.c and the
+# writer turn in sd_card.c; GroundStation26 docs/backend/sd-transfer.md).
+# The station reaches the DAQ over the fill network (CAN FD -> gateway), so
+# DATA messages may be up to 1 KiB, with 128 SDX token contexts: the borrowed
+# area (block, transfer state, workspace, read handle) is 6168 bytes of the
+# TLSF heap, taken only while a station session exists. The HASH answer uses
+# LaunchCore's software SHA-256 under private names: the application's
+# launchcore_sha256_* is the shared HASH peripheral (sd_file_sha256.h).
+target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE SD_XFER_MSG_MAX=1024U SDX_CTX_ENTRIES=128U)
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+    "$<$<BOOL:${ENABLE_TELEMETRY}>:${CMAKE_SOURCE_DIR}/Core/Src/sd_xfer.c>"
+    "$<$<BOOL:${ENABLE_TELEMETRY}>:${CMAKE_SOURCE_DIR}/Core/Src/sd_xfer_codec.c>"
+    "$<$<BOOL:${ENABLE_TELEMETRY}>:${CMAKE_SOURCE_DIR}/Core/Src/sd_file_sha256.c>")
+set_source_files_properties("${CMAKE_SOURCE_DIR}/Core/Src/sd_file_sha256.c" PROPERTIES
+    INCLUDE_DIRECTORIES "${sedslaunchcore_SOURCE_DIR}/bootloader/src")
+
 # Board-owned progress watchdog; deliberately independent of SEDSnet.
 option(ENABLE_BOARD_WATCHDOG "Enable independent hardware watchdog with task progress gating" ON)
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/Core/Src/board_watchdog.c)
