@@ -38,7 +38,7 @@ static int near(float a,float b,float tol){return fabsf(a-b)<=tol;}
 #define LSB (3.3f/4095.0f)
 static daq_dac_command_t cmd(uint8_t ch,uint8_t en,uint8_t wave,float amp,float off,float f){
   daq_dac_command_t c={.channel=ch,.enable=en,.waveform=wave,.amplitude_v=amp,.offset_v=off,
-    .frequency_hz=f,.steps=8,.lease_ms=2000,.dwell_ms=500,.sequence=7};return c;}
+    .frequency_hz=f,.steps=8,.lease_ms=2000,.dwell_ms=500,.duty_q16=32768,.sequence=7};return c;}
 '''
 
 
@@ -46,65 +46,66 @@ class WaveformAndClampTests(unittest.TestCase):
     def test_tables_codes_and_timer_plans(self):
         run_c(self, CONTROL + r'''
 int main(void){
-  uint32_t t[DAQ_DAC_TABLE_LEN]; daq_dac_plan_t p; daq_dac_config_t c;
+  uint16_t t[DAQ_DAC_ARB_LEN_MAX]; daq_dac_plan_t p; daq_dac_config_t c;
   /* Codes round to nearest and saturate at both ends (NaN is 0). */
   assert(daq_dac_volts_to_code(0.0f)==0&&daq_dac_volts_to_code(-1)==0&&daq_dac_volts_to_code(NAN)==0);
   assert(daq_dac_volts_to_code(3.3f)==4095&&daq_dac_volts_to_code(9)==4095);
-  assert(daq_dac_volts_to_code(1.65f)==2048);
-  /* Sine: 32 samples, offset +/- amplitude, quarter period at the peak. */
+  /* Table maths is double: 1.65 V is code 2048, the float 1.65f just below it. */
+  assert(daq_dac_wave_volts_to_code(1.65)==2048&&daq_dac_volts_to_code(1.65f)==2047);
+  /* Sine at 10 Hz: 256 samples x 10 Hz = 2560 S/s, exactly 62500 counts of 160 MHz. */
   daq_dac_command_t k=cmd(0,1,DAQ_DAC_WAVE_SINE,1.0f,1.6f,10.0f);
-  daq_dac_clamp(&k,&c); assert(daq_dac_plan(&c,160000000U,&p,t)==0);
-  assert(p.samples==32);
-  assert(near(v(t[0]),1.6f,LSB)&&near(v(t[8]),2.6f,LSB)&&near(v(t[16]),1.6f,LSB)&&near(v(t[24]),0.6f,LSB));
-  for(unsigned i=0;i<32;i++) assert(near(v(t[i]),1.6f+sinf(6.2831853f*i/32.0f),LSB));
-  /* 10 Hz x 32 = 320 S/s from 160 MHz: exact. */
-  assert((p.psc+1u)*(p.arr+1u)==500000u&&near(p.actual_frequency_hz,10.0f,1e-4f));
-  /* Square: first half high, 50% duty. */
-  k.waveform=DAQ_DAC_WAVE_SQUARE; daq_dac_clamp(&k,&c); assert(!daq_dac_plan(&c,160000000U,&p,t));
-  for(unsigned i=0;i<32;i++) assert(near(v(t[i]),i<16?2.6f:0.6f,LSB));
+  daq_dac_clamp(&k,&c); assert(daq_dac_plan(&c,160000000U,&p,t,NULL)==0);
+  assert(p.samples==256);
+  assert(near(v(t[0]),1.6f,LSB)&&near(v(t[64]),2.6f,LSB)&&near(v(t[128]),1.6f,LSB)&&near(v(t[192]),0.6f,LSB));
+  for(unsigned i=0;i<256;i++) assert(near(v(t[i]),1.6f+sinf(6.2831853f*i/256.0f),LSB));
+  assert((p.psc+1u)*(p.arr+1u)==62500u&&p.actual_frequency_hz==10.0f&&p.table_crc==daq_dac_wave_crc32(t,256));
+  /* Square: first half high at the default 50 % duty. */
+  k.waveform=DAQ_DAC_WAVE_SQUARE; k.duty_q16=32768; daq_dac_clamp(&k,&c); assert(!daq_dac_plan(&c,160000000U,&p,t,NULL));
+  for(unsigned i=0;i<256;i++) assert(near(v(t[i]),i<128?2.6f:0.6f,LSB));
   /* Triangle: minimum at 0, maximum at half period, linear in between. */
-  k.waveform=DAQ_DAC_WAVE_TRIANGLE; daq_dac_clamp(&k,&c); assert(!daq_dac_plan(&c,160000000U,&p,t));
-  assert(near(v(t[0]),0.6f,LSB)&&near(v(t[16]),2.6f,LSB)&&near(v(t[8]),1.6f,LSB)&&near(v(t[24]),1.6f,LSB));
+  k.waveform=DAQ_DAC_WAVE_TRIANGLE; daq_dac_clamp(&k,&c); assert(!daq_dac_plan(&c,160000000U,&p,t,NULL));
+  assert(near(v(t[0]),0.6f,LSB)&&near(v(t[128]),2.6f,LSB)&&near(v(t[64]),1.6f,LSB)&&near(v(t[192]),1.6f,LSB));
   /* Staircase: steps from offset-amp to offset+amp, one sample per dwell. */
   k.waveform=DAQ_DAC_WAVE_STAIRCASE; k.steps=5; k.dwell_ms=250; daq_dac_clamp(&k,&c);
-  assert(!daq_dac_plan(&c,160000000U,&p,t)&&p.samples==5);
+  assert(!daq_dac_plan(&c,160000000U,&p,t,NULL)&&p.samples==5);
   for(unsigned i=0;i<5;i++) assert(near(v(t[i]),0.6f+0.5f*i,LSB));
   assert(p.actual_dwell_ms==250&&p.actual_frequency_hz==0.0f&&near(p.update_hz,4.0f,1e-4f));
   /* DC: one sample, no timer. */
   k.waveform=DAQ_DAC_WAVE_DC; k.offset_v=1.0f; daq_dac_clamp(&k,&c);
-  assert(!daq_dac_plan(&c,160000000U,&p,t)&&p.samples==1&&near(v(t[0]),1.0f,LSB)&&p.update_hz==0);
+  assert(!daq_dac_plan(&c,160000000U,&p,t,NULL)&&p.samples==1&&near(v(t[0]),1.0f,LSB)&&p.update_hz==0);
   /* Range ends: slowest and fastest periodic and the longest dwell fit 16-bit PSC/ARR. */
-  float fs[]={0.01f,0.37f,1.0f,123.4f,1000.0f};
-  for(unsigned i=0;i<5;i++){k=cmd(1,1,DAQ_DAC_WAVE_SINE,0.5f,1.5f,fs[i]);daq_dac_clamp(&k,&c);
-    assert(!daq_dac_plan(&c,160000000U,&p,t));assert(fabsf(p.actual_frequency_hz-fs[i])<=fs[i]*1e-3f);}
-  k=cmd(1,1,DAQ_DAC_WAVE_STAIRCASE,0.5f,1.5f,0);k.steps=32;k.dwell_ms=20000;daq_dac_clamp(&k,&c);
-  assert(!daq_dac_plan(&c,160000000U,&p,t)&&p.samples==32&&p.actual_dwell_ms==20000);
-  puts("ok");return 0;}''', [ROOT / 'Core/Inc'], [ROOT / 'Core/Src/daq_dac_control.c'])
+  float fs[]={0.01f,0.37f,1.0f,123.4f,1000.0f,7777.0f,10000.0f};
+  for(unsigned i=0;i<7;i++){k=cmd(1,1,DAQ_DAC_WAVE_SINE,0.5f,1.5f,fs[i]);daq_dac_clamp(&k,&c);
+    assert(!daq_dac_plan(&c,160000000U,&p,t,NULL));assert(fabsf(p.actual_frequency_hz-fs[i])<=fs[i]*1e-4f);
+    assert(p.update_hz<=200000.0f&&p.samples>=16&&p.samples<=256&&p.samples%2==0);}
+  k=cmd(1,1,DAQ_DAC_WAVE_STAIRCASE,0.5f,1.5f,0);k.steps=256;k.dwell_ms=20000;daq_dac_clamp(&k,&c);
+  assert(!daq_dac_plan(&c,160000000U,&p,t,NULL)&&p.samples==256&&p.actual_dwell_ms==20000);
+  puts("ok");return 0;}''', [ROOT / 'Core/Inc'], [ROOT / 'Core/Src/daq_dac_control.c', ROOT / 'Core/Src/daq_dac_wave.c'])
 
     def test_every_request_is_clamped_and_flagged(self):
         run_c(self, CONTROL + r'''
 int main(void){
   daq_dac_config_t c; daq_dac_command_t k;
   k=cmd(0,1,DAQ_DAC_WAVE_DC,0,1.0f,0); assert(daq_dac_clamp(&k,&c)==0&&c.offset_v==1.0f&&c.amplitude_v==0&&c.lease_ms==2000);
-  k.offset_v=-2; assert(daq_dac_clamp(&k,&c)==DAQ_DAC_CLAMP_OFFSET&&c.offset_v==DAQ_DAC_MIN_V);
-  k.offset_v=5; assert(daq_dac_clamp(&k,&c)==DAQ_DAC_CLAMP_OFFSET&&c.offset_v==DAQ_DAC_MAX_V);
+  k.offset_v=-2; assert(daq_dac_clamp(&k,&c)==DAQ_DAC_CLAMP_OFFSET&&c.offset_v==(float)DAQ_DAC_MIN_V);
+  k.offset_v=5; assert(daq_dac_clamp(&k,&c)==DAQ_DAC_CLAMP_OFFSET&&c.offset_v==(float)DAQ_DAC_MAX_V);
   /* Amplitude limited by the nearer rail; negative is zero. */
   k=cmd(0,1,DAQ_DAC_WAVE_SINE,2.0f,1.0f,1.0f); assert(daq_dac_clamp(&k,&c)==DAQ_DAC_CLAMP_AMPLITUDE&&near(c.amplitude_v,0.8f,1e-6f));
   k.offset_v=2.9f; daq_dac_clamp(&k,&c); assert(near(c.amplitude_v,0.2f,1e-6f));
   k.amplitude_v=-1; assert(daq_dac_clamp(&k,&c)==DAQ_DAC_CLAMP_AMPLITUDE&&c.amplitude_v==0);
   k=cmd(0,1,DAQ_DAC_WAVE_SQUARE,2.0f,9.0f,1.0f); assert(daq_dac_clamp(&k,&c)==(DAQ_DAC_CLAMP_OFFSET|DAQ_DAC_CLAMP_AMPLITUDE)&&c.amplitude_v==0);
   /* The output never leaves [min,max] for any wave. */
-  for(int w=1;w<5;w++){k=cmd(0,1,w,5.0f,1.7f,5.0f);daq_dac_clamp(&k,&c);
-    assert(c.offset_v-c.amplitude_v>=DAQ_DAC_MIN_V-1e-6f&&c.offset_v+c.amplitude_v<=DAQ_DAC_MAX_V+1e-6f);}
-  k=cmd(0,1,DAQ_DAC_WAVE_TRIANGLE,0.1f,1.0f,0.0f); assert(daq_dac_clamp(&k,&c)==DAQ_DAC_CLAMP_FREQUENCY&&c.frequency_hz==DAQ_DAC_FREQ_MIN_HZ);
-  k.frequency_hz=1e6f; assert(daq_dac_clamp(&k,&c)==DAQ_DAC_CLAMP_FREQUENCY&&c.frequency_hz==DAQ_DAC_FREQ_MAX_HZ);
+  for(int w=1;w<DAQ_DAC_WAVE_ARBITRARY;w++){k=cmd(0,1,w,5.0f,1.7f,5.0f);daq_dac_clamp(&k,&c);
+    assert(c.offset_v-c.amplitude_v>=(float)DAQ_DAC_MIN_V-1e-6f&&c.offset_v+c.amplitude_v<=(float)DAQ_DAC_MAX_V+1e-6f);}
+  k=cmd(0,1,DAQ_DAC_WAVE_TRIANGLE,0.1f,1.0f,0.0f); assert(daq_dac_clamp(&k,&c)==DAQ_DAC_CLAMP_FREQUENCY&&c.frequency_hz==(float)DAQ_DAC_FREQ_MIN_HZ);
+  k.frequency_hz=1e6f; assert(daq_dac_clamp(&k,&c)==DAQ_DAC_CLAMP_FREQUENCY&&c.frequency_hz==(float)DAQ_DAC_FREQ_MAX_HZ);
   k=cmd(0,1,DAQ_DAC_WAVE_STAIRCASE,0.1f,1.0f,0); k.steps=1; k.dwell_ms=1;
   assert(daq_dac_clamp(&k,&c)==(DAQ_DAC_CLAMP_STEPS|DAQ_DAC_CLAMP_DWELL)&&c.steps==2&&c.dwell_ms==DAQ_DAC_DWELL_MIN_MS);
   k.steps=500; k.dwell_ms=99999; daq_dac_clamp(&k,&c); assert(c.steps==DAQ_DAC_STEPS_MAX&&c.dwell_ms==DAQ_DAC_DWELL_MAX_MS);
   k.lease_ms=0; daq_dac_clamp(&k,&c); assert(c.lease_ms==DAQ_DAC_LEASE_DEFAULT_MS);
   k.lease_ms=10; assert(daq_dac_clamp(&k,&c)&DAQ_DAC_CLAMP_LEASE); assert(c.lease_ms==DAQ_DAC_LEASE_MIN_MS);
   k.lease_ms=60000; daq_dac_clamp(&k,&c); assert(c.lease_ms==DAQ_DAC_LEASE_MAX_MS);
-  puts("ok");return 0;}''', [ROOT / 'Core/Inc'], [ROOT / 'Core/Src/daq_dac_control.c'])
+  puts("ok");return 0;}''', [ROOT / 'Core/Inc'], [ROOT / 'Core/Src/daq_dac_control.c', ROOT / 'Core/Src/daq_dac_wave.c'])
 
 
 class StateMachineTests(unittest.TestCase):
@@ -113,39 +114,39 @@ class StateMachineTests(unittest.TestCase):
 static uint8_t a[2];
 static daq_dac_ctrl_t s;
 static void start(uint8_t ch,uint32_t now){daq_dac_command_t k=cmd(ch,1,DAQ_DAC_WAVE_SINE,0.5f,1.5f,1.0f);
-  assert(daq_dac_ctrl_command(&s,&k,true,1,now,a)==DAQ_DAC_RESULT_OK&&a[ch]==DAQ_DAC_ACTION_START);
+  assert(daq_dac_ctrl_command(&s,&k,NULL,true,1,now,a)==DAQ_DAC_RESULT_OK&&a[ch]==DAQ_DAC_ACTION_START);
   daq_dac_plan_t p={.actual_frequency_hz=1.0f};daq_dac_ctrl_started(&s,ch,&p,true);}
 int main(void){
   daq_dac_ctrl_init(&s);
   /* Off at boot: nothing active, status says off with NaN outputs. */
   assert(daq_dac_ctrl_active_mask(&s)==0);
   uint8_t st[DAQ_DAC_STATUS_BYTES]; float out[2]={1,1},rb[2]={1,1};
-  daq_dac_status_encode(&s,0,0,3,1234,out,rb,st);
-  assert(DAQ_DAC_STATUS_BYTES==80&&st[0]==1&&st[1]==0&&st[2]==0&&st[3]==3&&rd32(st+4)==1234);
-  for(int c=0;c<2;c++){const uint8_t*p=st+8+36*c;assert(p[0]==0&&p[4]==DAQ_DAC_OFF_NONE&&isnan(rdf(p+28))&&isnan(rdf(p+32)));}
+  daq_dac_status_encode(&s,NULL,0,0,3,1234,out,rb,st);
+  assert(DAQ_DAC_STATUS_BYTES==136&&st[0]==2&&st[1]==0&&st[2]==0&&st[3]==3&&rd32(st+4)==1234);
+  for(int c=0;c<2;c++){const uint8_t*p=st+8+52*c;assert(p[0]==0&&p[4]==DAQ_DAC_OFF_NONE&&isnan(rdf(p+28))&&isnan(rdf(p+32)));}
   /* Gate: only Startup/Idle with a known state. */
   assert(daq_dac_state_gate(true,0)==0&&daq_dac_state_gate(true,1)==0);
   const uint8_t refused[]={2,6,7,13,15,16};
   for(unsigned i=0;i<sizeof refused;i++){
     daq_dac_command_t k=cmd(0,1,DAQ_DAC_WAVE_DC,0,1,0);
-    assert(daq_dac_ctrl_command(&s,&k,true,refused[i],0,a)==DAQ_DAC_RESULT_REFUSED_STATE&&a[0]==0&&!s.ch[0].active);
+    assert(daq_dac_ctrl_command(&s,&k,NULL,true,refused[i],0,a)==DAQ_DAC_RESULT_REFUSED_STATE&&a[0]==0&&!s.ch[0].active);
     assert(s.ch[0].last_result==DAQ_DAC_RESULT_REFUSED_STATE);}
   {daq_dac_command_t k=cmd(0,1,DAQ_DAC_WAVE_DC,0,1,0);
-   assert(daq_dac_ctrl_command(&s,&k,false,0,0,a)==DAQ_DAC_RESULT_REFUSED_UNKNOWN_STATE&&!s.ch[0].active);
-   k.waveform=9; assert(daq_dac_ctrl_command(&s,&k,true,1,0,a)==DAQ_DAC_RESULT_BAD_REQUEST&&!s.ch[0].active);
-   k.waveform=0; k.offset_v=NAN; assert(daq_dac_ctrl_command(&s,&k,true,1,0,a)==DAQ_DAC_RESULT_BAD_REQUEST);}
+   assert(daq_dac_ctrl_command(&s,&k,NULL,false,0,0,a)==DAQ_DAC_RESULT_REFUSED_UNKNOWN_STATE&&!s.ch[0].active);
+   k.waveform=9; assert(daq_dac_ctrl_command(&s,&k,NULL,true,1,0,a)==DAQ_DAC_RESULT_BAD_REQUEST&&!s.ch[0].active);
+   k.waveform=0; k.offset_v=NAN; assert(daq_dac_ctrl_command(&s,&k,NULL,true,1,0,a)==DAQ_DAC_RESULT_BAD_REQUEST);}
   /* Allowed in Startup and Idle, per channel. */
   {daq_dac_command_t k=cmd(1,1,DAQ_DAC_WAVE_DC,0,1,0);
-   assert(daq_dac_ctrl_command(&s,&k,true,0,0,a)==0&&a[1]==DAQ_DAC_ACTION_START&&a[0]==0&&s.ch[1].active);}
+   assert(daq_dac_ctrl_command(&s,&k,NULL,true,0,0,a)==0&&a[1]==DAQ_DAC_ACTION_START&&a[0]==0&&s.ch[1].active);}
   start(0,0); assert(daq_dac_ctrl_active_mask(&s)==3);
   /* Identical keepalive: no restart, lease extended past the original deadline. */
   {daq_dac_command_t k=cmd(0,1,DAQ_DAC_WAVE_SINE,0.5f,1.5f,1.0f);
-   assert(daq_dac_ctrl_command(&s,&k,true,1,1500,a)==0&&a[0]==0);
+   assert(daq_dac_ctrl_command(&s,&k,NULL,true,1,1500,a)==0&&a[0]==0);
    daq_dac_ctrl_tick(&s,true,1,3000,a); assert(s.ch[0].active&&a[0]==0);
    /* A changed request restarts. */
-   k.frequency_hz=2.0f; assert(daq_dac_ctrl_command(&s,&k,true,1,3000,a)==0&&a[0]==DAQ_DAC_ACTION_START);}
+   k.frequency_hz=2.0f; assert(daq_dac_ctrl_command(&s,&k,NULL,true,1,3000,a)==0&&a[0]==DAQ_DAC_ACTION_START);}
   /* Lease expiry (GS link loss) turns off only the expired channel. */
-  {daq_dac_command_t k=cmd(1,1,DAQ_DAC_WAVE_DC,0,1,0);daq_dac_ctrl_command(&s,&k,true,1,4000,a);}
+  {daq_dac_command_t k=cmd(1,1,DAQ_DAC_WAVE_DC,0,1,0);daq_dac_ctrl_command(&s,&k,NULL,true,1,4000,a);}
   daq_dac_ctrl_tick(&s,true,1,4999,a); assert(a[0]==0&&a[1]==0);
   daq_dac_ctrl_tick(&s,true,1,5000,a); assert(a[0]==DAQ_DAC_ACTION_STOP&&a[1]==0&&!s.ch[0].active&&s.ch[0].off_reason==DAQ_DAC_OFF_LEASE);
   daq_dac_ctrl_tick(&s,true,1,6000,a); assert(a[1]==DAQ_DAC_ACTION_STOP&&s.ch[1].off_reason==DAQ_DAC_OFF_LEASE);
@@ -165,40 +166,46 @@ int main(void){
   assert(a[0]==DAQ_DAC_ACTION_STOP&&a[1]==DAQ_DAC_ACTION_STOP&&s.ch[0].off_reason==DAQ_DAC_OFF_ABORT&&s.ch[1].off_reason==DAQ_DAC_OFF_ABORT);
   /* Commanded off, per channel and all; never gated by flight state. */
   start(0,0);start(1,0);
-  {daq_dac_command_t k=cmd(0,0,0,0,0,0);assert(daq_dac_ctrl_command(&s,&k,true,7,0,a)==0&&a[0]==DAQ_DAC_ACTION_STOP&&a[1]==0);
+  {daq_dac_command_t k=cmd(0,0,0,0,0,0);assert(daq_dac_ctrl_command(&s,&k,NULL,true,7,0,a)==0&&a[0]==DAQ_DAC_ACTION_STOP&&a[1]==0);
    assert(s.ch[0].off_reason==DAQ_DAC_OFF_COMMANDED&&s.ch[1].active);
-   k.channel=DAQ_DAC_CHANNEL_ALL;assert(daq_dac_ctrl_command(&s,&k,false,0,0,a)==0&&a[1]==DAQ_DAC_ACTION_STOP&&!s.ch[1].active);}
+   k.channel=DAQ_DAC_CHANNEL_ALL;assert(daq_dac_ctrl_command(&s,&k,NULL,false,0,0,a)==0&&a[1]==DAQ_DAC_ACTION_STOP&&!s.ch[1].active);}
   /* Hardware refusal leaves it off with a hardware reason. */
-  {daq_dac_command_t k=cmd(0,1,DAQ_DAC_WAVE_DC,0,1,0);daq_dac_ctrl_command(&s,&k,true,1,0,a);
+  {daq_dac_command_t k=cmd(0,1,DAQ_DAC_WAVE_DC,0,1,0);daq_dac_ctrl_command(&s,&k,NULL,true,1,0,a);
    daq_dac_ctrl_started(&s,0,NULL,false);assert(!s.ch[0].active&&s.ch[0].off_reason==DAQ_DAC_OFF_HARDWARE&&s.ch[0].last_result==DAQ_DAC_RESULT_HARDWARE_ERROR);}
   /* Status: applied clamped values, actual frequency, sequence, readings. */
-  {daq_dac_command_t k=cmd(1,1,DAQ_DAC_WAVE_STAIRCASE,9.0f,2.0f,0);k.sequence=0xABCDEF01u;k.steps=40;
-   daq_dac_ctrl_command(&s,&k,true,1,0,a);daq_dac_plan_t p={.actual_dwell_ms=501};daq_dac_ctrl_started(&s,1,&p,true);
+  {daq_dac_command_t k=cmd(1,1,DAQ_DAC_WAVE_STAIRCASE,9.0f,2.0f,0);k.sequence=0xABCDEF01u;k.steps=400;
+   daq_dac_ctrl_command(&s,&k,NULL,true,1,0,a);daq_dac_plan_t p={.actual_dwell_ms=501};daq_dac_ctrl_started(&s,1,&p,true);
    (void)daq_dac_take_changes(&s);
-   out[1]=2.5f;rb[1]=2.49f;daq_dac_status_encode(&s,1,0,1,77,out,rb,st);const uint8_t*q=st+8+36;
+   out[1]=2.5f;rb[1]=2.49f;daq_dac_status_encode(&s,NULL,1,0,1,77,out,rb,st);const uint8_t*q=st+8+52;
    assert(q[0]==1&&q[1]==DAQ_DAC_WAVE_STAIRCASE&&q[2]==0&&q[3]==(DAQ_DAC_CLAMP_AMPLITUDE|DAQ_DAC_CLAMP_STEPS));
-   assert((q[6]|(q[7]<<8))==32&&near(rdf(q+8),1.1f,1e-6f)&&rdf(q+12)==2.0f&&rd32(q+20)==501&&rd32(q+24)==0xABCDEF01u);
+   assert((q[6]|(q[7]<<8))==256&&near(rdf(q+8),1.1f,1e-6f)&&rdf(q+12)==2.0f&&rd32(q+20)==501&&rd32(q+24)==0xABCDEF01u);
    assert(rdf(q+28)==2.5f&&rdf(q+32)==2.49f);}
   /* Changes are reported once. */
   start(0,0); assert(daq_dac_take_changes(&s)&1); assert(daq_dac_take_changes(&s)==0);
-  puts("ok");return 0;}''', [ROOT / 'Core/Inc'], [ROOT / 'Core/Src/daq_dac_control.c'])
+  puts("ok");return 0;}''', [ROOT / 'Core/Inc'], [ROOT / 'Core/Src/daq_dac_control.c', ROOT / 'Core/Src/daq_dac_wave.c'])
 
     def test_command_wire_decode(self):
         run_c(self, CONTROL + r'''
+static uint16_t rd16(const uint8_t *p){return (uint16_t)(p[0]|(p[1]<<8));}
 int main(void){
-  uint8_t b[32]; daq_dac_command_t k=cmd(1,1,DAQ_DAC_WAVE_TRIANGLE,0.25f,1.5f,3.0f),d;
-  k.lease_ms=4000;k.sequence=99;k.dwell_ms=1234;k.steps=6;
+  uint8_t b[48]; daq_dac_command_t k=cmd(1,1,DAQ_DAC_WAVE_CHIRP,0.25f,1.5f,3.0f),d;
+  k.lease_ms=4000;k.sequence=99;k.dwell_ms=1234;k.steps=6;k.phase_q16=0x4000;k.duty_q16=0x8000;
+  k.frequency_stop_hz=300.0f;k.sweep_ms=5000;k.table_crc=0xCAFEF00Du;k.table_len=512;k.flags=DAQ_DAC_FLAG_LOG_SWEEP;
+  assert(DAQ_DAC_COMMAND_BYTES==48);
   daq_dac_command_encode(&k,b);
-  assert(b[0]==1&&b[1]==1&&b[2]==1&&b[3]==3&&rdf(b+4)==0.25f&&rdf(b+8)==1.5f&&rdf(b+12)==3.0f);
-  assert(b[16]==6&&b[18]==(4000&255)&&rd32(b+20)==1234&&rd32(b+24)==99&&rd32(b+28)==0);
-  assert(daq_dac_command_decode(b,32,&d)==0&&d.channel==1&&d.waveform==3&&d.steps==6&&d.lease_ms==4000&&d.sequence==99);
-  assert(daq_dac_command_decode(b,31,&d)!=0&&daq_dac_command_decode(NULL,32,&d)!=0);
-  b[0]=2; assert(daq_dac_command_decode(b,32,&d)!=0); b[0]=1;
-  b[2]=2; assert(daq_dac_command_decode(b,32,&d)!=0); b[2]=1;
-  b[1]=2; assert(daq_dac_command_decode(b,32,&d)!=0);
-  b[1]=0xFF; assert(daq_dac_command_decode(b,32,&d)!=0); /* all + enable */
-  b[2]=0; assert(daq_dac_command_decode(b,32,&d)==0&&d.channel==DAQ_DAC_CHANNEL_ALL);
-  puts("ok");return 0;}''', [ROOT / 'Core/Inc'], [ROOT / 'Core/Src/daq_dac_control.c'])
+  assert(b[0]==2&&b[1]==1&&b[2]==1&&b[3]==6&&rdf(b+4)==0.25f&&rdf(b+8)==1.5f&&rdf(b+12)==3.0f);
+  assert(b[16]==6&&b[18]==(4000&255)&&rd32(b+20)==1234&&rd32(b+24)==99&&rd16(b+28)==0x4000&&rd16(b+30)==0x8000);
+  assert(rdf(b+32)==300.0f&&rd32(b+36)==5000&&rd32(b+40)==0xCAFEF00Du&&rd16(b+44)==512&&b[46]==2&&b[47]==0);
+  assert(daq_dac_command_decode(b,48,&d)==0&&d.channel==1&&d.waveform==6&&d.steps==6&&d.lease_ms==4000&&d.sequence==99);
+  assert(d.phase_q16==0x4000&&d.duty_q16==0x8000&&d.frequency_stop_hz==300.0f&&d.sweep_ms==5000);
+  assert(d.table_crc==0xCAFEF00Du&&d.table_len==512&&d.flags==DAQ_DAC_FLAG_LOG_SWEEP);
+  assert(daq_dac_command_decode(b,47,&d)!=0&&daq_dac_command_decode(NULL,48,&d)!=0);
+  b[0]=1; assert(daq_dac_command_decode(b,48,&d)!=0); b[0]=2; /* v1 is gone. */
+  b[2]=2; assert(daq_dac_command_decode(b,48,&d)!=0); b[2]=1;
+  b[1]=2; assert(daq_dac_command_decode(b,48,&d)!=0);
+  b[1]=0xFF; assert(daq_dac_command_decode(b,48,&d)!=0); /* all + enable */
+  b[2]=0; assert(daq_dac_command_decode(b,48,&d)==0&&d.channel==DAQ_DAC_CHANNEL_ALL);
+  puts("ok");return 0;}''', [ROOT / 'Core/Inc'], [ROOT / 'Core/Src/daq_dac_control.c', ROOT / 'Core/Src/daq_dac_wave.c'])
 
 
 MOCK_MAIN = r'''
@@ -228,6 +235,7 @@ extern DAC_TypeDef mock_dac; extern TIM_TypeDef mock_tim[2]; extern DMA_Channel_
 #define DAC_CR_TSEL1 (15u<<2)
 #define DAC_CR_DMAEN1 (1u<<12)
 #define TIM_CR1_CEN 1u
+#define TIM_CR1_ARPE (1u<<7)
 #define TIM_CR2_MMS (7u<<4)
 #define TIM_CR2_MMS_1 (2u<<4)
 #define TIM_EGR_UG 1u
@@ -334,9 +342,9 @@ static uint64_t mono; uint64_t daq_log_monotonic_ms(void){return mono;}
 static bool has_state=true; static uint8_t state=1;
 bool flight_state_cache_has_value(void){return has_state;}
 uint8_t flight_state_cache_value(void){return state;}
-static uint8_t last_status[80]; static unsigned statuses;
+static uint8_t last_status[136]; static unsigned statuses;
 SedsResult log_telemetry_asynchronous(SedsDataType t,const void *d,size_t n,size_t sz){
-  assert(t==SEDS_DT_DAQ_DAC_STATUS&&n==80&&sz==1);memcpy(last_status,d,80);++statuses;return SEDS_OK;}
+  assert(t==SEDS_DT_DAQ_DAC_STATUS&&n==136&&sz==1);memcpy(last_status,d,136);++statuses;return SEDS_OK;}
 static unsigned rows; static char last_row[64];
 sd_card_status_t sd_card_enqueue_csv_row(const char *n,uint64_t t,float v,const daq_calibration_t *c){(void)t;(void)v;(void)c;
   assert(!strncmp(n,"dac_ch",6));strncpy(last_row,n,63);++rows;return SD_CARD_STATUS_OK;}
@@ -344,7 +352,7 @@ static uint32_t now=1000;
 static void tick(void){now+=50;daq_dac_service(now);}
 static void send(uint8_t ch,uint8_t en,uint8_t wave,float amp,float off,float f,uint32_t seq){
   daq_dac_command_t k={.channel=ch,.enable=en,.waveform=wave,.amplitude_v=amp,.offset_v=off,.frequency_hz=f,.steps=4,.dwell_ms=100,.lease_ms=1000,.sequence=seq};
-  uint8_t b[32];daq_dac_command_encode(&k,b);daq_dac_submit_command(b,32);}
+  uint8_t b[48];daq_dac_command_encode(&k,b);daq_dac_submit_command(b,48);}
 static int on(unsigned c){return (mock_dac.CR&(DAC_CR_EN1<<(c?16:0)))!=0;}
 static int dma_on(unsigned c){return (mock_dma[c].CCR&DMA_CCR_EN)!=0;}
 static int tim_on(unsigned c){return (mock_tim[c].CR1&TIM_CR1_CEN)!=0;}
@@ -354,14 +362,14 @@ int main(void){
   /* Boot: CubeMX left something enabled; init forces everything off. */
   mock_dac.CR=DAC_CR_EN1|(DAC_CR_EN1<<16);mock_dma[0].CCR=DMA_CCR_EN;
   assert(daq_dac_init()==TX_SUCCESS); all_off(); assert(!mock_primask);
-  tick(); assert(statuses==1&&last_status[8]==0&&last_status[44]==0&&g_daq_dac_active_mask==0);
+  tick(); assert(statuses==1&&last_status[8]==0&&last_status[60]==0&&g_daq_dac_active_mask==0);
   daq_dac_sample_t s; assert(daq_dac_sample(&s,1)==TX_SUCCESS&&isnan(s.analog_outputs_v[0])&&isnan(s.analog_outputs_v[1]));
   /* Sine on channel 0: TIM7 trigger, self-linked circular DMA into DHR12R1. */
   send(0,1,DAQ_DAC_WAVE_SINE,0.5f,1.5f,10.0f,1); tick();
   assert(on(0)&&dma_on(0)&&tim_on(0)&&!on(1)&&config_trigger[0]==DAC_TRIGGER_T7_TRGO&&g_daq_dac_active_mask==1);
-  assert(mock_dma[0].CDAR==(uint32_t)(uintptr_t)&mock_dac.DHR12R1&&mock_dma[0].CBR1==32*4&&mock_dma[0].CTR2==(2u|DMA_CTR2_DREQ));
+  assert(mock_dma[0].CDAR==(uint32_t)(uintptr_t)&mock_dac.DHR12R1&&mock_dma[0].CBR1==256*2&&mock_dma[0].CTR2==(2u|DMA_CTR2_DREQ));
   assert((mock_dma[0].CLLR&(DMA_CLLR_ULL|DMA_CLLR_USA|DMA_CLLR_UB1))==(DMA_CLLR_ULL|DMA_CLLR_USA|DMA_CLLR_UB1));
-  assert((mock_dac.CR&DAC_CR_DMAEN1)&&(mock_tim[0].PSC+1)*(mock_tim[0].ARR+1)==500000u);
+  assert((mock_dac.CR&DAC_CR_DMAEN1)&&(mock_tim[0].PSC+1)*(mock_tim[0].ARR+1)==62500u&&(mock_tim[0].CR1&TIM_CR1_ARPE)&&mock_dma[0].CTR1==(DMA_CTR1_SINC|(1u<<DMA_CTR1_SDW_LOG2_Pos)|(2u<<DMA_CTR1_DDW_LOG2_Pos)));
   assert(last_status[8]==1&&last_status[9]==DAQ_DAC_WAVE_SINE&&rows>=10);
   assert(daq_dac_sample(&s,1)==TX_SUCCESS&&fabsf(s.analog_outputs_v[0]-1.5f)<0.002f);
   /* Active status every 200 ms carries the ADC4 internal readback. */
@@ -374,7 +382,7 @@ int main(void){
   assert(on(1)&&!dma_on(1)&&!tim_on(1)&&config_trigger[1]==DAC_TRIGGER_NONE&&g_daq_dac_active_mask==3);
   /* Lease expiry (no keepalive) turns both off. */
   for(int i=0;i<25;i++)tick();
-  all_off(); assert(last_status[8+4]==DAQ_DAC_OFF_LEASE&&last_status[44+4]==DAQ_DAC_OFF_LEASE&&g_daq_dac_active_mask==0);
+  all_off(); assert(last_status[8+4]==DAQ_DAC_OFF_LEASE&&last_status[60+4]==DAQ_DAC_OFF_LEASE&&g_daq_dac_active_mask==0);
   /* Enable refused outside Startup/Idle. */
   state=2; send(0,1,DAQ_DAC_WAVE_DC,0,1,0,3); tick(); all_off(); assert(last_status[8+2]==DAQ_DAC_RESULT_REFUSED_STATE&&last_status[2]==1);
   has_state=false; send(0,1,DAQ_DAC_WAVE_DC,0,1,0,4); tick(); all_off(); assert(last_status[8+2]==DAQ_DAC_RESULT_REFUSED_UNKNOWN_STATE&&last_status[2]==2);
@@ -401,7 +409,7 @@ int main(void){
   fail_start=1; send(0,1,DAQ_DAC_WAVE_SINE,0.3f,1,1,70); tick(); all_off(); fail_start=0;
   assert(last_status[8+2]==DAQ_DAC_RESULT_HARDWARE_ERROR&&last_status[8+4]==DAQ_DAC_OFF_HARDWARE);
   /* Malformed payloads are counted and ignored. */
-  uint8_t junk[31]={1}; daq_dac_submit_command(junk,31); tick(); all_off(); assert(g_daq_dac_malformed==1);
+  uint8_t junk[47]={2}; daq_dac_submit_command(junk,47); tick(); all_off(); assert(g_daq_dac_malformed==1);
   assert(!mock_primask);
   puts("ok");return 0;}
 '''
@@ -416,7 +424,7 @@ class HalGlueTests(unittest.TestCase):
             src = stub / 'daq_dac_glue.c'
             src.write_text('#define TELEMETRY_ENABLED 1\n' + (ROOT / 'Core/Src/daq_dac.c').read_text())
             run_c(self, '#define TELEMETRY_ENABLED 1\n' + GLUE, [stub, ROOT / 'Core/Inc'],
-                  [src, ROOT / 'Core/Src/daq_dac_control.c'])
+                  [src, ROOT / 'Core/Src/daq_dac_control.c', ROOT / 'Core/Src/daq_dac_wave.c'])
 
 
 class WiringContractTests(unittest.TestCase):
@@ -452,8 +460,9 @@ class WiringContractTests(unittest.TestCase):
     def test_schema_entries_and_canonical_ids(self):
         schema = {t['name']: t for t in json.loads((ROOT / 'config/sedsnet.json').read_text())['types']}
         header = (ROOT / 'Core/Inc/sedsnet_config.h').read_text()
-        for name, count, endpoint in (('DAQ_DAC_COMMAND', 32, 'FillSdCard'),
-                                      ('DAQ_DAC_STATUS', 80, 'ActuatorGroundStation')):
+        for name, count, endpoint in (('DAQ_DAC_COMMAND', 48, 'FillSdCard'),
+                                      ('DAQ_DAC_STATUS', 136, 'ActuatorGroundStation'),
+                                      ('DAQ_DAC_TABLE', 76, 'FillSdCard')):
             entry = schema[name]
             self.assertEqual(entry['element'], {'kind': 'Static', 'data_type': 'UInt8', 'count': count})
             self.assertEqual(entry['endpoints'], [endpoint])
@@ -464,15 +473,20 @@ class WiringContractTests(unittest.TestCase):
             ident = 0x10000 | (value & 0x0fffffff)
             self.assertRegex(header, rf'#define SEDS_DT_{name} \(\(uint32_t\){ident}U\)')
         control = (ROOT / 'Core/Inc/daq_dac_control.h').read_text()
-        self.assertIn('#define DAQ_DAC_COMMAND_BYTES 32U', control)
+        self.assertIn('#define DAQ_DAC_COMMAND_BYTES 48U', control)
+        self.assertIn('#define DAQ_DAC_TABLE_BYTES (12U + 2U * DAQ_DAC_TABLE_CHUNK_SAMPLES)', control)
         # The ABORT type must keep reaching the DAQ's SD_CARD endpoint.
         self.assertIn('FillSdCard', schema['ABORT']['endpoints'])
         self.assertIn('FillSdCard', schema['FLIGHT_STATE']['endpoints'])
 
     def test_ram_cost_stays_small(self):
+        # 2 x 512 play codes + a 512-sample uploaded shape, 16 bits each: 3 KiB.
         source = (ROOT / 'Core/Src/daq_dac.c').read_text()
-        self.assertRegex(source, r'static uint32_t g_table\[DAQ_DAC_CHANNELS\]\[DAQ_DAC_TABLE_LEN\]')
-        self.assertIn('#define DAQ_DAC_TABLE_LEN 32U', (ROOT / 'Core/Inc/daq_dac_control.h').read_text())
+        self.assertRegex(source, r'static uint16_t g_table\[DAQ_DAC_CHANNELS\]\[DAQ_DAC_ARB_LEN_MAX\]')
+        self.assertRegex(source, r'static int16_t g_shape\[DAQ_DAC_ARB_LEN_MAX\]')
+        wave = (ROOT / 'Core/Inc/daq_dac_wave.h').read_text()
+        self.assertIn('#define DAQ_DAC_PERIODIC_LEN_MAX 256U', wave)
+        self.assertIn('#define DAQ_DAC_ARB_LEN_MAX 512U', wave)
         self.assertIsNone(re.search(r'\bmalloc\b|tx_byte_allocate', source))
 
 

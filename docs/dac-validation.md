@@ -67,13 +67,22 @@ this. The SD card keeps the full-rate raw ADC data for offline comparison.
 - `daq_dac_control.c` is HAL-free. It decodes the command, clamps the request,
   builds the waveform table, plans the timer and runs the safety state machine.
   `daq_dac.c` drives the hardware.
-- Waveforms: DC, square (50 %), sine, triangle and staircase. Periodic waves use
-  32 samples per period at 0.01-1000 Hz. A staircase has 2-32 steps from
-  offset-amplitude to offset+amplitude, each held for 10-20000 ms. TIM7 (OUT1)
-  and TIM15 (OUT2) TRGO trigger the DAC. GPDMA1 channels 10 and 11 reload a
-  self-linked list item, so the table repeats with no interrupts or CPU time,
-  and load-cell acquisition is untouched. DC needs no timer or DMA. RAM cost is
-  a 256-byte table plus about 250 bytes of state.
+- Waveforms: DC, square (with duty), sine, triangle, sawtooth/ramp (up or
+  down), staircase, chirp, noise and arbitrary tables uploaded by the station
+  (normalized shapes, for example equation-defined or from a WAV file, scaled
+  by amplitude, offset, phase and frequency).
+  [dac-waveforms.md](dac-waveforms.md) is the normative specification: sample
+  formulas, rate and table-length selection, CRC, wire layouts and limits.
+  - Periodic waves run at 0.01 Hz-10 kHz with 16-256 samples per period, up to
+    200 kS/s.
+  - TIM7 (OUT1) and TIM15 (OUT2) TRGO trigger the DAC. GPDMA1 channels 10 and
+    11 reload a self-linked list item, so a table repeats with no interrupts
+    or CPU time, and load-cell acquisition is untouched.
+  - DC needs no timer or DMA.
+  - RAM cost:
+    - per-channel play tables: 2 KiB;
+    - uploaded normalized shape: 1 KiB;
+    - state: about 0.4 KiB.
 - Each request is clamped to 0.20-3.10 V, and the applied values and clamp
   flags appear in status. The timer quantises frequency and dwell, and status
   reports the actual values.
@@ -96,13 +105,17 @@ this. The SD card keeps the full-rate raw ADC data for offline comparison.
   internal-ADC pass, and only while a channel is active.
 - SD: each change writes `dac_chN_active`, `_waveform`, `_amplitude_v`,
   `_offset_v`, `_frequency_hz` (actual), `_steps`, `_dwell_ms`, `_sequence`,
-  `_result` and `_off_reason` rows. While active, `dac_chN_output_v` and
+  `_result`, `_off_reason`, `_update_hz`, `_samples` and `_duty` rows. While active, `dac_chN_output_v` and
   `dac_chN_readback_v` are written at 10 Hz. The existing `analog_out_N_v`
   snapshot rows now report the DAC output, or NaN when off.
 
-The wire layouts are in `config/sedsnet.json` (`DAQ_DAC_COMMAND`, 32 bytes, GS to
-SD_CARD, unreliable; `DAQ_DAC_STATUS`, 80 bytes, to GROUND_STATION). They are
-also in `Core/Inc/daq_dac_control.h`.
+The wire layouts are in `config/sedsnet.json`:
+- `DAQ_DAC_COMMAND`: 48 bytes, GS to SD_CARD, unreliable;
+- `DAQ_DAC_TABLE`: 76 bytes, GS to SD_CARD;
+- `DAQ_DAC_STATUS`: 136 bytes, to GROUND_STATION.
+
+The byte tables are in [dac-waveforms.md](dac-waveforms.md) and
+`Core/Inc/daq_dac_control.h`.
 
 ## Not yet verified
 

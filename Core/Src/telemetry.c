@@ -733,6 +733,14 @@ static SedsResult sd_card_endpoint_receive(const SedsPacketView *packet, void *c
       daq_dac_submit_command(packet->payload, packet->payload_len);
     return SEDS_OK;
   }
+  if (packet->ty == SEDS_DT_DAQ_DAC_TABLE) {
+    /* Table uploads come only from the station; lost chunks show as gaps in
+     * the status chunk map and the station resends them. */
+    if (packet->sender && packet->payload &&
+        seds_router_sender_matches_hostname(g_router.r, packet->sender, packet->sender_len, "GS", 2U))
+      daq_dac_submit_table(packet->payload, packet->payload_len);
+    return SEDS_OK;
+  }
   return sd_retry_receive(packet, context);
 }
 

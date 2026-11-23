@@ -20,7 +20,9 @@ extern DAC_HandleTypeDef hdac1;
 
 /* Channel c uses DAC1 OUTc+1, a dedicated trigger timer and a GPDMA channel
  * left free by CubeMX (channels 0..3 belong to SPI2/ADC). The DMA re-reads
- * its own self-linked list item, so the table repeats without interrupts. */
+ * its own self-linked list item, so the table repeats without interrupts.
+ * Tables hold 16-bit codes; the GPDMA zero-pads each to the 32-bit DHR12Rx
+ * write (SDW half-word, DDW word, PAM right-aligned), halving table RAM. */
 static DMA_Channel_TypeDef *const k_dma[DAQ_DAC_CHANNELS] = {GPDMA1_Channel10, GPDMA1_Channel11};
 static TIM_TypeDef *const k_tim[DAQ_DAC_CHANNELS] = {TIM7, TIM15};
 static const uint32_t k_trigger[DAQ_DAC_CHANNELS] = {DAC_TRIGGER_T7_TRGO, DAC_TRIGGER_T15_TRGO};
@@ -34,8 +36,17 @@ static const uint32_t k_adc_channel[DAQ_DAC_CHANNELS] = {ADC_CHANNEL_DAC1CH1_ADC
 #define DAQ_DAC_SD_ROW_MS 100U
 #define DAQ_DAC_DMA_FLAGS 0x7F00U /* CFCR: every channel event flag. */
 
-/* Internal SRAM is not behind DCACHE1, so plain .bss is DMA-coherent. */
-static uint32_t g_table[DAQ_DAC_CHANNELS][DAQ_DAC_TABLE_LEN] __attribute__((aligned(4)));
+/* Internal SRAM is not behind DCACHE1, so plain .bss is DMA-coherent.
+ * Play tables: 2 x 512 x 2 B (built-in waves use up to 256). Uploaded
+ * normalized shape: 512 x 2 B, shared; each channel scales it into its own
+ * play table, so amplitude/offset/phase changes need no new upload. */
+static uint16_t g_table[DAQ_DAC_CHANNELS][DAQ_DAC_ARB_LEN_MAX] __attribute__((aligned(4)));
+static int16_t g_shape[DAQ_DAC_ARB_LEN_MAX] __attribute__((aligned(4)));
+static daq_dac_table_t g_tab;
+static uint32_t g_chirp_start_ms[DAQ_DAC_CHANNELS];
+/* One pending BEGIN/COMMIT/CLEAR for the service; DATA is stored directly. */
+static daq_dac_table_msg_t g_table_op;
+static volatile uint8_t g_table_op_pending;
 /* Linked-list item, in update order: CBR1, CSAR, CLLR. */
 static uint32_t g_lli[DAQ_DAC_CHANNELS][3] __attribute__((aligned(4)));
 static daq_dac_ctrl_t g_ctrl;
@@ -59,6 +70,8 @@ volatile uint32_t g_daq_dac_stops __attribute__((used));
 volatile uint32_t g_daq_dac_emergency_offs __attribute__((used));
 volatile uint32_t g_daq_dac_status_sent __attribute__((used));
 volatile uint32_t g_daq_dac_status_failed __attribute__((used));
+volatile uint32_t g_daq_dac_table_chunks __attribute__((used));
+volatile uint32_t g_daq_dac_table_rejected __attribute__((used));
 
 static uint32_t timer_clock_hz(unsigned c)
 {
@@ -91,7 +104,7 @@ static void hw_stop(unsigned c)
   ++g_daq_dac_stops;
 }
 
-static bool hw_start(unsigned c, const daq_dac_plan_t *plan)
+static bool hw_start(unsigned c, const daq_dac_plan_t *plan, const uint16_t *src)
 {
   hw_stop(c);
   if (!g_hw_ready) return false;
@@ -106,12 +119,12 @@ static bool hw_start(unsigned c, const daq_dac_plan_t *plan)
   config.DAC_UserTrimming = DAC_TRIMMING_FACTORY;
   config.DAC_AutonomousMode = DAC_AUTONOMOUS_MODE_DISABLE;
   if (HAL_DAC_ConfigChannel(&hdac1, &config, k_hal_channel[c]) != HAL_OK) return false;
-  if (HAL_DAC_SetValue(&hdac1, k_hal_channel[c], DAC_ALIGN_12B_R, g_table[c][0]) != HAL_OK) return false;
+  if (HAL_DAC_SetValue(&hdac1, k_hal_channel[c], DAC_ALIGN_12B_R, src[0]) != HAL_OK) return false;
 
   if (plan->samples > 1U) {
     TIM_TypeDef *tim = k_tim[c];
     if (c == 0U) __HAL_RCC_TIM7_CLK_ENABLE(); else __HAL_RCC_TIM15_CLK_ENABLE();
-    tim->CR1 = 0U;
+    tim->CR1 = TIM_CR1_ARPE; /* A chirp retune lands on an update event. */
     tim->PSC = plan->psc;
     tim->ARR = plan->arr;
     tim->CR2 = (tim->CR2 & ~TIM_CR2_MMS) | TIM_CR2_MMS_1; /* Update event -> TRGO. */
@@ -119,18 +132,18 @@ static bool hw_start(unsigned c, const daq_dac_plan_t *plan)
     tim->SR = 0U;
 
     DMA_Channel_TypeDef *dma = k_dma[c];
-    const uint32_t bytes = (uint32_t)plan->samples * sizeof(uint32_t);
+    const uint32_t bytes = (uint32_t)plan->samples * sizeof(uint16_t);
     const uint32_t node = (uint32_t)(uintptr_t)g_lli[c];
     g_lli[c][0] = bytes;
-    g_lli[c][1] = (uint32_t)(uintptr_t)g_table[c];
+    g_lli[c][1] = (uint32_t)(uintptr_t)src;
     g_lli[c][2] = DMA_CLLR_UB1 | DMA_CLLR_USA | DMA_CLLR_ULL | (node & DMA_CLLR_LA);
     dma->CCR = DMA_CCR_RESET;
     dma->CFCR = DAQ_DAC_DMA_FLAGS;
     dma->CLBAR = node & 0xFFFF0000U;
-    dma->CTR1 = DMA_CTR1_SINC | (2U << DMA_CTR1_SDW_LOG2_Pos) | (2U << DMA_CTR1_DDW_LOG2_Pos);
+    dma->CTR1 = DMA_CTR1_SINC | (1U << DMA_CTR1_SDW_LOG2_Pos) | (2U << DMA_CTR1_DDW_LOG2_Pos);
     dma->CTR2 = (k_request[c] << DMA_CTR2_REQSEL_Pos) | DMA_CTR2_DREQ;
     dma->CBR1 = bytes;
-    dma->CSAR = (uint32_t)(uintptr_t)g_table[c];
+    dma->CSAR = (uint32_t)(uintptr_t)src;
     dma->CDAR = (uint32_t)(uintptr_t)(c == 0U ? &DAC1->DHR12R1 : &DAC1->DHR12R2);
     dma->CLLR = g_lli[c][2];
     dma->CCR = DMA_CCR_EN;
@@ -158,6 +171,8 @@ UINT daq_dac_init(void)
   g_hw_ready = hdac1.Instance == DAC1 && hdac1.State == HAL_DAC_STATE_READY;
   for (unsigned c = 0U; c < DAQ_DAC_CHANNELS; ++c) hw_stop(c);
   daq_dac_ctrl_init(&g_ctrl);
+  daq_dac_table_init(&g_tab, g_shape);
+  g_table_op_pending = 0U;
   g_daq_dac_active_mask = 0U;
   return TX_SUCCESS;
 }
@@ -198,6 +213,23 @@ void daq_dac_submit_command(const uint8_t *payload, size_t len)
   __set_PRIMASK(mask);
 }
 
+void daq_dac_submit_table(const uint8_t *payload, size_t len)
+{
+  daq_dac_table_msg_t msg;
+  if (daq_dac_table_decode(payload, len, &msg) != 0) { ++g_daq_dac_table_rejected; return; }
+  const uint32_t mask = __get_PRIMASK(); __disable_irq();
+  if (msg.op == DAQ_DAC_TABLE_OP_DATA) {
+    /* Only a LOADING shape accepts chunks; the DMA reads the channels' own
+     * play tables, never the shape. */
+    if (daq_dac_table_data(&g_tab, &msg) == 0) ++g_daq_dac_table_chunks;
+    else ++g_daq_dac_table_rejected;
+  } else {
+    g_table_op = msg; /* Latest control op wins; the station repeats it. */
+    g_table_op_pending = 1U;
+  }
+  __set_PRIMASK(mask);
+}
+
 void daq_dac_emergency_off(uint8_t reason)
 {
   const uint32_t mask = __get_PRIMASK(); __disable_irq();
@@ -223,14 +255,17 @@ SedsResult flight_state_cache_apply_network_update(const SedsPacketView *packet)
 }
 #endif
 
-static void apply_actions(const uint8_t actions[DAQ_DAC_CHANNELS])
+static void apply_actions(const uint8_t actions[DAQ_DAC_CHANNELS], uint32_t now_ms)
 {
   for (unsigned c = 0U; c < DAQ_DAC_CHANNELS; ++c) {
     if (actions[c] == DAQ_DAC_ACTION_STOP) hw_stop(c);
     else if (actions[c] == DAQ_DAC_ACTION_START) {
       daq_dac_plan_t plan;
-      const bool planned = daq_dac_plan(&g_ctrl.ch[c].config, timer_clock_hz(c), &plan, g_table[c]) == 0;
-      const bool ok = planned && hw_start(c, &plan);
+      const daq_dac_config_t *cfg = &g_ctrl.ch[c].config;
+      const bool planned = daq_dac_plan(cfg, timer_clock_hz(c), &plan, g_table[c], &g_tab) == 0;
+      const uint16_t *src = g_table[c];
+      g_chirp_start_ms[c] = now_ms;
+      const bool ok = planned && hw_start(c, &plan, src);
       if (!ok) hw_stop(c);
       daq_dac_ctrl_started(&g_ctrl, c, &plan, ok);
     }
@@ -239,14 +274,17 @@ static void apply_actions(const uint8_t actions[DAQ_DAC_CHANNELS])
 
 #if (DISABLE_SD_CARD == 0U)
 enum { SD_ACTIVE, SD_WAVEFORM, SD_AMPLITUDE, SD_OFFSET, SD_FREQUENCY, SD_STEPS, SD_DWELL,
-       SD_SEQUENCE, SD_RESULT, SD_REASON, SD_OUTPUT, SD_READBACK, SD_NAMES };
+       SD_SEQUENCE, SD_RESULT, SD_REASON, SD_UPDATE, SD_SAMPLES, SD_DUTY, SD_OUTPUT, SD_READBACK,
+       SD_NAMES };
 static const char *const k_sd_names[DAQ_DAC_CHANNELS][SD_NAMES] = {
   {"dac_ch1_active", "dac_ch1_waveform", "dac_ch1_amplitude_v", "dac_ch1_offset_v",
    "dac_ch1_frequency_hz", "dac_ch1_steps", "dac_ch1_dwell_ms", "dac_ch1_sequence",
-   "dac_ch1_result", "dac_ch1_off_reason", "dac_ch1_output_v", "dac_ch1_readback_v"},
+   "dac_ch1_result", "dac_ch1_off_reason", "dac_ch1_update_hz", "dac_ch1_samples",
+   "dac_ch1_duty", "dac_ch1_output_v", "dac_ch1_readback_v"},
   {"dac_ch2_active", "dac_ch2_waveform", "dac_ch2_amplitude_v", "dac_ch2_offset_v",
    "dac_ch2_frequency_hz", "dac_ch2_steps", "dac_ch2_dwell_ms", "dac_ch2_sequence",
-   "dac_ch2_result", "dac_ch2_off_reason", "dac_ch2_output_v", "dac_ch2_readback_v"},
+   "dac_ch2_result", "dac_ch2_off_reason", "dac_ch2_update_hz", "dac_ch2_samples",
+   "dac_ch2_duty", "dac_ch2_output_v", "dac_ch2_readback_v"},
 };
 
 /* One row per field at each change: with the timer-quantised frequency or
@@ -258,11 +296,70 @@ static void log_event(unsigned c, uint64_t timestamp_ms)
   const float values[SD_OUTPUT] = {
     (float)ch->active, (float)ch->config.waveform, ch->config.amplitude_v, ch->config.offset_v,
     ch->actual_frequency_hz, (float)ch->config.steps, (float)ch->actual_dwell_ms,
-    (float)(ch->sequence & 0xFFFFFFU), (float)ch->last_result, (float)ch->off_reason};
+    (float)(ch->sequence & 0xFFFFFFU), (float)ch->last_result, (float)ch->off_reason,
+    ch->update_hz, (float)ch->samples, (float)ch->config.duty_q16 / 65536.0f};
   for (unsigned i = 0U; i < SD_OUTPUT; ++i)
     (void)sd_card_enqueue_csv_row(k_sd_names[c][i], timestamp_ms, values[i], NULL);
 }
 #endif
+
+/* Applies a pending BEGIN/COMMIT/CLEAR. Returns true if the table changed. */
+static bool service_table(void)
+{
+  static uint8_t last_state;
+  static uint64_t last_chunks;
+  daq_dac_table_msg_t op;
+  uint32_t mask = __get_PRIMASK(); __disable_irq();
+  const uint8_t pending = g_table_op_pending;
+  op = g_table_op;
+  g_table_op_pending = 0U;
+  __set_PRIMASK(mask);
+  if (pending && (op.op == DAQ_DAC_TABLE_OP_BEGIN || op.op == DAQ_DAC_TABLE_OP_CLEAR)) {
+    /* A repeated BEGIN for the upload in progress changes nothing. */
+    const bool repeat = op.op == DAQ_DAC_TABLE_OP_BEGIN && g_tab.state == DAQ_DAC_TABLE_LOADING &&
+                        g_tab.upload_id == op.upload_id && g_tab.len == op.index &&
+                        g_tab.expected_crc == op.value;
+    if (!repeat) {
+      /* Running arbitrary outputs keep playing their own scaled copies. */
+      mask = __get_PRIMASK(); __disable_irq();
+      if (op.op == DAQ_DAC_TABLE_OP_BEGIN) daq_dac_table_begin(&g_tab, op.upload_id, op.index, op.value);
+      else daq_dac_table_clear(&g_tab);
+      __set_PRIMASK(mask);
+    }
+  } else if (pending && op.op == DAQ_DAC_TABLE_OP_COMMIT) {
+    mask = __get_PRIMASK(); __disable_irq();
+    const int verify = daq_dac_table_commit_begin(&g_tab, op.upload_id, op.index, op.value);
+    __set_PRIMASK(mask);
+    if (verify) daq_dac_table_commit_finish(&g_tab); /* Chunk writes now refused. */
+  }
+  mask = __get_PRIMASK(); __disable_irq();
+  const uint8_t state_now = g_tab.state;
+  const uint64_t chunks_now = g_tab.chunks;
+  __set_PRIMASK(mask);
+  const bool changed = pending || state_now != last_state || chunks_now != last_chunks;
+  last_state = state_now;
+  last_chunks = chunks_now;
+  return changed;
+}
+
+/* Steps each running chirp to its frequency now; the ARR/PSC preload lands
+ * on the next update event, so the sine stays phase-continuous. */
+static void retune_chirps(uint32_t now_ms)
+{
+  for (unsigned c = 0U; c < DAQ_DAC_CHANNELS; ++c) {
+    daq_dac_channel_state_t *ch = &g_ctrl.ch[c];
+    if (!ch->active || ch->config.waveform != DAQ_DAC_WAVE_CHIRP || (g_hw_active & (1U << c)) == 0U) continue;
+    uint16_t psc, arr;
+    float actual;
+    if (daq_dac_chirp_retune(&ch->config, ch->samples, timer_clock_hz(c),
+                             now_ms - g_chirp_start_ms[c], &psc, &arr, &actual) != 0)
+      continue;
+    k_tim[c]->PSC = psc;
+    k_tim[c]->ARR = arr;
+    ch->actual_frequency_hz = actual;
+    ch->update_hz = actual * (float)ch->samples;
+  }
+}
 
 void daq_dac_service(uint32_t now_ms)
 {
@@ -291,18 +388,20 @@ void daq_dac_service(uint32_t now_ms)
   const uint8_t state = has_state ? flight_state_cache_value() : DAQ_DAC_STATE_UNKNOWN;
   if (all_off) {
     const daq_dac_command_t off = {.channel = DAQ_DAC_CHANNEL_ALL, .sequence = all_sequence};
-    (void)daq_dac_ctrl_command(&g_ctrl, &off, has_state, state, now_ms, actions);
-    apply_actions(actions);
+    (void)daq_dac_ctrl_command(&g_ctrl, &off, &g_tab, has_state, state, now_ms, actions);
+    apply_actions(actions, now_ms);
   }
   for (unsigned c = 0U; c < DAQ_DAC_CHANNELS; ++c) {
     if ((pending_mask & (1U << c)) == 0U) continue;
     const daq_dac_result_t result =
-        daq_dac_ctrl_command(&g_ctrl, &pending[c], has_state, state, now_ms, actions);
+        daq_dac_ctrl_command(&g_ctrl, &pending[c], &g_tab, has_state, state, now_ms, actions);
     if (result != DAQ_DAC_RESULT_OK) ++g_daq_dac_refusals;
-    apply_actions(actions);
+    apply_actions(actions, now_ms);
   }
   daq_dac_ctrl_tick(&g_ctrl, has_state, state, now_ms, actions);
-  apply_actions(actions);
+  apply_actions(actions, now_ms);
+  const bool table_changed = service_table();
+  retune_chirps(now_ms);
 
   const uint8_t active = daq_dac_ctrl_active_mask(&g_ctrl);
   g_daq_dac_active_mask = active;
@@ -323,14 +422,14 @@ void daq_dac_service(uint32_t now_ms)
 #endif
 
   const uint32_t period = active ? DAQ_DAC_STATUS_ACTIVE_MS : DAQ_DAC_STATUS_IDLE_MS;
-  if (!changed && (uint32_t)(now_ms - last_status_ms) < period) return;
+  if (!changed && !table_changed && (uint32_t)(now_ms - last_status_ms) < period) return;
   last_status_ms = now_ms;
   float output[DAQ_DAC_CHANNELS], readback[DAQ_DAC_CHANNELS];
   for (unsigned c = 0U; c < DAQ_DAC_CHANNELS; ++c) { output[c] = g_output_v[c]; readback[c] = g_readback_v[c]; }
   const daq_dac_result_t gate = daq_dac_state_gate(has_state, state);
   const uint8_t flags = (g_hw_ready ? 1U : 0U) | (g_readback_ok ? 2U : 0U);
   uint8_t status[DAQ_DAC_STATUS_BYTES];
-  daq_dac_status_encode(&g_ctrl, state,
+  daq_dac_status_encode(&g_ctrl, &g_tab, state,
       gate == DAQ_DAC_RESULT_OK ? 0U : gate == DAQ_DAC_RESULT_REFUSED_STATE ? 1U : 2U,
       flags, now_ms, output, readback, status);
 #ifdef TELEMETRY_ENABLED

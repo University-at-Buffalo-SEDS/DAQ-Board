@@ -960,12 +960,12 @@
     {
       "rust": "DaqDacCommand",
       "name": "DAQ_DAC_COMMAND",
-      "doc": "GS DAC command v1, 32 LE bytes; see DAQ docs/dac-validation.md. Lease keepalive; enable only in Startup/Idle.",
+      "doc": "GS DAC command v2, 48 LE bytes; see DAQ docs/dac-waveforms.md. Lease keepalive; enable only in Startup/Idle.",
       "class": "Data",
       "element": {
         "kind": "Static",
         "data_type": "UInt8",
-        "count": 32
+        "count": 48
       },
       "endpoints": [
         "FillSdCard"
@@ -976,15 +976,31 @@
     {
       "rust": "DaqDacStatus",
       "name": "DAQ_DAC_STATUS",
-      "doc": "DAQ DAC status v1, 80 LE bytes: gate, per-channel active, applied wave, off reason, output and ADC4 readback volts.",
+      "doc": "DAQ DAC status v2, 136 LE bytes: gate, per-channel active, applied wave, off reason, output and ADC4 readback volts, update rate, table length and CRC; uploaded-table state.",
       "class": "Data",
       "element": {
         "kind": "Static",
         "data_type": "UInt8",
-        "count": 80
+        "count": 136
       },
       "endpoints": [
         "ActuatorGroundStation"
+      ],
+      "reliable": "Off",
+      "priority": 16
+    },
+    {
+      "rust": "DaqDacTable",
+      "name": "DAQ_DAC_TABLE",
+      "doc": "GS DAC arbitrary-table upload v1, 76 LE bytes: begin/data/commit/clear, 32 codes per chunk, CRC-32 confirmed in DAQ_DAC_STATUS; see DAQ docs/dac-waveforms.md.",
+      "class": "Data",
+      "element": {
+        "kind": "Static",
+        "data_type": "UInt8",
+        "count": 76
+      },
+      "endpoints": [
+        "FillSdCard"
       ],
       "reliable": "Off",
       "priority": 16

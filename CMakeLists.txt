@@ -117,6 +117,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_board.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_dac.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_dac_control.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_dac_wave.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/daq_thread.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/mcp3564r.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/sd_writer_thread.c

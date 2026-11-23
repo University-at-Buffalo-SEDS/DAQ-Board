@@ -27,6 +27,8 @@ UINT daq_dac_sample(daq_dac_sample_t *sample, uint8_t read_back);
 
 /* Router thread: copies one DAQ_DAC_COMMAND payload for the service. */
 void daq_dac_submit_command(const uint8_t *payload, size_t len);
+/* Router thread: one DAQ_DAC_TABLE chunk-upload payload. */
+void daq_dac_submit_table(const uint8_t *payload, size_t len);
 /* Any thread: immediately stops both outputs (abort, flight-state change). */
 void daq_dac_emergency_off(uint8_t reason);
 /* Periodic owner (live network thread): applies commands, enforces the state
