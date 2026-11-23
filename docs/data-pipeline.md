@@ -337,7 +337,7 @@ from 16 to 11 records.
 | VMAIN, IMON | ADC1 PB2/PB1 (VMON divider, LM74202) | STM32 ADC1, 391.5-cycle sample | 10/s; 250/s in launch window (+0.5 s pre-roll) | `input_voltage_v`, `input_current_a` raw records (ms time) | `DAQ_POWER_MONITOR` 10 Hz offered | interleave | ≤ 300 ms |
 | ISENSE1/2, SAR_IN1..8, ADC1 aux | ADC1 (CH5–8, 11, 12), ADC4 (CH1–4) | polled | 10/s | scalar rows `isense*`, `analog_in_*`, `adc1_aux_v` | `DAQ_CURRENT_SENSE`, `DAQ_SAR_VOLTAGES` 10 Hz offered | interleave | ≤ 300 ms |
 | DAC readback | ADC4 | polled while a DAC channel runs | 10/s | `analog_out_*_v` scalar rows | `DAQ_DAC_STATUS` | | |
-| VB OX-tank PT | ValveBoard ADC3 at 500 Hz, archived 250 Hz | over CAN, `VALVE_PRESSURE_SD_V1` (4 samples/packet) | 250/s | `valve_pressure_psi` (ADC code, psi), routed by VB capture time | not re-published (VB sends `FUEL_TANK_PRESSURE` 50 Hz itself) | | |
+| VB OX-tank PT | ValveBoard ADC3 at 500 Hz, archived 250 Hz | over CAN, `VALVE_PRESSURE_SD_V1` (4 samples/packet) | 250/s | `valve_pressure_psi` (ADC code, psi), routed by VB capture time | not re-published (VB sends `OX_TANK_PRESSURE` 50 Hz itself; `FUEL_TANK_PRESSURE` before Nov 2026) | | |
 
 **Rate notes:**
 
@@ -569,7 +569,7 @@ file:
 | KG50 | every conversion (800–900/s) | 20 Hz bins → `KG50`, `LOADCELL_50_WEIGHT_KG`, `LOADCELL_FILL_PERCENT`; captures (fill: 120 s / 120 s) |
 | Auxiliary, temperature, supply, internal ADCs | raw records / scalar rows | the interleave's share (≈ 4–9/s each) as decoded rows |
 | Input health | | `DAQ_INPUT_HEALTH` payload rows, alerts, Board status block |
-| VB OX-tank archive | 250 Hz `valve_pressure_psi` | not sent to the GS (the VB's own 50 Hz `FUEL_TANK_PRESSURE` is) |
+| VB OX-tank archive | 250 Hz `valve_pressure_psi` | not sent to the GS (the VB's own 50 Hz `OX_TANK_PRESSURE` is) |
 | Full-rate files | `DAQ_LAUNCH_*.CSV`, session files | `/LAUNCH` downloaded after a launch capture and attached as `board_sd/DAQ/<file>` with a 60 s `.leadup.csv`; any file can be imported by hand, and the SD resolver maps it into the recording (`recording_sd_resolve.py` profile `daq-20261123`, which rebuilds the 20/50 ms bins from µs rows) |
 
 The burn report is not on GroundStation26 dev yet; its design is on branch
