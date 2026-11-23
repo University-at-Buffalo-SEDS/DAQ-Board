@@ -12,6 +12,7 @@
 #endif
 #include "sd_float_format.h"
 #include "sd_record_format.h"
+#include "sd_format.h"
 #include "sd_raw_record_format.h"
 #include "sd_file_limit.h"
 #include "sd_storage_config.h"
@@ -1042,8 +1043,11 @@ static UINT sd_open_log(sd_log_t *log, uint64_t key, const daq_calibration_t *ca
   }
 
   log->reserve_disabled = 0U; log->len = 0U; log->retry_active = 0U;
+  /* Column header, then the SEDS-SD format block (sd_format.h), then the
+   * DAQ metadata lines. Every file and file part opens here. */
   static const char header[] =
       SD_CSV_HEADER
+      SD_FORMAT_BLOCK
       "# channel=valve_pressure_psi,source_node=VB,datatype=VALVE_PRESSURE_SD_V1,raw_units=ADC_code,converted_units=psi,capture_period_ms=4,sequence_scope=VB_pressure,time_source=network_when_VB_UTC_known_else_local_unknown_UTC\r\n";
   status = sd_prepare_file_space(log, sizeof(header) - 1U);
   if (status == FX_SUCCESS)

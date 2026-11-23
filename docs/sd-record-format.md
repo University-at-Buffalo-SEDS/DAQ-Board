@@ -6,6 +6,50 @@ DAQ and FC CSV files use the same columns, in this order:
 timestamp_ms,monotonic_ms,sensor,value,raw_adc_code,raw_value,calibrated_value,time_source,adc_temperature_c,adc_temperature_code,uptime_ticks,uptime_frequency_hz,record_sequence
 ```
 
+## Format block
+
+Every DAQ file and every 3 GiB part starts with the column header, then the
+SEDS-SD format block (`Core/Inc/sd_format.h`), then the `# channel=`,
+`# calibration` and `# chamber_pressure` lines:
+
+```
+timestamp_ms,monotonic_ms,sensor,...,record_sequence
+# seds-sd,format=daq,version=3,board=DAQ,firmware=<rev>,tick_hz=1000,schema=ade30ff7
+# seds-sd-columns,u64:ms,u64:ms,label,vec,vec,vec,vec,clock,f32:degC,i32:code,u64:tick,u32:Hz,u64:seq
+# seds-sd-records,kg1000_v:a=code:r=V:c=kg@1000000,...
+# seds-sd-records,...
+```
+
+- `firmware` is the short git revision (12 hex digits, `-dirty` for a
+  modified tree, `unknown` without git), set by CMake
+  (`cmake/firmware_revision.cmake`). It is informational: readers never accept
+  or refuse a file by it.
+- `tick_hz` is the `uptime_frequency_hz` of every record without an `@hz`
+  override.
+- `seds-sd-columns` gives each of the 13 columns positionally as
+  `type[:unit]`; `vec` columns hold the values the record entry describes.
+- Each `seds-sd-records` entry is `<label>(:<col>=<units>)+[@<tick_hz>]`,
+  with `v`=value, `a`=raw_adc_code, `r`=raw_value, `c`=calibrated_value.
+  MCP3564R records carry `@1000000` (microsecond `uptime_ticks`); ADC1
+  supply, VB pressure, scalar and DAC rows use the 1000 Hz default.
+- `schema` is the first 8 hex digits of SHA-256 over the columns line and the
+  records lines, each with its CRLF. The firmware revision and version are
+  not hashed.
+
+**Version rule.** Changing the columns line or any record entry (adding,
+removing or renaming a label, changing its columns, units or tick rate) or
+the row layout requires a new `version`, the new hash in `SD_FORMAT_SCHEMA`
+and in the frozen table of `tests/test_sd_format_block.py`, and the version
+registered in the GroundStation26 SD parser. The test recomputes the hash,
+compares it with the compiled `schema=` and the frozen table, and checks
+that every label the source writes is declared, so a layout change without a
+bump fails. The ground station refuses an unknown version and a damaged
+hash.
+
+Files without the block are legacy DAQ files: legacy daq v1 (mapping profile
+`daq-20261101`) and legacy daq v2 (profiles `daq-20261117` and
+`daq-20261123`), recognised by their manifest firmware pins as before.
+
 `timestamp_ms` is network UTC when available; otherwise it is boot uptime.
 `time_source` identifies `network` or `local`. `uptime_ticks` is independent of
 network UTC changes and extends the HAL millisecond counter across its 32-bit

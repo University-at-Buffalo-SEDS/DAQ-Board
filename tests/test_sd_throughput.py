@@ -26,8 +26,12 @@ MARGIN = OFFERED * 3 // 2  # 1.5x target
 # the same records. Raw-only: whole file. Mixed: raw/header lines and loadcell
 # lines each in their own order (the interleaving of the two streams follows
 # writer scheduling and is not part of the format).
-GOLDEN_RAW_ONLY = ('d62be12dadbb36fd3fdcadbf830f852a9ac0b891d356a82294b9f8ac8b0022a1', 5488013)
-GOLDEN_MIXED = ('27f5cf5727ec7835ce3135985ab3c6bedb613ba791ded2d3cf1315b997b68810',
+# Re-pinned for the SEDS-SD format block: its extra header bytes delay the
+# model's first acquisition by 3 ms of virtual time, so timestamp_ms,
+# monotonic_ms and uptime_ticks shift; every other field of every row matched
+# the previous goldens (d62be12d..., 27f5cf57...) byte for byte.
+GOLDEN_RAW_ONLY = ('ad68817a4792cd44eed069aa6891908ee9df587b3e4123886397cc0fb3d66dee', 5488028)
+GOLDEN_MIXED = ('f6b4b3c83f79842dc827acfa0fd41e454d9965992edf271a8431d188b46050c6',
                 'b626dcd49fca6257f3b31994b2d3e11142906a032283774f92fb2ef94ffcb164')
 # Those goldens predate the <sensor>_<unit> names and the calibration line's
 # loadcell_input/loadcell_boxcar_ms fields (loadcell_input left them stale).
@@ -43,6 +47,9 @@ LEGACY_NAMES = ((b',kg1000_v,', b',mcp3564r_raw,'), (b',kg50_v,', b',kg50_raw,')
 
 
 def legacy_bytes(data):
+    # The SEDS-SD format block (sd_format.h) after the column header is new;
+    # tests/test_sd_format_block.py and the harness check its exact bytes.
+    data = b'\n'.join(line for line in data.split(b'\n') if not line.startswith(b'# seds-sd'))
     for new, old in LEGACY_NAMES:
         data = data.replace(new, old)
     # MCP3564R rows now carry microsecond uptime_ticks with

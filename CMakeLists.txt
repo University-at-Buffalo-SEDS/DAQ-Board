@@ -122,6 +122,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/mcp3564r.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/sd_writer_thread.c
 )
+include(cmake/firmware_revision.cmake)
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE

@@ -313,6 +313,8 @@ static int verify_log(uint64_t *rows, uint64_t *raw_rows, uint64_t *bad)
   static char chunk[65536]; char line[512]; size_t used = 0U; uint64_t expect = 1U;
   *rows = *raw_rows = *bad = 0U;
   uint8_t header = 1U;
+  /* The SEDS-SD format block follows the column header byte for byte. */
+  static const char format_block[] = SD_FORMAT_BLOCK; size_t format_at = 0U;
   while (fx_file_read(&file, chunk, sizeof chunk, &got) == FX_SUCCESS && got) {
     for (ULONG i = 0; i < got; ++i) {
       if (used + 1U >= sizeof line) { ++*bad; used = 0U; continue; }
@@ -320,6 +322,11 @@ static int verify_log(uint64_t *rows, uint64_t *raw_rows, uint64_t *bad)
       if (chunk[i] != '\n') continue;
       line[used] = '\0'; used = 0U;
       if (header) { header = 0U; if (strcmp(line, SD_CSV_HEADER) != 0) ++*bad; continue; }
+      if (format_at < sizeof format_block - 1U) {
+        const size_t n = strlen(line);
+        if (strncmp(line, format_block + format_at, n) != 0) ++*bad;
+        format_at += n; continue;
+      }
       if (line[0] == '#') continue;
       ++*rows;
       if (strlen(line) < 3 || line[strlen(line) - 2] != '\r') { ++*bad; continue; }

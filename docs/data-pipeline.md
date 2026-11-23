@@ -466,6 +466,24 @@ The DAQ's checks are operator warnings in `DAQ_INPUT_HEALTH`. They run on raw
 **Rows.** The format is the 13-column CSV in
 [sd-record-format.md](sd-record-format.md).
 
+**Format block.** Every file and part starts with the column header and then
+the SEDS-SD format block (`Core/Inc/sd_format.h`):
+`# seds-sd,format=daq,version=3,board=DAQ,firmware=<rev>,tick_hz=1000,schema=ade30ff7`,
+the `# seds-sd-columns` line, and `# seds-sd-records` lines declaring every
+label with its columns, units and tick rate (MCP3564R records `@1000000`).
+The GS picks the parser by format and version and checks the schema hash; the
+firmware revision is informational.
+
+- Any change to the declared columns or records (a label added, removed or
+  changed, its columns, units or tick rate) or to the row layout needs a
+  version bump, the new hash in `SD_FORMAT_SCHEMA` and in the frozen table of
+  `tests/test_sd_format_block.py`, and the version registered in the
+  GroundStation26 SD parser. That test fails on a layout change without a
+  bump, on a bump without a frozen hash, and on an undeclared label.
+- Files without the block are legacy daq v1 (profile `daq-20261101`) or
+  legacy daq v2 (`daq-20261117`, `daq-20261123`), identified by their manifest
+  firmware pins.
+
 | Row type | Rate | Clock |
 |---|---|---|
 | MCP3564R raw records (fast pair, slot items) | 3000/s | `uptime_ticks` in µs, `uptime_frequency_hz=1000000` |
