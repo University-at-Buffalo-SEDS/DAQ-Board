@@ -138,7 +138,10 @@ int main(void){
 
     def test_existing_gateway_can_boundary_preserves_new_unknown_type_bytes(self):
         explicit = os.environ.get('DAQ_TEST_GATEWAY_SOURCE')
-        gateway_root = Path(explicit) if explicit else ROOT.parent/'gateway-board'
+        # The gateway checkout is gateway-board26 (older clones: gateway-board).
+        gateway_root = Path(explicit) if explicit else next(
+            (ROOT.parent/name for name in ('gateway-board26', 'gateway-board')
+             if (ROOT.parent/name/'Core/Src/telemetry.c').is_file()), ROOT.parent/'gateway-board26')
         gateway = gateway_root/'Core/Src/telemetry.c'
         if explicit:
             self.assertTrue(gateway.is_file(), 'Explicit Gateway source is missing: ' + str(gateway))
