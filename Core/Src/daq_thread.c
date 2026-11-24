@@ -1,4 +1,5 @@
 #include "board_uptime.h"
+#include "daq_acq_clock.h"
 #include "board_watchdog.h"
 #include "DAQ-Threads.h"
 
@@ -457,12 +458,17 @@ static void daq_publish_analog(const daq_snapshot_t *snapshot, const daq_loadcel
     last_report = now;
     /* CH2..CH7 connector volts: the latest 3-sample median of each channel's
      * auxiliary slots (about 14 Hz); the chamber channel publishes its fast
-     * 20 ms bin. NaN once a value is older than DAQ_AUX_STALE_MS. */
+     * 20 ms bin. NaN once a value is older than DAQ_AUX_STALE_MS. The samples
+     * carry HAL-tick milliseconds (daq_acq_clock.h), so their age is taken on
+     * the HAL tick too, not on the telemetry (ThreadX) clock of `now`: the two
+     * start apart, and a sample "newer" than a lagging now wrapped to stale. */
     float values[6];
+    const uint32_t aux_now = HAL_GetTick();
     const uint32_t saved = __get_PRIMASK();
     __disable_irq();
     for (unsigned i = 0; i < 6U; ++i)
-      values[i] = (g_daq_aux_valid & (1U << (i + 2U))) && (uint32_t)(now - g_daq_aux_ms[i + 2U]) <= DAQ_AUX_STALE_MS
+      values[i] = (g_daq_aux_valid & (1U << (i + 2U))) &&
+          daq_acq_sample_fresh(aux_now, g_daq_aux_ms[i + 2U], DAQ_AUX_STALE_MS, DAQ_AUX_AHEAD_MS)
           ? g_daq_aux_value[i + 2U] : NAN;
     __set_PRIMASK(saved);
     daq_publish_analog_packet(SEDS_DT_DAQ_SDADC_VOLTAGES, values, 6U, snapshot->monotonic_ms);

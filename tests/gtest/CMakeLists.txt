@@ -22,8 +22,8 @@ add_library(delta_format_under_test
   "${CMAKE_CURRENT_LIST_DIR}/../../Core/Src/launchcore_delta_format.c")
 target_include_directories(delta_format_under_test PRIVATE include)
 
-add_executable(firmware_unit_tests test_delta_format.cpp)
-target_include_directories(firmware_unit_tests PRIVATE include)
+add_executable(firmware_unit_tests test_delta_format.cpp test_acq_clock.cpp)
+target_include_directories(firmware_unit_tests PRIVATE include "${CMAKE_CURRENT_LIST_DIR}/../../Core/Inc")
 target_link_libraries(firmware_unit_tests PRIVATE delta_format_under_test GTest::gtest_main)
 
 include(GoogleTest)

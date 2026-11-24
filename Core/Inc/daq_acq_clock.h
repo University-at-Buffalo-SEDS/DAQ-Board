@@ -25,6 +25,16 @@ static inline uint64_t daq_acq_project_us(uint64_t now64, uint32_t captured)
   return (uint64_t)((int64_t)now64 + delta);
 }
 
+/* Whether a value captured at `sample_ms` is fresh at `now_ms`, both on the HAL millisecond uptime base (the
+ * acquisition clock above). Wrap-safe: a capture up to `ahead_ms` after `now_ms` (taken after `now` was read, e.g.
+ * by the acquisition interrupt while the reporter runs) is age 0, not a 49-day-old value; anything older than
+ * `stale_ms` or further ahead is stale. */
+static inline int daq_acq_sample_fresh(uint32_t now_ms, uint32_t sample_ms, uint32_t stale_ms, uint32_t ahead_ms)
+{
+  const int32_t age = (int32_t)(now_ms - sample_ms);
+  return age >= 0 ? (uint32_t)age <= stale_ms : (uint32_t)(-(int64_t)age) <= ahead_ms;
+}
+
 /* Extend a free-running 32-bit counter; call at least once per wrap
  * (71.6 minutes at 1 MHz). */
 static inline uint64_t daq_acq_extend_us(uint64_t *state, uint32_t raw)

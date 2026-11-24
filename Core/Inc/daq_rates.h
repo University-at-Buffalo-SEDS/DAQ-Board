@@ -65,6 +65,9 @@ _Static_assert(DAQ_FAST_REPORT_US % (DAQ_ACQ_FRAME_US * DAQ_ACQ_AUX_EVERY) == 0U
 #define DAQ_P6_LEG_PAIR_MS 20U
 /* An auxiliary value older than this is reported as NaN (stale). */
 #define DAQ_AUX_STALE_MS 300U
+/* An auxiliary sample stamped up to this far after the reporter's clock read
+ * is current (it was captured after the read), not stale. */
+#define DAQ_AUX_AHEAD_MS 100U
 /* Acquisition outranks the I/O workers so reporting or SD backlogs cannot
  * consume its service budget. Live I/O workers share a bounded slice; storage
  * runs below them and sleeps for DMA. ADC interrupts remain independent. */
