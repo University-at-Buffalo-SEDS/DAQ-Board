@@ -205,6 +205,10 @@ static uint32_t primask;
 static uint32_t __get_PRIMASK(void){return primask;}
 static void __disable_irq(void){primask=1;}
 static void __set_PRIMASK(uint32_t v){primask=v;}
+/* The auxiliary samples are aged on the HAL tick (the real daq_acq_clock.h helper). */
+#include "daq_acq_clock.h"
+static uint32_t hal_ms;
+static uint32_t HAL_GetTick(void){return hal_ms;}
 ''' + publish + r'''
 int main(void) {
  daq_snapshot_t snapshot={.monotonic_ms=100,.analog_sample_fresh=1,
@@ -213,17 +217,20 @@ int main(void) {
  for(unsigned i=0;i<8;i++)snapshot.analog_inputs_v[i]=i*0.1f;
  daq_loadcell_window_t window={0};
  /* CH6 (chamber) connector volts from its 20 ms bin; CH2 never sampled. */
- g_daq_aux_value[6]=6.6f;g_daq_aux_ms[6]=100;g_daq_aux_valid=1U<<6;
+ g_daq_aux_value[6]=6.6f;g_daq_aux_ms[6]=100;g_daq_aux_valid=1U<<6;hal_ms=100;
  daq_publish_analog(&snapshot,&window);
  assert(calls==4 && counts[0]==8 && counts[1]==6 && counts[2]==4 && counts[3]==4);
  assert(isnan(packets[1][0]) && fabsf(packets[1][4]-6.6f)<1e-6f);
  assert(packets[0][7]==0.7f && packets[2][2]==3 && packets[3][2]==12);
  snapshot.monotonic_ms=150;snapshot.analog_sample_fresh=0;
  window=(daq_loadcell_window_t){0};daq_publish_analog(&snapshot,&window);assert(calls==4);
- snapshot.monotonic_ms=200;daq_publish_analog(&snapshot,&window);
+ snapshot.monotonic_ms=200;hal_ms=200;daq_publish_analog(&snapshot,&window);
  assert(calls==5 && isfinite(packets[1][4]));
- snapshot.monotonic_ms=401;daq_publish_analog(&snapshot,&window);
- assert(calls==6 && isnan(packets[1][4])); /* older than DAQ_AUX_STALE_MS */
+ /* the telemetry clock trails the HAL tick (or leads it): the age follows the HAL tick alone */
+ g_daq_aux_ms[6]=310;snapshot.monotonic_ms=400;hal_ms=350;daq_publish_analog(&snapshot,&window);
+ assert(calls==6 && fabsf(packets[1][4]-6.6f)<1e-6f);
+ g_daq_aux_ms[6]=100;snapshot.monotonic_ms=600;hal_ms=401;daq_publish_analog(&snapshot,&window);
+ assert(calls==7 && isnan(packets[1][4])); /* older than DAQ_AUX_STALE_MS on the HAL tick */
  assert(!primask);
  assert(g_daq_analog_publish_fail_count==0 && g_daq_analog_publish_ok_count==0); /* offers are not completed sends */
 }

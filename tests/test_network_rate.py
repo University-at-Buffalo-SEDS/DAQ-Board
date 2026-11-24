@@ -93,6 +93,10 @@ static void __set_PRIMASK(uint32_t value){irq=value;}
 static float g_daq_aux_value[8];
 static uint32_t g_daq_aux_ms[8];
 static uint8_t g_daq_aux_valid;
+/* The auxiliary samples are aged on the HAL tick (the real daq_acq_clock.h helper). */
+#include "daq_acq_clock.h"
+/* The harness stamps its samples 10 s into the board's uptime (expected_ms = 10000 + actual_ms). */
+static uint32_t HAL_GetTick(void){return 10000U+actual_ms;}
 static int log_telemetry_captured(unsigned type,const void*value,size_t n,size_t width,uint64_t captured){
  assert(!irq && width==sizeof(float) && actual_ms!=last_send_ms);
  last_send_ms=actual_ms;
