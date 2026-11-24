@@ -36,13 +36,15 @@ static inline void sd_format_i32(char output[12], int32_t value)
 
 /* Thirteen-column raw CSV, without a general varargs formatter in the
  * acquisition-rate path. Keep the nine-digit binary32 representation.
+ * `over_range` fills the value column of MCP3564R records (SD format v4,
+ * `:v=ovr`): "1" or "-1" beyond +/-full scale, empty in range.
  * monotonic_ms is the millisecond uptime; uptime_ticks/uptime_frequency_hz
  * carry the record's own clock: microseconds (1000000) for MCP3564R
  * conversions, milliseconds (1000) for the ADC1 supply records. On failure
  * the destination is empty and never overrun. */
 static inline int sd_format_csv_raw_record(char *dst, size_t capacity,
     uint64_t network_ms, uint64_t uptime, uint64_t uptime_ticks, uint32_t uptime_hz,
-    const char *sensor, int32_t raw_code,
+    const char *sensor, int8_t over_range, int32_t raw_code,
     float raw_value, float calibrated_value, float temperature, int32_t temperature_code,
     uint64_t sequence, sd_raw_format_cache_t *cache)
 {
@@ -77,7 +79,7 @@ static inline int sd_format_csv_raw_record(char *dst, size_t capacity,
     } else {
         ++cache->rows_since;
     }
-    const char *fields[] = {stamp, ticks, sensor, "", raw_code_text, raw, calibrated,
+    const char *fields[] = {stamp, ticks, sensor, over_range > 0 ? "1" : over_range < 0 ? "-1" : "", raw_code_text, raw, calibrated,
         network_ms ? "network" : "local", repeat ? cache->temperature_text : "",
         repeat ? temperature_code_text : "", fine_ticks, frequency, seq};
     size_t used = 0U;

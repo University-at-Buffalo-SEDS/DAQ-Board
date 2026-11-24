@@ -53,8 +53,9 @@ int main(void) {
  for(unsigned i=0;i<sizeof(high)/sizeof(high[0]);++i)
    assert(bits(daq_chamber_pressure_psi(high[i]))==bits(original(high[i])));
  assert(isnan(daq_chamber_pressure_psi(NAN)));
- assert(isnan(daq_chamber_pressure_psi(INFINITY)));
- assert(isnan(daq_chamber_pressure_psi(-INFINITY)));
+ /* +/-INFINITY is the ADC over-range marker: it passes through unchanged. */
+ assert(bits(daq_chamber_pressure_psi(INFINITY))==bits(INFINITY));
+ assert(bits(daq_chamber_pressure_psi(-INFINITY))==bits(-INFINITY));
  assert(isinf(daq_chamber_pressure_psi(FLT_MAX)));
  assert(isinf(daq_chamber_pressure_psi(-FLT_MAX)));
  uint32_t state=13579;
@@ -62,7 +63,8 @@ int main(void) {
    state^=state<<13;state^=state>>17;state^=state<<5;
    float v;memcpy(&v,&state,4);const uint32_t raw=bits(v);
    float old=original(v),now=daq_chamber_pressure_psi(v);
-   if(isfinite(old)&&old<4.5f)assert(bits(now)==bits(0.0f));
+   if(isinf(v))assert(bits(now)==bits(v));
+   else if(isfinite(old)&&old<4.5f)assert(bits(now)==bits(0.0f));
    else if(isnan(old))assert(isnan(now));else assert(bits(now)==bits(old));
    assert(bits(v)==raw);
  }
@@ -107,20 +109,20 @@ int main(void){const float values[]={-5,-0.015f,-0.0f,0,0.015f,0.0225f,2.5f,6};
       snapshot=(daq_snapshot_t){.ext_adc_sample_valid=1,.ext_adc_channel=channels[i],
         .ext_adc_sample_us=90000,.ext_adc_code=-1234,.ext_adc_voltage_v=inputs[j],
         .ext_adc_loadcell_kg1000=inputs[j],.ext_adc_temp_c=25};
-      assert(daq_drain_ext_adc(&snapshot,records,4,&cal,&window,1,NULL,NULL)==1);
+      assert(daq_drain_ext_adc(&snapshot,records,4,&cal,&window,1,NULL,NULL,&ovr)==1);
       assert(records[0].raw_adc_code==-1234);
       printf("%u %u %d %08x %08x %u %u %llu\n",channels[i],j,records[0].raw_adc_code,
         bits(records[0].raw_value),bits(records[0].calibrated_value),records[0].monotonic_ms,
         records[0].record_sequence,(unsigned long long)records[0].network_unix_ms);
     }
   }
-  memset(records,0xa5,sizeof(records));sd_raw_adc_record_t before[4];memcpy(before,records,sizeof(before));
+  memset(records,0xa5,sizeof(records));sd_raw_adc_record_t before[5];memcpy(before,records,sizeof(before));
   snapshot=(daq_snapshot_t){0};
-  assert(daq_drain_ext_adc(&snapshot,records,4,&cal,&window,1,NULL,NULL)==0);
+  assert(daq_drain_ext_adc(&snapshot,records,4,&cal,&window,1,NULL,NULL,&ovr)==0);
   assert(memcmp(records,before,sizeof(records))==0); /* missing is not zero */
   snapshot=(daq_snapshot_t){.ext_adc_sample_valid=1,.ext_adc_channel=6,
     .ext_adc_code=-1234,.ext_adc_voltage_v=NAN,.ext_adc_loadcell_kg1000=NAN};
-  assert(daq_drain_ext_adc(&snapshot,records,4,&cal,&window,1,NULL,NULL)==1);
+  assert(daq_drain_ext_adc(&snapshot,records,4,&cal,&window,1,NULL,NULL,&ovr)==1);
   assert(records[0].raw_adc_code==-1234 && isnan(records[0].raw_value));
   assert(isnan(records[0].calibrated_value)); /* invalid is not zero */
 '''+harness[end:]
@@ -188,8 +190,15 @@ int main(void) {
  assert(offers == 4 && !offered[3].chamber_valid);
  cycle(bin(0.6f, 90), bin(FLT_MAX, 90));
  assert(offers == 5 && !offered[4].chamber_valid);
+ /* An over-range chamber bin (+/-INFINITY) is published as the marker in
+  * both chamber fields, never as a number; an overflowing conversion of a
+  * finite value is still invalid (above). */
  cycle(bin(0.7f, 110), bin(INFINITY, 110));
- assert(offers == 6 && !offered[5].chamber_valid);
+ assert(offers == 6 && offered[5].chamber_valid && isinf(offered[5].chamber[0]) && offered[5].chamber[0] > 0);
+ assert(isinf(offered[5].chamber[1]) && offered[5].kg1000 == 0.7f);
+ cycle(bin(0.75f, 130), bin(-INFINITY, 130));
+ assert(offers == 7 && offered[6].chamber_valid && offered[6].chamber[0] < 0 && isinf(offered[6].chamber[0]));
+ offers = 6;
  /* A stale chamber bin (older centre) never pairs with a newer KG1000 bin. */
  cycle(bin(0.8f, 150), none); cycle(none, none);
  assert(offers == 7 && !offered[6].chamber_valid);

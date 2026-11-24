@@ -12,6 +12,21 @@
  * Scan contents, filters and timing: daq_acq_schedule.h. */
 #define MCP3564R_P6_GAIN DAQ_ACQ_P6_GAIN
 #define MCP3564R_NOMINAL_VREF_V 2.4f
+/* Accepted range of the reference setting. The datasheet internal reference
+ * is 2.4 V +/-2 % (DS20006391C, IVREF); this board's part drifted to about
+ * 2.2 V after heat during repair, so the bound is wide enough for a damaged
+ * part and still rejects a typo. */
+#define MCP3564R_VREF_MIN_V 1.9f
+#define MCP3564R_VREF_MAX_V 2.6f
+
+/* The reference voltage every code is converted with: per board, set by the
+ * station (DAQ_MCP_REFERENCE, daq_calibration.c), kept in flash, nominal
+ * until then. Full scale at gain G is +/-VREF/G (2^23 codes); the over-range
+ * threshold is the code itself (daq_over_range.h) and does not depend on it.
+ * Weak, so each translation unit including this header may carry the one
+ * definition (host tests included); daq_calibration.c owns the writes. */
+__attribute__((weak)) volatile float g_mcp3564r_vref_v = MCP3564R_NOMINAL_VREF_V;
+static inline float mcp3564r_vref_v(void) { return g_mcp3564r_vref_v; }
 
 #if ((DAQ_ACQ_CONFIG2_GAIN1 >> 3U) & 7U) != 1U
 #error "Update ADC voltage conversion when changing the board PGA gain"
@@ -22,7 +37,7 @@
 
 static inline float mcp3564r_code_to_voltage(int32_t code)
 {
-  return ((float)code * MCP3564R_NOMINAL_VREF_V) / 8388608.0f;
+  return ((float)code * mcp3564r_vref_v()) / 8388608.0f;
 }
 
 /* CH6/7 are P4 HVAIN1/2 through 10k:1k dividers. */
@@ -31,10 +46,11 @@ static inline float mcp3564r_connector_voltage(unsigned channel, float adc_volta
   return channel >= 6U && channel <= 7U ? adc_voltage * 11.0f : adc_voltage;
 }
 
-/* DS20006391C equation 5-1, unity gain; acquire at the temperature clock. */
+/* DS20006391C equation 5-1 (in terms of VREF), unity gain; acquire at the
+ * temperature clock. */
 static inline float mcp3564r_code_to_temperature(int32_t code)
 {
-  return 0.00040096f * (float)code * MCP3564R_NOMINAL_VREF_V - 269.13f;
+  return 0.00040096f * (float)code * mcp3564r_vref_v() - 269.13f;
 }
 
 /* KG1000 (CH0) and KG50 AMP2 (CH1) are reported in ADC-pin volts, the same

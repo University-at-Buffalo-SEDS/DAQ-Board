@@ -90,7 +90,7 @@ selects PGA gain 1 (`GAIN[2:0]=001`) for both load-cell channels (P6 uses
 signed 25-bit result in each 32-bit read. Nominal ADC input voltage is:
 
 ```text
-volts = signed_code * 2.4 / 8388608
+volts = signed_code * VREF / 8388608      (VREF nominal 2.4 V; per-board setting below)
 ```
 
 Register values per scan (written as one 10-byte burst from CONFIG0 while the
@@ -133,6 +133,96 @@ SD diagnostic rows are `kg1000_window_v` for CH0 and
 The register definitions and code scaling are described in the
 [Microchip MCP3561/2/4R datasheet](https://www.microchip.com/content/dam/mchp/documents/APID/ProductDocuments/DataSheets/MCP3561_2_4R-Data-Sheet-DS200006391C.pdf),
 sections 5.6, 5.15, 6.2–6.4, and 8.2–8.8.
+
+## Over range
+
+The MCP3564R runs with `DATA_FORMAT[1:0] = 11` (25-bit code, sign in bit 24,
+channel ID in bits 31-28). Datasheet DS20006391C section 5.6 and Table 5-8:
+
+- codes -2^23 .. 2^23-1 cover the specified range, +/-VREF/GAIN;
+- the 25-bit formats carry over range on to the clip at 0x0FFFFFF / 0x1000000
+  (+/-2 VREF/GAIN), but "the ADC accuracy is not maintained on the full
+  extended range, but only on a smaller range, which is approximately equal
+  to +/-1.05 x VREF";
+- the 24-bit formats (00, 01) lock at 0x7FFFFF / 0x800000 instead;
+- there is no over-range status bit: STATUS holds only DR, CRCCFG and POR.
+
+The firmware therefore classifies every conversion as over range when
+|code| > 2^23 - 1 (`Core/Inc/daq_over_range.h`), the same code threshold at
+every gain: +/-VREF at the CH0/CH1 pins, +/-VREF/16 (+/-150 mV nominal) on P6,
++/-11 VREF (26.4 V nominal) at the HVAIN connectors, and the die temperature.
+An over-range conversion:
+
+- is written to SD with its code and a flag (SD format v4, `value` = 1/-1,
+  `calibrated_value` = +/-inf);
+- never enters a median, report bin, statistic, filter or calibration;
+- makes a report bin of only such conversions publish +/-INFINITY, which the
+  station shows as OVR;
+- reaches the rail checks as +/-INFINITY (at or past the rail) and is counted
+  per channel in DAQ_INPUT_HEALTH v3 (words 18-24).
+
+The 2026-11-16 fire's KG1000 code 0xB40000 (+11 796 480 = 1.40625 x 2^23)
+is over range: beyond even the +/-1.05 VREF accuracy band and short of the
+documented clip, so it is an overloaded code, not a voltage. At the nominal
+2.4 V it would read 3.375 V; with this board's measured ~2.2 V reference
+it corresponds to about 3.09 V at the pin.
+
+## MCP3564R reference setting
+
+Every MCP3564R volt is `code x VREF / 2^23` (`mcp3564r_code_to_voltage`, and
+the die temperature, equation 5-1, scales with VREF too). The internal
+reference is nominally 2.4 V +/-2 %. This board's part drifted to about
+2.2 V after heat during repair; with 2.4 V assumed every MCP3564R reading
+(KG1000/AMP2 pin volts, P6, the chamber PT and the other HVAIN inputs, the
+temperature) reads about 9 % high.
+
+The reference is therefore a per-board setting:
+
+- The station owns it and sends it as the managed variable
+  `DAQ_MCP_REFERENCE` (Float32 volts). The DAQ requests it every boot until
+  it arrives, like the calibrations and `DAQ_KG50_INPUT`, keeps a flash copy
+  (key `DAVR`) for boots without the station, and refuses values outside
+  1.9-2.6 V. Until either arrives it uses the nominal 2.4 V.
+- It is reported in DAQ_INPUT_HEALTH word 27 (mV, and whether it came from the
+  station or flash), in the config identity CRC (BOARD_HEALTH word 14, after
+  the filter floats; flags bits 9 and 10), and in every SD `# calibration`
+  line (`mcp_vref_v`). SD keeps raw codes, so any file can be re-converted.
+- Changing it changes every published volt by r = new/old. Load-cell
+  calibrations are kg per volt, so the DAQ converts its on-board copy in the
+  same step (`daq_calibration_scale_input`: KG1000 slope / r, KG50 c_i / r^i
+  and x0 x r, thermal V/C x r; intercepts, c0, tare and reference
+  temperatures unchanged), which keeps kg for every code unchanged. The
+  station stores the reference each calibration was fitted under and
+  converts by the same rule, then re-sends.
+- The code-based over-range threshold does not depend on it. The rail
+  checks' volt limits (`DAQ_FAULT_ADC_FULL_SCALE_V`) are unchanged: an
+  in-range conversion is below full scale at any reference, so the high rail
+  is reached only through over range.
+
+**Measuring it.** With the board powered, measure P7 (or P8) pin 6 (+VREF,
+the MCP3564R REFIN+/OUT pin) against pin 2 or 5 (GND) with a DMM of at least
+4 1/2 digits, after 1 minute of warm-up, and enter the value in the station
+(Settings, Ground Station, Loadcells). Measure it twice, with the load cells
+and P6 bridge connected as flown and with them unplugged. The internal
+reference buffer is rated for only 8 mA into a short (DS20006391C, IREF_SC),
+and the P6 bridge and the amplifier bias dividers hang on +VREF (or
++VREF_BUF; check which on the board). A 350 ohm bridge at 2.4 V alone would
+draw about 7 mA. If the two readings differ, the low reference is loading,
+not drift, and the value to enter is the loaded one, since that is what the
+ADC converts against. The reference is also specified only for AVDD
+2.7-3.6 V. AVDD is +3V3A (schematic, ADC & VREF sheet), so while a clamped
+front end lifts +3V3A above 3.6 V (DAQ_INPUT_HEALTH faults 8/9, word 25),
+every MCP3564R reading, the reference included, is outside the datasheet. There is no firmware self-measurement:
+the schematic shows no path without external wiring. +VREF goes to the bias
+dividers, the +VREF_BUF buffer and connector pin 6; the DAC outputs go to
+their connectors with ADC4 readback; neither reaches an STM32 ADC input or an
+MCP3564R input. Confirm this on the board before building on it. Two jumpered
+options would allow a "calibrate reference" action later, both measured
+against the VREFINT-corrected VDDA and so valid only once the D24 clamp no
+longer lifts +3V3A:
+- +VREF to a spare SAR input;
+- a DAC output into a spare MCP3564R input (CH4/CH5), read by both ADCs. Current value for this board: 2.2 V, measured approximately;
+re-measure after the December repair.
 
 ## Software verification
 

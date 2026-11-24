@@ -38,11 +38,15 @@ supply voltages do not specify a calibrated measurement range.
 ## Nominal conversion and acquisition
 
 STM32 ADC1 uses single-ended 14-bit conversion; ADC4 uses 12-bit conversion.
-Both use nominal VDDA=3.3 V. ADC4 explicitly clears the previous channel selection
+Both convert against the measured VDDA (+3V3A): every ADC1 pass reads VREFINT
+first and computes VDDA = 3.0 V x VREFINT_CAL / VREFINT (`daq_vdda.h`), falling
+back to the last valid value, or 3.3 V before the first. ADC4 explicitly clears the previous channel selection
 before each conversion: HAL channel selection is additive, so leaving all four
 selected and restarting after the first conversion can repeat IN1.
 
-MCP CH2–5 report ADC-pin volts (`code * 2.4 / 8388608`); CH6/7 report connector
+MCP CH2–5 report ADC-pin volts (`code * VREF / 8388608`, VREF the per-board
+MCP3564R reference setting, nominal 2.4 V; codes beyond +/-(2^23 - 1) are over
+range and publish +/-INFINITY, [loadcell-inputs.md](loadcell-inputs.md#over-range)); CH6/7 report connector
 volts after multiplying by 11. No load-cell thermal compensation, smoothing or
 mass calibration is applied to these channels. Raw SD records retain ADC-pin
 volts and code; their `calibrated_value` column contains nominal connector volts.

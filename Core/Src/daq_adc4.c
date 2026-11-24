@@ -1,11 +1,11 @@
 #include "daq_adc4.h"
 
 #include "main.h"
+#include "daq_adc1.h"
 #include <math.h>
 
 extern ADC_HandleTypeDef hadc4;
 
-#define DAQ_VREF_V 3.3f
 #define ADC4_FULL_SCALE_COUNTS 4095.0f
 
 static const uint32_t g_adc4_channels[DAQ_ADC4_CHANNEL_COUNT] = {
@@ -54,7 +54,8 @@ static HAL_StatusTypeDef daq_adc4_read_raw(uint32_t channel, uint32_t *raw)
 
 static float daq_adc4_counts_to_voltage(uint32_t raw)
 {
-  return ((float)raw / ADC4_FULL_SCALE_COUNTS) * DAQ_VREF_V;
+  /* ADC4 shares VREF+ (= VDDA, +3V3A) with ADC1, which measures it. */
+  return ((float)raw / ADC4_FULL_SCALE_COUNTS) * daq_adc1_vref_v();
 }
 
 UINT daq_adc4_init(void)

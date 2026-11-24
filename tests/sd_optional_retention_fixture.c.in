@@ -111,11 +111,13 @@ typedef struct
   float adc_temperature_c;
   int32_t adc_temperature_code;
   uint8_t channel;
+  int8_t over_range;
   uint16_t sample_us;
 } sd_raw_adc_record_t;
 static inline int sd_raw_channel_has_us(uint8_t channel) { return channel < 8U || channel == 9U; }
 #define SD_RAW_CHANNEL_INPUT_VOLTAGE 10U
 #define SD_RAW_CHANNEL_INPUT_CURRENT 11U
+#define SD_RAW_CHANNEL_VDDA 12U
 /* SOURCE_TYPES */static sd_raw_slot_t *g_sd_raw_append_tail;
 static sd_scalar_slot_t *g_sd_scalar_append_tail;
 /* SOURCE_SENSORS */typedef struct {
@@ -218,7 +220,7 @@ static unsigned serve_raw(void){
           const int len = sd_format_csv_raw_record(line, sizeof(line),
               sample->network_unix_ms, captured_uptime,
               sd_raw_channel_has_us(sample->channel) ? captured_uptime * 1000U + sample->sample_us : captured_uptime,
-              sd_raw_channel_has_us(sample->channel) ? 1000000U : BOARD_UPTIME_FREQUENCY_HZ, sensor, sample->raw_adc_code,
+              sd_raw_channel_has_us(sample->channel) ? 1000000U : BOARD_UPTIME_FREQUENCY_HZ, sensor, sd_raw_channel_has_us(sample->channel) ? sample->over_range : 0, sample->raw_adc_code,
               sample->raw_value, sample->calibrated_value, sample->adc_temperature_c,
               sample->adc_temperature_code, sample->record_sequence, &raw_format_cache);
           if (len <= 0 || (size_t)len >= sizeof(line)) {

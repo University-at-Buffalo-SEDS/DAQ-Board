@@ -18,6 +18,8 @@ typedef struct
   float current_sense_a[2];
   float power_monitor_v[2]; /* VMON, IMON ADC-pin volts */
   int32_t power_monitor_code[2]; /* VMON, IMON ADC1 counts; -1 when unread. */
+  float vdda_v;          /* VDDA (+3V3A) from VREFINT; NaN when unread (daq_vdda.h) */
+  int32_t vrefint_code;  /* VREFINT ADC1 count; -1 when unread */
 } daq_adc1_sample_t;
 
 UINT daq_adc1_init(void);
@@ -25,6 +27,9 @@ UINT daq_adc1_sample(daq_adc1_sample_t *sample);
 /* VMON/IMON only (two conversions, about 60 us): refreshes input_voltage_v,
  * input_current_a, power_monitor_v and power_monitor_code in place. */
 UINT daq_adc1_sample_supply(daq_adc1_sample_t *sample);
+/* VREF+ for every STM32 ADC conversion: the latest measured VDDA, or the
+ * nominal 3.3 V before the first valid VREFINT reading. */
+float daq_adc1_vref_v(void);
 
 #ifdef __cplusplus
 }

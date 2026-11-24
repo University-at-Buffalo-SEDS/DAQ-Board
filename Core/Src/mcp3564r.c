@@ -3,6 +3,7 @@
 #include "main.h"
 #include "daq_rates.h"
 #include "daq_acq_clock.h"
+#include "daq_over_range.h"
 
 #include <string.h>
 #include <math.h>
@@ -584,7 +585,11 @@ UINT mcp3564r_get_sample(mcp3564r_sample_t *sample)
     /* TEMP conversions update the die temperature; they are not samples. */
     const int32_t code = mcp3564r_decode_code(entry.raw32);
     const float temperature = mcp3564r_code_to_temperature(code);
-    g_mcp3564r.temperature_valid = isfinite(temperature) && temperature >= -40.0f && temperature <= 125.0f;
+    /* An over-range TEMP code is never a temperature (daq_over_range.h). */
+    const int8_t over = daq_adc_over_range(code);
+    g_mcp3564r_diag.temperature_over_range_last = over;
+    if (over != 0) ++g_mcp3564r_diag.temperature_over_range;
+    g_mcp3564r.temperature_valid = over == 0 && isfinite(temperature) && temperature >= -40.0f && temperature <= 125.0f;
     g_mcp3564r.temperature_c = temperature;
     g_mcp3564r.temperature_code = code;
     g_mcp3564r.temperature_ms = (uint32_t)(daq_acq_project_us(now_us, entry.t_us - g_mcp3564r.hal_offset_us) / 1000U);

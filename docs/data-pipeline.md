@@ -363,6 +363,9 @@ from 16 to 11 records.
 
 - Load cells are published uncalibrated, in ADC-pin volts (P6: input volts).
   The GS applies its calibration.
+- Every MCP3564R volt uses the per-board reference setting
+  (`DAQ_MCP_REFERENCE`, nominal 2.4 V; this board about 2.2 V), see
+  [loadcell-inputs.md](loadcell-inputs.md#mcp3564r-reference-setting).
 - The SD `calibrated_value` uses the on-board copy that the GS sends
   (`DAQ_LOADCELL_CALIBRATION`, `DAQ_KG50_CALIBRATION`); a `# calibration`
   line records it.
@@ -418,8 +421,18 @@ The noise figures compare ADC integration time:
 | Auxiliary CH1–CH7 | 3-sample running median of each channel's samples | 1 sample (50–100 ms) | | single spike removed |
 | GS display | first-order low-pass, `noise.<sensor>.tau_ms` (0–2000 ms, GS `loadcell_zero`) | tau | | |
 
-**SD keeps every unfiltered conversion.** The network values are exactly
-reproducible from SD:
+**ADC over range** (`Core/Inc/daq_over_range.h`,
+[loadcell-inputs.md](loadcell-inputs.md#over-range)). A conversion with
+|code| > 2^23 - 1 is beyond the MCP3564R's specified range (+/-VREF/GAIN).
+It never enters a median, bin mean, statistic or filter. A report bin with
+some in-range conversions publishes their mean; a bin of only over-range
+conversions publishes +INFINITY or -INFINITY in its float, which the station
+shows as OVR (NaN keeps its meaning: no data). This applies to `KG1000`,
+`DAQ_LOADCELL_CHAMBER` (all three fields), `KG50`, `DAQ_KG50_SELECTED` and
+the `DAQ_SDADC_VOLTAGES` auxiliary values; `DAQ_ADC_TEMPERATURE` goes NaN.
+
+**SD keeps every unfiltered conversion**, over range included (flagged, SD
+format v4). The network values are exactly reproducible from SD:
 
 - same median, same µs bins, double-precision sum, one binary32 rounding;
 - `tests/test_launch_supply_log.py` rebuilds every emitted bin bit for bit
@@ -442,6 +455,23 @@ The DAQ's checks are operator warnings in `DAQ_INPUT_HEALTH`. They run on raw
 | KG1000/KG50 rail | window means | every 2 ms | 20 ms | unchanged; observations are now uniform |
 | P6 leg imbalance / common mode | CH2/CH3 pairs | every 50 ms (was 100 ms when the pass fitted one window) | 100 / 200 ms | ≤ set + 50 ms (was set + 100 ms) |
 | Chamber no signal (burn window) | chamber window means | every 2 ms (was 10 Hz in the original design) | 2000 ms | unchanged |
+| +3V3A (VDDA) high / low (3.45 V / 3.15 V) | VREFINT with every VMAIN reading | 10 Hz; 250 Hz in the launch window | 100 ms | new in v3 |
+| ADC over range (per channel) | every conversion | per conversion | none: reported as now / latched / counted | new in v3 |
+
+Over range reaches the checks as +/-INFINITY when most of a window's
+conversions were over range: the KG1000/KG50 rails count it as at the rail;
+the chamber no-signal check counts it as a signal present (a 0-5 V PT behind
+the 11:1 divider can only reach 26.4 V through a wiring or sensor fault),
+and the station treats chamber over range during the burn as overpressure or
+a sensor fault.
+
+**VDDA.** +3V3A is the STM32 VDDA/VREF+ (one pin on this package) and the
+MCP3564R AVDD. ADC1 now reads VREFINT before VMON and IMON and converts with
+VDDA = 3.0 V x VREFINT_CAL / VREFINT (`Core/Inc/daq_vdda.h`); ADC4 uses the
+same VDDA. VMAIN stays correct when +3V3A moves. In the 2026-11-16 fire a
+saturated KG1000 front end lifted +3V3A through its D24 clamp to about 4.2 V,
+and the uncorrected VMAIN read 11.1 V against the gateway's 14.1 V
+(GroundStation26 `docs/loadcell-investigation-2026-11.md`).
 
 `tests/test_report_filters.py` checks four cases:
 
@@ -451,8 +481,18 @@ The DAQ's checks are operator warnings in `DAQ_INPUT_HEALTH`. They run on raw
 - a dead PT activates at T0 + 3.5 s, while one-sample dropouts on a live PT do
   not.
 
-**DAQ_INPUT_HEALTH version 2.** It has 18 words (`daq_input_faults.h`). Version
-2 adds:
+**DAQ_INPUT_HEALTH version 3.** It has 28 words (`daq_input_faults.h`).
+Version 3 keeps words 0-17 and adds:
+
+- faults 8 and 9, +3V3A (VDDA) high and low, with their episode counters in
+  word 26;
+- ADC over range now / latched (word 18), direction (19) and per-channel
+  over-range conversion counters, u16 wrapping (20-24): CH0-CH7, the die
+  temperature and P6;
+- VDDA maximum and now in mV (25);
+- the applied MCP3564R reference in mV and its source (27).
+
+Version 2 had 18 words and added:
 
 - per-channel noise (1 s RMS of successive differences / √2) and drift (change
   of the 10 s mean over 60 s, per minute) for KG1000, KG50, the chamber PT and
@@ -481,7 +521,7 @@ The DAQ's checks are operator warnings in `DAQ_INPUT_HEALTH`. They run on raw
 
 **Format block.** Every file and part starts with the column header and then
 the SEDS-SD format block (`Core/Inc/sd_format.h`):
-`# seds-sd,format=daq,version=3,board=DAQ,firmware=<rev>,tick_hz=1000,schema=ade30ff7`,
+`# seds-sd,format=daq,version=4,board=DAQ,firmware=<rev>,tick_hz=1000,schema=bc9e710a`,
 the `# seds-sd-columns` line, and `# seds-sd-records` lines declaring every
 label with its columns, units and tick rate (MCP3564R records `@1000000`).
 The GS picks the parser by format and version and checks the schema hash; the

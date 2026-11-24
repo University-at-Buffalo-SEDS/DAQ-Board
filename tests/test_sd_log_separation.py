@@ -29,6 +29,7 @@ class LogSeparationTests(unittest.TestCase):
 #include <string.h>
 #include "sd_file_limit.h"
 #include "daq_calibration.h"
+#include "mcp3564r_board_config.h"
 typedef unsigned UINT; typedef uint32_t ULONG; typedef unsigned char UCHAR; typedef void VOID;
 #define FX_SUCCESS 0U
 #define FX_IO_ERROR 1U

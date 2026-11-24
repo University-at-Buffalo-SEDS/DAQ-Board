@@ -928,12 +928,12 @@
     {
       "rust": "DaqInputHealth",
       "name": "DAQ_INPUT_HEALTH",
-      "doc": "DAQ live input faults, 1 Hz and early on a new episode (v2): active and latched fault masks, u16 episode counters, VMAIN/chamber/P6 mV, configured levels, per-channel noise/drift, excitation mV, MCP3564R frame-engine counters. Layout in daq_input_faults.h. Warnings only.",
+      "doc": "DAQ live input faults, 1 Hz and early on a new episode (v3): active and latched fault masks, u16 episode counters, VMAIN/chamber/P6 mV, configured levels, per-channel noise/drift, excitation mV, MCP3564R frame-engine counters, ADC over-range now/latched masks and per-channel counters, VDDA (+3V3A) mV. Layout in daq_input_faults.h. Warnings only.",
       "class": "Data",
       "element": {
         "kind": "Static",
         "data_type": "UInt32",
-        "count": 18
+        "count": 28
       },
       "endpoints": [
         "ActuatorGroundStation"
@@ -1052,6 +1052,22 @@
       ],
       "reliable": "Unordered",
       "priority": 200
+    },
+    {
+      "rust": "DaqMcpReference",
+      "name": "DAQ_MCP_REFERENCE",
+      "doc": "Managed source: MCP3564R reference voltage in volts used to convert every MCP3564R code (1.9-2.6 V; nominal 2.4 V). The DAQ converts its on-board load-cell calibration with it so kg per code is unchanged.",
+      "reliable": "Ordered",
+      "priority": 16,
+      "class": "Data",
+      "element": {
+        "kind": "Static",
+        "data_type": "Float32",
+        "count": 1
+      },
+      "endpoints": [
+        "FillSdCard"
+      ]
     }
   ]
 }

@@ -125,6 +125,35 @@ _Static_assert(DAQ_FAULT_CHAMBER_BURN_END_MS - DAQ_FAULT_CHAMBER_BURN_START_MS >
                DAQ_FAULT_CHAMBER_BURN_END_MS > DAQ_FAULT_CHAMBER_BURN_START_MS,
                "the chamber burn window must be longer than the chamber set time");
 
+/* --- STM32 VDDA = +3V3A (VREFINT against VREFINT_CAL, daq_vdda.h) ------- */
+/* +3V3A feeds the STM32 VDDA/VREF+ (ADC1 measures VMON with it) and the
+ * MCP3564R AVDD. It comes from an LDO, which sources but cannot sink: a
+ * saturated analog front end clamped into +3V3A by its Schottky (D24 on
+ * AMP1_OUT) injects current and lifts the rail. In the 2026-11-16 fire DAQ
+ * VMAIN read 11.1 V against the gateway's 14.1 V on the same battery, which
+ * implies VDDA = 3.3 x 14.1 / 11.1 = 4.19 V while KG1000 was over range.
+ *
+ * Band 3.15-3.45 V (3.3 V +/-4.5 %). Error budget of the measurement: the
+ * factory VREFINT_CAL was taken at VDDA = 3.0 V +/-10 mV and 30 C +/-5 C
+ * (0.33 %); VREFINT's temperature coefficient (tens of ppm/C, STM32U585
+ * datasheet embedded-reference table) adds a few tenths of a percent over
+ * 0-60 C; one LSb of the VREFINT reading (about 6 000 of 16 383 codes at
+ * 3.3 V) is 0.02 %. Together under +/-0.7 %, about +/-25 mV. A 3.3 V LDO holds about +/-1.5 % (+/-50 mV)
+ * over load and temperature. The band therefore sits 75 mV beyond both
+ * errors combined, and its top stays 150 mV below 3.6 V, the maximum
+ * operating VDDA of the STM32U5 and AVDD of the MCP3564R (MCP3564R absolute
+ * maximum AVDD: 4.0 V, DS20006391C section 1.0). The station escalates above
+ * 3.6 V. The MCP3564R AVDD is +3V3A too, and its internal reference is
+ * specified only for AVDD 2.7-3.6 V: above that its readings are unspecified. 30 mV of hysteresis is about 6x the reading's noise. */
+#define DAQ_FAULT_VDDA_HIGH_V 3.45f
+#define DAQ_FAULT_VDDA_HIGH_CLEAR_V 3.42f
+#define DAQ_FAULT_VDDA_LOW_V 3.15f
+#define DAQ_FAULT_VDDA_LOW_CLEAR_V 3.18f
+/* Measured with VMAIN: 10 Hz, 250 Hz in the launch window. Two consecutive
+ * 100 ms readings activate the fault; one is still an episode. */
+#define DAQ_FAULT_VDDA_SET_MS 100U
+#define DAQ_FAULT_VDDA_CLEAR_MS 2000U
+
 /* --- Reporting (DAQ_INPUT_HEALTH) ---------------------------------------- */
 /* Periodic report; a new fault episode is reported early, no sooner than the
  * minimum spacing after the previous report. */

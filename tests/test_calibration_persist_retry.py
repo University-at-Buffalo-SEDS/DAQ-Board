@@ -40,7 +40,8 @@ HEADERS = {
                  "SedsResult seds_router_invalidate_network_variable_cache(SedsRouter*,uint32_t,bool*);\n",
     "sedsnet_config.h": "#pragma once\n#define SEDS_DT_DAQ_LOADCELL_CALIBRATION 1U\n"
                         "#define SEDS_DT_DAQ_KG50_CALIBRATION 2U\n#define SEDS_DT_DAQ_THERMAL_CALIBRATION 3U\n"
-                        "#define SEDS_DT_DAQ_FILTER_CALIBRATION 4U\n#define SEDS_DT_DAQ_KG50_INPUT 5U\n",
+                        "#define SEDS_DT_DAQ_FILTER_CALIBRATION 4U\n#define SEDS_DT_DAQ_KG50_INPUT 5U\n"
+                        "#define SEDS_DT_DAQ_MCP_REFERENCE 6U\n",
     "board_recovery_transport.h": "#pragma once\n#include <stdint.h>\nextern volatile uint32_t g_reliable_refusal_count;\n",
 }
 
@@ -56,7 +57,7 @@ static int fail_write, store_ready=1;
 static unsigned writes, clears, requests, sd_sets;
 static daq_calibration_t stored;
 static uint32_t stored_units;
-static SedsResult (*callbacks[6])(const SedsPacketView*,void*);
+static SedsResult (*callbacks[7])(const SedsPacketView*,void*);
 uint32_t HAL_GetTick(void){return tick;}
 void mcp3564r_request_kg50_input(uint8_t input){(void)input;}
 void sd_card_set_calibration(const daq_calibration_t *c){(void)c;++sd_sets;}

@@ -75,7 +75,8 @@ int main(void) {
  samples[12]=8192; samples[11]=9000; samples[16]=1000; samples[17]=5500;
  assert(daq_adc1_init()==TX_SUCCESS && daq_adc4_init()==TX_SUCCESS);
  daq_adc1_sample_t a;
- assert(daq_adc1_sample(&a)==TX_SUCCESS && calls==8);
+ /* VREFINT reads 0: no VDDA, so the nominal 3.3 V reference applies. */
+ assert(daq_adc1_sample(&a)==TX_SUCCESS && calls==9 && isnan(a.vdda_v) && a.vrefint_code==0);
  for(unsigned i=0;i<4;i++)assert(fabsf(a.sar_inputs_v[i]-(i+5)*100*3.3f/16383)<1e-6f);
  assert(fabsf(a.current_sense_v[0]-8192*3.3f/16383)<1e-6f);
  assert(fabsf(a.current_sense_v[1]-9000*3.3f/16383)<1e-6f);
@@ -83,9 +84,9 @@ int main(void) {
  assert(fabsf(a.input_voltage_v-5500*3.3f/16383*11)<1e-5f);
  assert(fabsf(a.input_current_a-1000*3.3f/16383/(0.00007828f*6200))<1e-5f);
  assert(a.power_monitor_code[0]==5500 && a.power_monitor_code[1]==1000);
- /* The launch-window supply read converts only VMON (17) and IMON (16). */
+ /* The launch-window supply read converts only VREFINT, VMON (17) and IMON (16). */
  calls=0;a.sar_inputs_v[0]=-1;samples[17]=4000;
- assert(daq_adc1_sample_supply(&a)==TX_SUCCESS && calls==2 && a.sar_inputs_v[0]==-1);
+ assert(daq_adc1_sample_supply(&a)==TX_SUCCESS && calls==3 && a.sar_inputs_v[0]==-1);
  assert(a.power_monitor_code[0]==4000 && fabsf(a.input_voltage_v-4000*3.3f/16383*11)<1e-5f);
  fail_channel=17;assert(daq_adc1_sample_supply(&a)==TX_NOT_DONE && isnan(a.input_voltage_v) && a.power_monitor_code[0]==-1);
  samples[17]=5500;
@@ -101,6 +102,27 @@ int main(void) {
  assert(daq_adc4_sample(&b)==TX_NOT_DONE && isnan(b.analog_inputs_v[1]));
  assert(isfinite(b.analog_inputs_v[2]));
  assert(daq_adc1_sample(NULL)==TX_PTR_ERROR && daq_adc4_sample(NULL)==TX_PTR_ERROR);
+ /* VREFINT_CAL = 1650 at 3.0 V. +3V3A lifted to 4.19 V (the 2026-11-16 fire:
+  * VMAIN read 11.1 V against the gateway's 14.1 V): VREFINT reads 1181 and
+  * VMON reads the code a true 14.1 V gives at 4.19 V. */
+ fail_channel=99; samples[0]=1181;
+ const uint32_t vmon=(uint32_t)(14.1f/11.0f/(3.0f*1650/1181)*16383+0.5f); samples[17]=vmon;
+ assert(daq_adc1_sample_supply(&a)==TX_SUCCESS && a.vrefint_code==1181);
+ assert(fabsf(a.vdda_v-3.0f*1650/1181)<1e-5f && fabsf(a.vdda_v-4.19f)<0.005f);
+ assert(fabsf(a.input_voltage_v-14.1f)<0.01f);
+ /* The uncorrected conversion is the old 11.1 V reading. */
+ assert(fabsf(vmon*3.3f/16383*11-11.1f)<0.01f);
+ assert(fabsf(daq_adc1_vref_v()-a.vdda_v)<1e-6f);
+ /* ADC4 shares VREF+ and converts with the measured VDDA too. */
+ assert(daq_adc4_sample(&b)==TX_SUCCESS && fabsf(b.analog_inputs_v[0]-100*a.vdda_v/4095)<1e-6f);
+ /* Full sample: everything on ADC1 uses the same VDDA. */
+ samples[0]=1500;
+ assert(daq_adc1_sample(&a)==TX_SUCCESS && fabsf(a.vdda_v-3.3f)<1e-6f);
+ assert(fabsf(a.sar_inputs_v[0]-500*3.3f/16383)<1e-6f);
+ /* A failed or implausible VREFINT keeps the last valid VDDA as the reference. */
+ samples[0]=16383;
+ assert(daq_adc1_sample_supply(&a)==TX_SUCCESS && isnan(a.vdda_v) && a.vrefint_code==16383);
+ assert(fabsf(daq_adc1_vref_v()-3.3f)<1e-6f);
 }
 '''
 
@@ -111,6 +133,10 @@ class AnalogInputTests(unittest.TestCase):
             p = pathlib.Path(tmp)
             (p/'stm32u5xx_hal.h').write_text(HAL + '\n'.join(f'#define ADC_CHANNEL_{i} {i}' for i in range(18)))
             (p/'main.h').write_text('#include "stm32u5xx_hal.h"\n')
+            (p/'stm32u5xx_ll_adc.h').write_text(
+                '#include <stdint.h>\nstatic const uint16_t mock_vrefint_cal = 1650;\n'
+                '#define VREFINT_CAL_ADDR (&mock_vrefint_cal)\n#define ADC12_COMMON 0\n'
+                '#define LL_ADC_PATH_INTERNAL_VREFINT 1\n#define LL_ADC_SetCommonPathInternalChAdd(c, p) ((void)(c), (void)(p))\n')
             (p/'tx_api.h').write_text('typedef unsigned UINT;\n#define TX_SUCCESS 0\n#define TX_PTR_ERROR 1\n#define TX_NOT_DONE 2\n')
             (p/'test.c').write_text(HARNESS)
             run = subprocess.run(['cc','-DTELEMETRY_ENABLED=1','-std=c11','-Wall','-Wextra','-Werror','-I',str(p),'-I',str(ROOT/'Core/Inc'),str(ROOT/'Core/Src/daq_adc1.c'),str(ROOT/'Core/Src/daq_adc4.c'),str(p/'test.c'),'-o',str(p/'test')],capture_output=True,text=True)

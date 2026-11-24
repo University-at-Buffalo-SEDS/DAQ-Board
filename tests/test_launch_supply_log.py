@@ -11,7 +11,10 @@ to 2 s:
   the 10 Hz analog cadence;
 - every KG1000/KG50 network value the drain emits is rebuilt bit for bit from
   the formatted SD raw records alone (independent Python median + microsecond
-  bins).
+  bins), including ADC over-range conversions: flagged rows (SD format v4
+  value column 1/-1) never enter the median or the mean, and a bin of only
+  flagged rows is the +/-INFINITY marker;
+- every supply reading also writes vdda_v (VREFINT code, VDDA volts).
 """
 from pathlib import Path
 import struct
@@ -36,15 +39,22 @@ def median_bins_from_csv(lines, sensors, size, period_us):
         if fields[2] not in sensors:
             continue
         assert fields[11] == '1000000', fields
-        window = (window + [f32(float(fields[5]))])[-size:]
-        filtered = sorted(window)[(len(window) - 1) // 2]
+        over = int(fields[3]) if fields[3] else 0
         uptime_us = int(fields[10])
         bin_ = uptime_us // period_us
         if state and state[0] != bin_:
             centre_ms = (state[0] * period_us + period_us // 2) // 1000
-            out.append((centre_ms, struct.unpack('<I', struct.pack('<f', state[1] / state[2]))[0]))
+            mean = state[1] / state[2] if state[2] else (float('-inf') if state[3] < 0 else float('inf'))
+            out.append((centre_ms, struct.unpack('<I', struct.pack('<f', mean))[0]))
             state = None
-        state = (bin_, (state[1] if state else 0.0) + filtered, (state[2] if state else 0) + 1)
+        sum_, count, direction = (state[1], state[2], state[3]) if state else (0.0, 0, 0)
+        if over:
+            assert fields[6] == ('inf' if over > 0 else '-inf'), fields
+            state = (bin_, sum_, count, over)
+            continue
+        window = (window + [f32(float(fields[5]))])[-size:]
+        filtered = sorted(window)[(len(window) - 1) // 2]
+        state = (bin_, sum_ + filtered, count + 1, direction)
     return out
 
 
@@ -67,6 +77,7 @@ class LaunchSupplyLogTests(unittest.TestCase):
 #include "daq_rates.h"
 #include "daq_median.h"
 #include "daq_channel_stats.h"
+#include "daq_over_range.h"
 static uint32_t primask;
 static uint32_t __get_PRIMASK(void) { return primask; }
 static void __disable_irq(void) { primask = 1U; }
@@ -80,8 +91,10 @@ static void mcp3564r_request_profile(uint8_t profile) { requested_profile = prof
 #define TX_SUCCESS 0U
 #define SD_RAW_CHANNEL_INPUT_VOLTAGE 10U
 #define SD_RAW_CHANNEL_INPUT_CURRENT 11U
+#define SD_RAW_CHANNEL_VDDA 12U
 typedef unsigned UINT;
-typedef struct { uint32_t monotonic_ms; float input_voltage_v, input_current_a, pin_v[2]; int32_t code[2]; } daq_supply_sample_t;
+typedef struct { uint32_t monotonic_ms; float input_voltage_v, input_current_a, pin_v[2]; int32_t code[2];
+                 float vdda_v; int32_t vrefint_code; } daq_supply_sample_t;
 typedef struct {
   uint64_t monotonic_ms; uint8_t analog_sample_fresh;
   uint8_t ext_adc_sample_valid, ext_adc_channel;
@@ -105,6 +118,7 @@ typedef struct {
   float raw_value, calibrated_value, adc_temperature_c;
   int32_t adc_temperature_code;
   uint8_t channel;
+  int8_t over_range;
   uint16_t sample_us;
 } sd_raw_adc_record_t;
 static inline int sd_raw_channel_has_us(uint8_t channel) { return channel < 8U || channel == 9U; }
@@ -118,7 +132,13 @@ static uint64_t now_us, next_us = 288;
 static unsigned conversions;
 static mcp3564r_sample_t make(void) {
   const unsigned i = conversions++;
-  const int32_t code = (int32_t)((i * 2654435761u) >> 12) - 524288;
+  int32_t code = (int32_t)((i * 2654435761u) >> 12) - 524288;
+  /* ADC over range: KG1000 at the 2026-11-16 plateau code (0xB40000) for
+   * 1200-1290 ms (whole bins, and bins that are partly over range), and
+   * isolated conversions one LSb past each full scale. */
+  if ((i & 1u) == 0u && next_us >= 1200000u && next_us < 1290000u) code = 0xB40000;
+  else if (i % 97u == 5u) code = 8388608;
+  else if (i % 89u == 7u) code = -8388608 - 1;
   const float v = (float)code * 2.4f / 8388608.0f;
   return (mcp3564r_sample_t){1, (uint8_t)(i & 1u), next_us / 1000u, code, v, v, 25.0f, 7, next_us};
 }
@@ -132,7 +152,8 @@ uint64_t board_uptime_ticks(void) { return now_us / 1000u; }
 static daq_supply_sample_t pending_supply; static uint8_t supply_fresh_flag; static unsigned supply_reads;
 static void note_supply(void) {
   const uint32_t ms = (uint32_t)(now_us / 1000u);
-  pending_supply = (daq_supply_sample_t){ms, 14.2f - (float)(ms % 7u) * 0.5f, 0.4f, {1.29f, 0.24f}, {6400 + (int32_t)ms, 1190}};
+  pending_supply = (daq_supply_sample_t){ms, 14.2f - (float)(ms % 7u) * 0.5f, 0.4f, {1.29f, 0.24f}, {6400 + (int32_t)ms, 1190},
+                                         3.0f * 1650.0f / 1500.0f, 1500};
   supply_fresh_flag = 1;
 }
 static UINT daq_board_sample_supply(void) { ++supply_reads; note_supply(); return TX_SUCCESS; }
@@ -164,18 +185,20 @@ int main(void) {
     }
 ''' + supply_block + r'''
     daq_loadcell_window_t window;
+    daq_ovr_window_t ovr;
     daq_loadcell_bins_t bins;
     const uint16_t n = daq_drain_ext_adc(&snapshot, records, DAQ_RAW_BATCH_CAPACITY, &cal, &window,
-                                         1U, &bins, supply_fresh ? &supply : NULL);
+                                         1U, &bins, supply_fresh ? &supply : NULL, &ovr);
     for (uint16_t i = 0; i < n; ++i) {
       const sd_raw_adc_record_t *r = &records[i];
       const char *names[] = {"kg1000_v", "kg50_v"};
       const char *sensor = r->channel < 2u ? names[r->channel] : r->channel == SD_RAW_CHANNEL_INPUT_VOLTAGE ?
-          "input_voltage_v" : r->channel == SD_RAW_CHANNEL_INPUT_CURRENT ? "input_current_a" : "other";
+          "input_voltage_v" : r->channel == SD_RAW_CHANNEL_INPUT_CURRENT ? "input_current_a" :
+          r->channel == SD_RAW_CHANNEL_VDDA ? "vdda_v" : "other";
       const int fine = sd_raw_channel_has_us(r->channel);
       assert(sd_format_csv_raw_record(line, sizeof line, r->network_unix_ms, r->monotonic_ms,
           fine ? r->monotonic_ms * 1000ULL + r->sample_us : r->monotonic_ms, fine ? 1000000U : 1000U, sensor,
-          r->raw_adc_code, r->raw_value, r->calibrated_value, r->adc_temperature_c,
+          fine ? r->over_range : 0, r->raw_adc_code, r->raw_value, r->calibrated_value, r->adc_temperature_c,
           r->adc_temperature_code, r->record_sequence, &cache) > 0);
       fputs(line, stdout);
     }
@@ -205,6 +228,14 @@ int main(void) {
         amps = [int(row[1]) for row in rows if row[2] == 'input_current_a']
         self.assertTrue(all(row[11] == '1000' for row in rows if row[2].startswith('input_')))
         self.assertEqual(volts, amps)
+        vdda = [row for row in rows if row[2] == 'vdda_v']
+        # A steady VDDA joins a supply reading once per 100 ms, beside it.
+        vdda_times = [int(row[1]) for row in vdda]
+        self.assertTrue(set(vdda_times) <= set(volts))
+        self.assertLessEqual(max(b - a for a, b in zip(vdda_times, vdda_times[1:])), 104)
+        self.assertLess(len(vdda), len(volts), 'not with every launch-window reading')
+        self.assertTrue(all(row[4] == '1500' and f32(float(row[6])) == f32(3.0 * 1650 / 1500) and row[3] == ''
+                            for row in vdda))
         window = [t for t in volts if 1000 <= t < 2000]
         gaps = [b - a for a, b in zip(window, window[1:])]
         self.assertGreaterEqual(len(window), 1000 // 10, 'at least 100 Hz in the launch window')
@@ -233,6 +264,16 @@ int main(void) {
             # equals the SD rebuild bit for bit.
             self.assertGreaterEqual(len(emitted), 3_000_000 // period - 2)
             self.assertEqual(emitted, rebuilt[:len(emitted)])
+            if sensor == 'kg1000':
+                markers = [t for t, bits in emitted if bits == 0x7F800000]
+                self.assertEqual(markers, [1210, 1230, 1250, 1270], 'whole over-range bins are +INFINITY')
+                self.assertFalse(any(bits in (0x7F800000, 0xFF800000) for t, bits in emitted if t not in markers),
+                                 'a bin with an in-range sample reports their mean')
+        flags = [row for row in csv_rows if row.split(',')[3]]
+        self.assertTrue(any(r.split(',')[3] == '-1' for r in flags) and any(r.split(',')[3] == '1' for r in flags))
+        self.assertTrue(all(abs(int(r.split(',')[4])) > 8388607 for r in flags), 'only codes past full scale')
+        self.assertTrue(all(abs(int(r.split(',')[4])) <= 8388607 for r in csv_rows
+                            if r.split(',')[2].startswith('kg') and not r.split(',')[3]))
 
 
 if __name__ == '__main__':

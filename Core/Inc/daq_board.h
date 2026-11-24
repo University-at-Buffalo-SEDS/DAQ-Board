@@ -42,6 +42,8 @@ typedef struct
   float input_current_a;
   float pin_v[2];   /* VMON, IMON */
   int32_t code[2];  /* VMON, IMON; -1 when the conversion failed */
+  float vdda_v;     /* VDDA from VREFINT, the reference pin_v used; NaN unread */
+  int32_t vrefint_code; /* -1 when the conversion failed */
 } daq_supply_sample_t;
 
 UINT daq_board_init(void);

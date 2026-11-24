@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = r'''
 #include "pressure_sd_wire.h"
 #include "daq_calibration.h"
+#include "mcp3564r_board_config.h"
 #include "sd_file_limit.h"
 #include "sd_calendar.h"
 #include <assert.h>

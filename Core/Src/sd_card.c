@@ -22,6 +22,7 @@
 #include "sd_fat_time.h"
 #include "sd_log_path.h"
 #include "sd_file_stream.h"
+#include "mcp3564r_board_config.h"
 
 #include <stddef.h>
 #include <stdio.h>
@@ -32,12 +33,12 @@
 /* Bench build only: time the writer's encode, FileX and media calls in place. */
 volatile sd_profile_t g_sd_profile;
 static inline int sd_prof_format_raw(char *dst, size_t capacity, uint64_t network_ms, uint64_t uptime,
-    uint64_t uptime_ticks, uint32_t uptime_hz, const char *sensor, int32_t raw_code, float raw_value, float calibrated_value, float temperature,
-    int32_t temperature_code, uint64_t sequence, sd_raw_format_cache_t *cache)
+    uint64_t uptime_ticks, uint32_t uptime_hz, const char *sensor, int8_t over_range, int32_t raw_code, float raw_value,
+    float calibrated_value, float temperature, int32_t temperature_code, uint64_t sequence, sd_raw_format_cache_t *cache)
 {
   SD_PROF_BEGIN(t);
-  const int length = sd_format_csv_raw_record(dst, capacity, network_ms, uptime, uptime_ticks, uptime_hz, sensor, raw_code,
-      raw_value, calibrated_value, temperature, temperature_code, sequence, cache);
+  const int length = sd_format_csv_raw_record(dst, capacity, network_ms, uptime, uptime_ticks, uptime_hz, sensor, over_range,
+      raw_code, raw_value, calibrated_value, temperature, temperature_code, sequence, cache);
   SD_PROF_END(encode_cycles, t); SD_PROF_COUNT(records, 1U);
   return length;
 }
@@ -284,6 +285,7 @@ typedef struct {
   ULONG retry_offset;
   uint64_t key, created_ms; /* created_ms: daq_log_monotonic_ms at creation */
   daq_calibration_t calibration;
+  float mcp_vref_v; /* reference in the file's latest # calibration line */
   uint8_t open, retry_active, reserve_disabled;
 } sd_log_t;
 static sd_log_t g_sd_regular_log, g_sd_launch_log;
@@ -995,14 +997,18 @@ static UINT sd_close_file(sd_log_t *log)
   return status;
 }
 
-/* loadcell_input=adc_volts marks files whose KG1000/KG50 values, slopes (kg/V),
+/* mcp_vref_v is the MCP3564R reference every MCP3564R volt in the file was
+ * converted with (volts = raw_adc_code x mcp_vref_v / 2^23, / 16 for
+ * kg50_p6_v); files without it used the nominal 2.4 V.
+ * loadcell_input=adc_volts marks files whose KG1000/KG50 values, slopes (kg/V),
  * kg50_x0 and *_raw_per_c (V/C) use ADC-pin volts. Older files lack it and
  * use the legacy raw scale (volts = raw * 16000/921). loadcell_boxcar_ms is
  * the bin width of the KG1000/KG50 network boxcar (daq_bin_average_add), so a
  * reader can rebuild that stream from the raw records. */
 static int sd_format_calibration_line(char *line, size_t size, const daq_calibration_t *calibration)
 {
-  char coefficients[17][24];
+  char coefficients[18][24];
+  sd_format_float(coefficients[17], mcp3564r_vref_v());
   sd_format_float(coefficients[0], calibration->kg1000_slope);
   sd_format_float(coefficients[1], calibration->kg1000_intercept);
   sd_format_float(coefficients[2], calibration->iadc_slope);
@@ -1015,12 +1021,12 @@ static int sd_format_calibration_line(char *line, size_t size, const daq_calibra
   sd_format_float(coefficients[16], calibration->filter_tau_ms[1]);
   const int len = snprintf(
       line, size,
-      "# calibration,kg1000_slope=%s,kg1000_intercept=%s,iadc_slope=%s,iadc_intercept=%s,kg50_c0=%s,kg50_c1=%s,kg50_c2=%s,kg50_c3=%s,kg50_c4=%s,kg50_x0=%s,kg50_tare=%s,kg1000_temp_ref=%s,kg1000_raw_per_c=%s,kg50_temp_ref=%s,kg50_raw_per_c=%s,kg1000_filter_tau_ms=%s,kg50_filter_tau_ms=%s,loadcell_input=adc_volts,loadcell_report=median_bin,kg1000_median=%u,kg1000_bin_us=%u,kg50_median=%u,kg50_bin_us=%u,adc_uptime_hz=1000000\r\n",
+      "# calibration,kg1000_slope=%s,kg1000_intercept=%s,iadc_slope=%s,iadc_intercept=%s,kg50_c0=%s,kg50_c1=%s,kg50_c2=%s,kg50_c3=%s,kg50_c4=%s,kg50_x0=%s,kg50_tare=%s,kg1000_temp_ref=%s,kg1000_raw_per_c=%s,kg50_temp_ref=%s,kg50_raw_per_c=%s,kg1000_filter_tau_ms=%s,kg50_filter_tau_ms=%s,mcp_vref_v=%s,loadcell_input=adc_volts,loadcell_report=median_bin,kg1000_median=%u,kg1000_bin_us=%u,kg50_median=%u,kg50_bin_us=%u,adc_uptime_hz=1000000\r\n",
       coefficients[0], coefficients[1], coefficients[2], coefficients[3],
       coefficients[4], coefficients[5], coefficients[6], coefficients[7],
       coefficients[8], coefficients[9], coefficients[10],
       coefficients[11], coefficients[12], coefficients[13], coefficients[14], coefficients[15], coefficients[16],
-      (unsigned)DAQ_FAST_MEDIAN, (unsigned)DAQ_FAST_REPORT_US, (unsigned)DAQ_KG50_MEDIAN,
+      coefficients[17], (unsigned)DAQ_FAST_MEDIAN, (unsigned)DAQ_FAST_REPORT_US, (unsigned)DAQ_KG50_MEDIAN,
       (unsigned)DAQ_KG50_REPORT_US);
   return len > 0 && (size_t)len < size ? len : -1;
 }
@@ -1059,7 +1065,7 @@ static UINT sd_open_log(sd_log_t *log, uint64_t key, const daq_calibration_t *ca
     status = len > 0 ? fx_file_write(&log->file, calibration_line, (ULONG)len) : FX_IO_ERROR;
     if (status == FX_SUCCESS) {
       const int pressure_len = snprintf(calibration_line, sizeof(calibration_line),
-          "# chamber_pressure,p4_adc_channel=%d,model=OMEGA_PX309-1KG5V,raw_units=connector_V,converted_units=psig,divider_ratio=11,zero_V=0,span_V=5,span_psig=1000,noise_floor_millipsi=%u,noise_floor_rule=finite_raw_psig<floor_millipsi/1000:0,noise_floor_zero=disabled,raw_voltage=unchanged,nonfinite=invalid,overflow=preserved\r\n",
+          "# chamber_pressure,p4_adc_channel=%d,model=OMEGA_PX309-1KG5V,raw_units=connector_V,converted_units=psig,divider_ratio=11,zero_V=0,span_V=5,span_psig=1000,noise_floor_millipsi=%u,noise_floor_rule=finite_raw_psig<floor_millipsi/1000:0,noise_floor_zero=disabled,raw_voltage=unchanged,nonfinite=invalid,overflow=preserved,adc_over_range=value_flag_inf\r\n",
           DAQ_CHAMBER_ADC_CHANNEL, (unsigned)DAQ_CHAMBER_NOISE_FLOOR_MILLIPSI);
       status = pressure_len > 0 && (size_t)pressure_len < sizeof(calibration_line)
           ? fx_file_write(&log->file, calibration_line, (ULONG)pressure_len) : FX_IO_ERROR;
@@ -1075,6 +1081,7 @@ static UINT sd_open_log(sd_log_t *log, uint64_t key, const daq_calibration_t *ca
     return status;
   }
   log->open = 1U; log->key = key; log->calibration = *calibration; log->created_ms = created;
+  log->mcp_vref_v = mcp3564r_vref_v();
   return FX_SUCCESS;
 }
 
@@ -1141,13 +1148,14 @@ static UINT sd_log_write(sd_log_t *log, const void *data, size_t len)
 /* A calibration change is recorded in-stream; it never starts a new file. */
 static UINT sd_log_note_calibration(sd_log_t *log, const daq_calibration_t *calibration)
 {
-  if (memcmp(&log->calibration, calibration, sizeof(*calibration)) == 0) return FX_SUCCESS;
+  const float vref = mcp3564r_vref_v();
+  if (memcmp(&log->calibration, calibration, sizeof(*calibration)) == 0 && log->mcp_vref_v == vref) return FX_SUCCESS;
   char line[768];
   const int len = sd_format_calibration_line(line, sizeof(line), calibration);
   if (len <= 0) return FX_IO_ERROR;
   if (len > (int)sizeof(log->buffer)) return FX_IO_ERROR;
   const UINT status = sd_log_write(log, line, (size_t)len);
-  if (status == FX_SUCCESS) log->calibration = *calibration;
+  if (status == FX_SUCCESS) { log->calibration = *calibration; log->mcp_vref_v = vref; }
   return status;
 }
 
@@ -2135,13 +2143,14 @@ void sd_card_writer_thread_entry(ULONG initial_input)
               "mcp3564r_ch4_v", "mcp3564r_ch5_v", "mcp3564r_ch6_v", "mcp3564r_ch7_v"
           }[sample->channel] : sample->channel == 9U ? "kg50_p6_v" :
               sample->channel == SD_RAW_CHANNEL_INPUT_VOLTAGE ? "input_voltage_v" :
-              sample->channel == SD_RAW_CHANNEL_INPUT_CURRENT ? "input_current_a" : "invalid_adc_channel";
+              sample->channel == SD_RAW_CHANNEL_INPUT_CURRENT ? "input_current_a" :
+              sample->channel == SD_RAW_CHANNEL_VDDA ? "vdda_v" : "invalid_adc_channel";
           if (raw_format_cache.owner != log) { raw_format_cache.temperature_valid = 0U; raw_format_cache.owner = log; }
           const int fine = sd_raw_channel_has_us(sample->channel);
           const int len = sd_format_csv_raw_record(line, sizeof(line),
               sample->network_unix_ms, captured_uptime,
               fine ? captured_uptime * 1000U + sample->sample_us : captured_uptime,
-              fine ? 1000000U : BOARD_UPTIME_FREQUENCY_HZ, sensor, sample->raw_adc_code,
+              fine ? 1000000U : BOARD_UPTIME_FREQUENCY_HZ, sensor, fine ? sample->over_range : 0, sample->raw_adc_code,
               sample->raw_value, sample->calibrated_value, sample->adc_temperature_c,
               sample->adc_temperature_code, sample->record_sequence, &raw_format_cache);
           if (len <= 0 || (size_t)len >= sizeof(line)) {
@@ -2292,7 +2301,7 @@ static uint8_t sd_raw_is_essential(const sd_raw_adc_record_t *sample)
 {
   return sample->channel == 0U || sample->channel == 1U || sample->channel == 9U ||
       sample->channel == SD_RAW_CHANNEL_INPUT_VOLTAGE || sample->channel == SD_RAW_CHANNEL_INPUT_CURRENT ||
-      daq_chamber_is_channel(sample->channel);
+      sample->channel == SD_RAW_CHANNEL_VDDA || daq_chamber_is_channel(sample->channel);
 }
 
 static void sd_raw_count_dropped(const sd_raw_adc_record_t *samples, uint16_t count,

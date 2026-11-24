@@ -355,12 +355,18 @@ configuration, and the additional load on acquisition/network/SD.
 ## Live input faults
 
 The DAQ checks its inputs while it acquires and reports `DAQ_INPUT_HEALTH`
-(10 UInt32 words, unreliable, priority 0) once a second, and early (at most
-every 200 ms) when a new fault episode starts. The checks are:
+(28 UInt32 words, version 3, unreliable, priority 0) once a second, and early
+(at most every 200 ms) when a new fault episode starts. The checks are:
 
 - DAQ supply (VMAIN) below 12.5 V, recovering at 13.0 V; every dip is counted.
-- KG1000 at the ADC full scale (2.4 V) or the amplifier low rail (0.0434 V).
-- The selected KG50 input at its rail: +/-2.4 V on AMP2, +/-0.15 V on P6.
+  VMAIN is converted against the measured VDDA (VREFINT), not an assumed 3.3 V.
+- +3V3A (STM32 VDDA, MCP3564R AVDD) above 3.45 V or below 3.15 V. A
+  saturated analog front end can lift it through its clamp diode.
+- MCP3564R over range, per channel: any conversion with |code| > 2^23 - 1
+  (beyond +/-VREF/GAIN). It is reported now/latched/counted, kept on SD with
+  a flag and never published as a value (+/-INFINITY instead, shown as OVR).
+- KG1000 at the ADC full scale (VREF) or the amplifier low rail (0.0434 V).
+- The selected KG50 input at its rail: +/-VREF on AMP2, +/-VREF/16 on P6.
 - P6 only: the two sense legs (CH2 = P6/3 S+, CH3) more than 50 mV apart,
   or their mean outside 0.6-1.8 V (bridge excitation or both leads lost).
 - Chamber transducer below 0.05 V (or half its live zero) for 2 s. The
@@ -434,7 +440,7 @@ conversions/s). Acquisition drains up to 11 records every 2 ms into copied SD
 batches. A full FIFO increments ADC overruns;
 SD admission and storage errors have separate counters. A frame whose SPI is still
 busy at the next tick is skipped and counted (`g_mcp3564r_diag`, also in
-DAQ_INPUT_HEALTH v2). The host frame-engine simulator (tests/acq_engine_sim.c)
+DAQ_INPUT_HEALTH v3). The host frame-engine simulator (tests/acq_engine_sim.c)
 runs the production driver against a modelled ADC, SPI DMA and TIM2; it proves
 the schedule and fault handling as coded, not the hardware conversion times.
 

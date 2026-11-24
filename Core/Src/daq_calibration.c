@@ -19,6 +19,7 @@ extern volatile uint32_t g_telemetry_discovery_seen;
 
 #define DAQ_CALIBRATION_PERSIST_KEY 0x44414341u
 #define DAQ_KG50_INPUT_PERSIST_KEY 0x4441494Eu
+#define DAQ_MCP_VREF_PERSIST_KEY 0x44415652u /* "DAVR": MCP3564R reference, float volts */
 #define DAQ_CALIBRATION_RETRY_MS 500U
 /* Trails a calibration stored in ADC-pin volts. Records without it (4, 11,
  * 15 or 17 floats) predate volts and use the legacy raw scale. */
@@ -32,6 +33,10 @@ typedef struct
 
 static daq_calibration_t g_calibration = {1.0f, 0.0f, 1.0f, 0.0f, {0.0f, 1.0f}, {0}, {0}};
 static bool g_restore_attempted;
+static bool g_vref_restored;
+static bool g_vref_network_value_seen;
+/* The reference in flash (nominal when none): written only when it differs. */
+static float g_vref_stored = MCP3564R_NOMINAL_VREF_V;
 static bool g_persist_ready;
 #ifdef TELEMETRY_ENABLED
 static uint8_t g_kg50_input_stored;
@@ -96,11 +101,28 @@ static void kg50_input_restore(void)
 #endif
 }
 
+static bool vref_valid(float volts)
+{
+  return isfinite(volts) && volts >= MCP3564R_VREF_MIN_V && volts <= MCP3564R_VREF_MAX_V;
+}
+
+float daq_calibration_mcp_vref(uint32_t *source)
+{
+  if (source != NULL)
+    *source = (g_vref_network_value_seen ? DAQ_MCP_VREF_FROM_STATION : 0U) |
+              (g_vref_restored ? DAQ_MCP_VREF_RESTORED : 0U);
+  return mcp3564r_vref_v();
+}
+
 void daq_calibration_from_legacy_raw(daq_calibration_t *calibration)
 {
-  /* kg = f(raw) and raw = volts / k, so every coefficient of the input
-   * moves by k while kg for the same ADC code stays the same. */
-  const double k = MCP3564R_LEGACY_RAW_TO_VOLTS;
+  daq_calibration_scale_input(calibration, MCP3564R_LEGACY_RAW_TO_VOLTS);
+}
+
+void daq_calibration_scale_input(daq_calibration_t *calibration, double k)
+{
+  /* kg = f(old) and new = old * k, so every coefficient of the input moves
+   * by k while kg for the same ADC code stays the same. */
   calibration->kg1000_slope = (float)((double)calibration->kg1000_slope / k);
   double scale = 1.0;
   for (unsigned i = 1U; i <= 4U; ++i)
@@ -131,6 +153,16 @@ void daq_calibration_restore(void)
   }
   g_persist_ready = true;
   kg50_input_restore();
+  float vref = 0.0f;
+  size_t vref_size = sizeof(vref);
+  const launchcore_persist_status_t vref_status = persistent_store_get(DAQ_MCP_VREF_PERSIST_KEY, &vref, &vref_size);
+  if (vref_status == LAUNCHCORE_PERSIST_OK && vref_size == sizeof(vref) && vref_valid(vref))
+  {
+    g_mcp3564r_vref_v = vref;
+    g_vref_stored = vref;
+    g_vref_restored = true;
+  }
+  else if (vref_status != LAUNCHCORE_PERSIST_NOT_FOUND) g_daq_calibration_errors++;
   daq_calibration_record_t record = {g_calibration, 0U};
   size_t size = sizeof(record);
   const launchcore_persist_status_t status = persistent_store_get(
@@ -178,11 +210,15 @@ static void persist_calibration(void)
 {
   if (!g_persist_ready) g_persist_ready = persistent_store_init() == LAUNCHCORE_PERSIST_OK;
   const daq_calibration_t current = daq_calibration_current();
-  if (!g_persist_ready || !persist_record(&current))
+  const float vref = mcp3564r_vref_v();
+  if (!g_persist_ready || !persist_record(&current) ||
+      (vref != g_vref_stored &&
+       persistent_store_set(DAQ_MCP_VREF_PERSIST_KEY, &vref, sizeof(vref)) != LAUNCHCORE_PERSIST_OK))
   {
     g_daq_calibration_errors++;
     return;
   }
+  g_vref_stored = vref;
   g_calibration_persist_pending = 0U;
   g_daq_calibration_persist_writes++;
 }
@@ -220,6 +256,37 @@ static SedsResult apply_calibration(const SedsPacketView *packet, void *user)
     g_calibration_persist_pending = 1U;
     persist_calibration();
   }
+  return SEDS_OK;
+}
+
+/* DAQ_MCP_REFERENCE: the MCP3564R reference in volts. Every MCP3564R volt
+ * scales with it, so the on-board calibration (kg per volt) is converted in
+ * the same step and kg for a given code does not move; the station converts
+ * its own calibrations by the same rule and re-sends them. */
+static SedsResult apply_mcp_reference(const SedsPacketView *packet, void *user)
+{
+  float vref;
+  if (packet == NULL || packet->payload == NULL || packet->payload_len != sizeof(vref))
+    return refuse_calibration(packet, user);
+  memcpy(&vref, packet->payload, sizeof(vref));
+  if (!vref_valid(vref)) return refuse_calibration(packet, user);
+  const float old = mcp3564r_vref_v();
+  if (vref != old)
+  {
+    daq_calibration_t next = daq_calibration_current();
+    daq_calibration_scale_input(&next, (double)vref / (double)old);
+    const bool keep = calibration_valid(&next);
+    const uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    if (keep) g_calibration = next;
+    g_mcp3564r_vref_v = vref;
+    if (primask == 0U) __enable_irq();
+    if (!keep) g_daq_calibration_errors++;
+    sd_card_set_calibration(&g_calibration);
+    g_calibration_persist_pending = 1U;
+    persist_calibration();
+  }
+  g_vref_network_value_seen = true;
   return SEDS_OK;
 }
 
@@ -268,6 +335,8 @@ static SedsResult apply_kg50_input(const SedsPacketView *packet, void *user)
 #define DAQ_CONFIG_NOT_DURABLE 0x40U
 #define DAQ_CONFIG_INPUT_RESTORED 0x80U
 #define DAQ_CONFIG_INPUT_SHIFT 8U
+#define DAQ_CONFIG_VREF_FROM_STATION 0x200U
+#define DAQ_CONFIG_VREF_RESTORED 0x400U
 
 /* IEEE CRC-32 (launchcore_crc32), bitwise: the identity is computed once per
  * 5 s health report over 68 bytes. */
@@ -295,6 +364,8 @@ uint32_t daq_calibration_identity(uint32_t *flags)
   crc = identity_crc(crc, c.kg50, sizeof c.kg50);
   crc = identity_crc(crc, c.thermal, sizeof c.thermal);
   crc = identity_crc(crc, c.filter_tau_ms, sizeof c.filter_tau_ms);
+  const float vref = mcp3564r_vref_v();
+  crc = identity_crc(crc, &vref, sizeof vref);
   if (flags != NULL)
   {
     *flags = (g_network_value_seen ? DAQ_CONFIG_FROM_STATION_LOADCELL : 0U) |
@@ -305,7 +376,9 @@ uint32_t daq_calibration_identity(uint32_t *flags)
              (g_daq_calibration_restores != 0U ? DAQ_CONFIG_RESTORED : 0U) |
              (g_calibration_persist_pending != 0U ? DAQ_CONFIG_NOT_DURABLE : 0U) |
              (g_kg50_input_restored ? DAQ_CONFIG_INPUT_RESTORED : 0U) |
-             ((uint32_t)(g_kg50_input_applied & 1U) << DAQ_CONFIG_INPUT_SHIFT);
+             ((uint32_t)(g_kg50_input_applied & 1U) << DAQ_CONFIG_INPUT_SHIFT) |
+             (g_vref_network_value_seen ? DAQ_CONFIG_VREF_FROM_STATION : 0U) |
+             (g_vref_restored ? DAQ_CONFIG_VREF_RESTORED : 0U);
   }
   return crc;
 }
@@ -338,6 +411,10 @@ SedsResult daq_calibration_init(SedsRouter *router)
   result = seds_router_enable_network_variable(router, SEDS_DT_DAQ_KG50_INPUT, true, false);
   if (result != SEDS_OK) return result;
   result = seds_router_on_network_variable_update(router, SEDS_DT_DAQ_KG50_INPUT, apply_kg50_input, router);
+  if (result != SEDS_OK) return result;
+  result = seds_router_enable_network_variable(router, SEDS_DT_DAQ_MCP_REFERENCE, true, false);
+  if (result != SEDS_OK) return result;
+  result = seds_router_on_network_variable_update(router, SEDS_DT_DAQ_MCP_REFERENCE, apply_mcp_reference, router);
   g_last_refresh_ms = HAL_GetTick();
   return result;
 }
@@ -346,7 +423,7 @@ SedsResult daq_calibration_poll(SedsRouter *router)
 {
   if (router == NULL) return SEDS_BAD_ARG;
   const bool all_seen = g_network_value_seen && g_kg50_network_value_seen && g_thermal_network_value_seen &&
-                        g_filter_network_value_seen && g_input_network_value_seen;
+                        g_filter_network_value_seen && g_input_network_value_seen && g_vref_network_value_seen;
   if ((all_seen && !g_calibration_persist_pending) || g_telemetry_discovery_seen == 0U) return SEDS_OK;
   const uint32_t now = HAL_GetTick();
   if ((uint32_t)(now - g_last_refresh_ms) < DAQ_CALIBRATION_RETRY_MS) return SEDS_OK;
@@ -368,6 +445,8 @@ SedsResult daq_calibration_poll(SedsRouter *router)
     result = seds_router_request_managed_variable(router, SEDS_DT_DAQ_FILTER_CALIBRATION);
   if (result == SEDS_OK && !g_input_network_value_seen)
     result = seds_router_request_managed_variable(router, SEDS_DT_DAQ_KG50_INPUT);
+  if (result == SEDS_OK && !g_vref_network_value_seen)
+    result = seds_router_request_managed_variable(router, SEDS_DT_DAQ_MCP_REFERENCE);
   return result;
 }
 

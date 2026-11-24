@@ -9,6 +9,7 @@ counts, sizes and waits, not a cycle-accurate or physical-card qualification.
 """
 import hashlib
 import os
+import re
 import pathlib
 import subprocess
 import tempfile
@@ -50,6 +51,11 @@ def legacy_bytes(data):
     # The SEDS-SD format block (sd_format.h) after the column header is new;
     # tests/test_sd_format_block.py and the harness check its exact bytes.
     data = b'\n'.join(line for line in data.split(b'\n') if not line.startswith(b'# seds-sd'))
+    # Format v4 metadata: the MCP3564R reference in the calibration line and
+    # the over-range convention in the chamber line (the harness offers only
+    # in-range codes, so no row carries an over-range flag).
+    data = re.sub(rb',mcp_vref_v=[^,]*,', b',', data)
+    data = data.replace(b',adc_over_range=value_flag_inf\r\n', b'\r\n')
     for new, old in LEGACY_NAMES:
         data = data.replace(new, old)
     # MCP3564R rows now carry microsecond uptime_ticks with

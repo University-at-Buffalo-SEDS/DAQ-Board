@@ -19,6 +19,7 @@
 #include "daq_input_faults.h"
 #include "daq_median.h"
 #include "daq_channel_stats.h"
+#include "daq_over_range.h"
 #include <string.h>
 #include <math.h>
 TX_THREAD daq_thread;
@@ -122,13 +123,38 @@ static void daq_report_bin(daq_bin_us_t *bin, daq_median_t *median, float value,
     *output = (daq_bin_output_t){out.mean, out.centre_us / 1000U, 1U};
 }
 
+/* An over-range conversion: never enters the median or the mean; it only
+ * dates its bin, which reports +/-INFINITY if nothing in it was in range. */
+static void daq_report_over(daq_bin_us_t *bin, int8_t direction, uint64_t sample_us, uint32_t period_us,
+                            daq_bin_output_t *output)
+{
+  daq_bin_out_t out;
+  if (daq_bin_us_add_over(bin, direction, sample_us, period_us, &out) && output != NULL)
+    *output = (daq_bin_output_t){out.mean, out.centre_us / 1000U, 1U};
+}
+
+/* One window's value of `channel` for the fault checks: the over-range
+ * marker when most of its conversions were over range, else the mean of the
+ * in-range ones (ADC-pin volts, or `voltage_sum` volts); NaN without any. */
+static float daq_window_value(const daq_loadcell_window_t *window, const daq_ovr_window_t *ovr,
+                              unsigned channel, int use_voltage)
+{
+  const int bit = daq_ovr_bit(channel);
+  const uint16_t over = bit >= 0 ? ovr->count[bit] : 0U;
+  if (over != 0U && over >= window->count[channel]) return ovr->dir[bit] < 0 ? -INFINITY : INFINITY;
+  if (window->count[channel] == 0U) return NAN;
+  return (use_voltage ? window->voltage_sum[channel] : window->sum[channel]) / window->count[channel];
+}
+
+#define DAQ_VDDA_LOG_STEP_V 0.005f
+#define DAQ_VDDA_LOG_PERIOD_MS 100U
 static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
                                   sd_raw_adc_record_t *records,
                                   uint16_t capacity,
                                   const daq_calibration_t *calibration,
                                   daq_loadcell_window_t *window,
                                   uint8_t kg50_channel, daq_loadcell_bins_t *bins,
-                                  const daq_supply_sample_t *supply)
+                                  const daq_supply_sample_t *supply, daq_ovr_window_t *ovr)
 {
   mcp3564r_sample_t sample = {
     .sample_valid = snapshot->ext_adc_sample_valid,
@@ -175,31 +201,44 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
     kg50_bins_channel = kg50_channel;
   }
   *window = (daq_loadcell_window_t){0};
+  daq_ovr_window_reset(ovr);
   if (bins != NULL) *bins = (daq_loadcell_bins_t){0};
 
-  /* A supply reading takes the last two records of this batch. */
-  const uint16_t adc_capacity = supply != NULL && capacity >= 2U ? (uint16_t)(capacity - 2U) : capacity;
+  /* A supply reading takes the last three records of this batch. */
+  const uint16_t adc_capacity = supply != NULL && capacity >= 3U ? (uint16_t)(capacity - 3U) : capacity;
   for (;;)
   {
     if (sample.sample_valid != 0U && (sample.channel < 8U || sample.channel == 9U) && count < adc_capacity)
     {
       const uint8_t channel = sample.channel;
       const float raw = sample.raw_value;
-      const float corrected = channel < 2U ? daq_filter_add(&filters[channel],
+      /* Over range (daq_over_range.h): SD keeps the code with its flag; the
+       * value never reaches a filter, median, mean or statistic, and a
+       * report made only of such conversions is the +/-INFINITY marker. */
+      const int8_t over = daq_adc_over_range(sample.code);
+      const float marker = over < 0 ? -INFINITY : INFINITY;
+      const int ovr_bit = daq_ovr_bit(channel);
+      if (ovr_bit >= 0) daq_ovr_window_note(ovr, (unsigned)ovr_bit, over);
+      const float corrected = over != 0 ? marker : channel < 2U ? daq_filter_add(&filters[channel],
           daq_calibration_temperature_raw(calibration, channel, raw, sample.temperature_c),
           (uint32_t)sample.monotonic_ms, calibration->filter_tau_ms[channel]) : mcp3564r_connector_voltage(channel, sample.voltage_v);
       const uint64_t captured_uptime = board_uptime_project(mono_now, (uint32_t)sample.monotonic_ms);
       const uint64_t captured_us = captured_uptime * 1000U + sample.sample_us % 1000U;
       daq_bin_output_t *none = NULL;
-      if (channel == 0U)
-        daq_report_bin(&kg1000_bin, &kg1000_median, raw, captured_us, DAQ_FAST_REPORT_US, bins ? &bins->kg1000 : none);
-      else if (channel == kg50_channel)
-        daq_report_bin(&kg50_bin, &kg50_median, raw, captured_us, DAQ_KG50_REPORT_US, bins ? &bins->kg50 : none);
+      if (channel == 0U) {
+        if (over != 0) daq_report_over(&kg1000_bin, over, captured_us, DAQ_FAST_REPORT_US, bins ? &bins->kg1000 : none);
+        else daq_report_bin(&kg1000_bin, &kg1000_median, raw, captured_us, DAQ_FAST_REPORT_US, bins ? &bins->kg1000 : none);
+      }
+      else if (channel == kg50_channel) {
+        if (over != 0) daq_report_over(&kg50_bin, over, captured_us, DAQ_KG50_REPORT_US, bins ? &bins->kg50 : none);
+        else daq_report_bin(&kg50_bin, &kg50_median, raw, captured_us, DAQ_KG50_REPORT_US, bins ? &bins->kg50 : none);
+      }
       else if (daq_chamber_is_channel(channel))
       {
         /* The chamber's 20 ms bin also feeds its DAQ_SDADC_VOLTAGES entry. */
         daq_bin_output_t chamber_out = {0};
-        daq_report_bin(&chamber_bin, &chamber_median, corrected, captured_us, DAQ_FAST_REPORT_US, &chamber_out);
+        if (over != 0) daq_report_over(&chamber_bin, over, captured_us, DAQ_FAST_REPORT_US, &chamber_out);
+        else daq_report_bin(&chamber_bin, &chamber_median, corrected, captured_us, DAQ_FAST_REPORT_US, &chamber_out);
         if (chamber_out.ready)
         {
           if (bins != NULL) bins->chamber_v = chamber_out;
@@ -207,10 +246,12 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
         }
       }
       else if (channel < 8U)
-        daq_store_aux(channel, daq_median_add(&aux_median[channel], corrected), (uint32_t)sample.monotonic_ms);
+        daq_store_aux(channel, over != 0 ? marker : daq_median_add(&aux_median[channel], corrected),
+                      (uint32_t)sample.monotonic_ms);
       const int stats = daq_stats_index(channel, kg50_channel);
-      if (stats >= 0) daq_channel_stats_add(&g_daq_stats[stats], channel == 9U || channel < 2U ? raw : corrected,
-                                            (uint32_t)sample.monotonic_ms);
+      if (stats >= 0 && over == 0)
+        daq_channel_stats_add(&g_daq_stats[stats], channel == 9U || channel < 2U ? raw : corrected,
+                              (uint32_t)sample.monotonic_ms);
       if (records != NULL)
       {
         records[count].channel = channel;
@@ -219,18 +260,25 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
         records[count].record_sequence = ++raw_sequence;
         records[count].network_unix_ms = daq_sample_network_ms(unix_now, mono_now, captured_uptime);
         records[count].raw_adc_code = sample.code;
-        records[count].raw_value = daq_chamber_is_channel(channel) ? corrected : raw;
+        records[count].over_range = over;
+        /* Over range: raw_value stays the linear conversion of the code, so
+         * nothing is lost; calibrated_value is the +/-inf marker. */
+        records[count].raw_value = daq_chamber_is_channel(channel) && over == 0 ? corrected
+            : daq_chamber_is_channel(channel) ? mcp3564r_connector_voltage(channel, sample.voltage_v) : raw;
         records[count].adc_temperature_c = sample.temperature_c;
         records[count].adc_temperature_code = sample.temperature_code;
-        records[count].calibrated_value = daq_chamber_is_channel(channel) ? daq_chamber_pressure_psi(corrected) : channel > 1U ? corrected : channel == 1U
+        records[count].calibrated_value = over != 0 ? marker : daq_chamber_is_channel(channel) ? daq_chamber_pressure_psi(corrected) : channel > 1U ? corrected : channel == 1U
             ? daq_calibration_apply_kg50(calibration, corrected)
             : calibration->kg1000_slope * corrected + calibration->kg1000_intercept;
       }
       if (sample.code != 0) g_daq_nonzero_raw_sample_count++;
-      window->code_sum[channel] += sample.code;
-      window->sum[channel] += raw;
-      window->voltage_sum[channel] += sample.voltage_v;
-      window->count[channel]++;
+      if (over == 0)
+      {
+        window->code_sum[channel] += sample.code;
+        window->sum[channel] += raw;
+        window->voltage_sum[channel] += sample.voltage_v;
+        window->count[channel]++;
+      }
       count++;
     }
     if (count >= adc_capacity || mcp3564r_pending_samples() == 0U ||
@@ -239,15 +287,24 @@ static uint16_t daq_drain_ext_adc(daq_snapshot_t *snapshot,
   if (supply != NULL && records != NULL && adc_capacity != capacity)
   {
     const uint64_t captured_uptime = board_uptime_project(mono_now, supply->monotonic_ms);
-    for (unsigned i = 0U; i < 2U; ++i)
+    /* VDDA joins a supply reading when it moved by 5 mV or more, or 100 ms
+     * after the last one: a quiet rail costs no launch-window SD bandwidth. */
+    static float vdda_written = NAN;
+    static uint32_t vdda_written_ms;
+    const uint8_t vdda_due = isnan(vdda_written) != isnan(supply->vdda_v) ||
+        fabsf(supply->vdda_v - vdda_written) >= DAQ_VDDA_LOG_STEP_V ||
+        (uint32_t)(supply->monotonic_ms - vdda_written_ms) >= DAQ_VDDA_LOG_PERIOD_MS;
+    if (vdda_due) { vdda_written = supply->vdda_v; vdda_written_ms = supply->monotonic_ms; }
+    for (unsigned i = 0U; i < (vdda_due ? 3U : 2U); ++i)
     {
       records[count] = (sd_raw_adc_record_t){
         .network_unix_ms = daq_sample_network_ms(unix_now, mono_now, captured_uptime),
         .monotonic_ms = supply->monotonic_ms, .record_sequence = ++raw_sequence,
-        .raw_adc_code = supply->code[i], .raw_value = supply->pin_v[i],
-        .calibrated_value = i == 0U ? supply->input_voltage_v : supply->input_current_a,
+        .raw_adc_code = i < 2U ? supply->code[i] : supply->vrefint_code,
+        .raw_value = i < 2U ? supply->pin_v[i] : supply->vdda_v,
+        .calibrated_value = i == 0U ? supply->input_voltage_v : i == 1U ? supply->input_current_a : supply->vdda_v,
         .adc_temperature_c = NAN, .adc_temperature_code = 0,
-        .channel = i == 0U ? SD_RAW_CHANNEL_INPUT_VOLTAGE : SD_RAW_CHANNEL_INPUT_CURRENT};
+        .channel = i == 0U ? SD_RAW_CHANNEL_INPUT_VOLTAGE : i == 1U ? SD_RAW_CHANNEL_INPUT_CURRENT : SD_RAW_CHANNEL_VDDA};
       ++count;
     }
   }
@@ -445,7 +502,7 @@ static void daq_offer_live_report(const daq_report_t *report)
 {
 #ifdef TELEMETRY_ENABLED
   if (report->flags & DAQ_REPORT_KG1000) {
-    if (report->chamber_valid && isfinite(report->chamber[0]) && isfinite(report->chamber[1])) {
+    if (report->chamber_valid && !isnan(report->chamber[0]) && !isnan(report->chamber[1])) {
       const float combined[] = {report->kg1000, report->chamber[0], report->chamber[1]};
       daq_network_offer(DAQ_NETWORK_KG1000, SEDS_DT_DAQ_LOADCELL_CHAMBER,
                         combined, 3U, report->kg1000_ms);
@@ -491,7 +548,7 @@ static uint32_t g_daq_input_health_sent_ms;
  * by its own HAL tick; NULL falls back to the snapshot's 100 ms reading. */
 static void daq_observe_input_faults(const daq_snapshot_t *snapshot,
                                      const daq_loadcell_window_t *window, uint8_t kg50_input,
-                                     const daq_supply_sample_t *supply)
+                                     const daq_supply_sample_t *supply, daq_ovr_window_t *ovr)
 {
   const uint32_t now = (uint32_t)snapshot->monotonic_ms;
   const unsigned kg50 = kg50_input == 1U ? 9U : 1U;
@@ -502,21 +559,36 @@ static void daq_observe_input_faults(const daq_snapshot_t *snapshot,
    * lock (it takes its own). */
   uint32_t since_t0 = DAQ_CHAMBER_NO_LAUNCH;
 #if (DISABLE_SD_CARD == 0U)
-  if (window->count[DAQ_CHAMBER_ADC_CHANNEL] != 0U && !DAQ_FAULT_CHAMBER_ALWAYS_ON)
+  const float chamber_v = daq_window_value(window, ovr, DAQ_CHAMBER_ADC_CHANNEL, 1);
+  if (!isnan(chamber_v) && !DAQ_FAULT_CHAMBER_ALWAYS_ON)
     since_t0 = sd_card_launch_since_t0_ms();
 #endif
 #endif
+  /* Die temperature: the TEMP conversions are consumed by the driver. */
+  static uint32_t temperature_over_seen;
+  const uint32_t temperature_over = g_mcp3564r_diag.temperature_over_range;
+  const uint32_t temperature_new = temperature_over - temperature_over_seen;
+  temperature_over_seen = temperature_over;
+  ovr->count[DAQ_OVR_BIT_TEMPERATURE] = temperature_new > UINT16_MAX ? UINT16_MAX : (uint16_t)temperature_new;
+  ovr->last[DAQ_OVR_BIT_TEMPERATURE] = g_mcp3564r_diag.temperature_over_range_last;
+  const float kg1000_v = daq_window_value(window, ovr, 0U, 0);
+  const float kg50_v = daq_window_value(window, ovr, kg50, 0);
   const uint32_t saved = __get_PRIMASK();
   __disable_irq();
   if (!g_daq_input_faults_ready) {
     daq_input_faults_reset(faults);
     g_daq_input_faults_ready = 1U;
   }
-  if (supply != NULL) daq_input_faults_supply(faults, supply->input_voltage_v, supply->monotonic_ms);
+  if (supply != NULL) {
+    daq_input_faults_supply(faults, supply->input_voltage_v, supply->monotonic_ms);
+    daq_input_faults_vdda(faults, supply->vdda_v, supply->monotonic_ms);
+  }
   else if (snapshot->analog_sample_fresh) daq_input_faults_supply(faults, snapshot->input_voltage_v, now);
-  if (window->count[0] != 0U) daq_input_faults_kg1000(faults, window->sum[0] / window->count[0], now);
+  daq_input_faults_over_range(faults, ovr);
+  /* Over range reaches the rail checks as +/-INFINITY: at or past the rail. */
+  if (!isnan(kg1000_v)) daq_input_faults_kg1000(faults, kg1000_v, now);
   daq_input_faults_kg50_input(faults, kg50_input);
-  if (window->count[kg50] != 0U) daq_input_faults_kg50(faults, window->sum[kg50] / window->count[kg50], now);
+  if (!isnan(kg50_v)) daq_input_faults_kg50(faults, kg50_v, now);
   /* P6 legs: CH3 is converted 10 ms after CH2 in the auxiliary rotation
    * (daq_acq_aux_items), one pair every 50 ms. */
   static float p6_plus_v;
@@ -536,9 +608,10 @@ static void daq_observe_input_faults(const daq_snapshot_t *snapshot,
         window->voltage_sum[DAQ_EXCITATION_ADC_CHANNEL] / window->count[DAQ_EXCITATION_ADC_CHANNEL]));
 #endif
 #if DAQ_CHAMBER_SCAN_MASK != 0U
-  if (window->count[DAQ_CHAMBER_ADC_CHANNEL] != 0U)
-    daq_input_faults_chamber(faults, mcp3564r_connector_voltage(DAQ_CHAMBER_ADC_CHANNEL,
-        window->voltage_sum[DAQ_CHAMBER_ADC_CHANNEL] / window->count[DAQ_CHAMBER_ADC_CHANNEL]), now,
+  if (isinf(chamber_v))
+    daq_input_faults_chamber_over_range(faults, now, since_t0);
+  else if (!isnan(chamber_v))
+    daq_input_faults_chamber(faults, mcp3564r_connector_voltage(DAQ_CHAMBER_ADC_CHANNEL, chamber_v), now,
         since_t0);
 #endif
   __set_PRIMASK(saved);
@@ -561,6 +634,9 @@ int daq_input_health_take(uint32_t now_ms, uint32_t words[DAQ_INPUT_HEALTH_WORDS
         g_mcp3564r_diag.recoveries + g_mcp3564r_diag.status_faults);
     words[DAQ_INPUT_HEALTH_FRAME_WORD + 2U] = daq_input_health_pair(g_mcp3564r_diag.fast_done_max_us,
         g_mcp3564r_diag.slot_done_max_us);
+    uint32_t vref_source = 0U;
+    const float vref = daq_calibration_mcp_vref(&vref_source);
+    words[DAQ_INPUT_HEALTH_VREF_WORD] = daq_input_faults_mv(vref) | (vref_source << 16U);
     g_daq_input_health_sent_ms = now_ms;
   }
   __set_PRIMASK(saved);
@@ -573,10 +649,13 @@ static void daq_offer_kg1000(daq_report_t *report, daq_bin_output_t *kg1000, con
 {
   daq_report_t one = {.monotonic_ms = report->monotonic_ms, .kg1000 = kg1000->value,
                       .kg1000_ms = kg1000->captured_ms, .flags = DAQ_REPORT_KG1000};
-  if (chamber != NULL && isfinite(chamber->value)) {
+  /* An over-range chamber bin travels as +/-INFINITY in both fields. */
+  if (chamber != NULL && !isnan(chamber->value)) {
     one.chamber[1] = chamber->value;
     one.chamber[0] = daq_chamber_pressure_psi(chamber->value);
-    one.chamber_valid = isfinite(one.chamber[0]);
+    /* Valid: a finite pressure, or the marker; a finite voltage whose
+     * pressure overflows is not. */
+    one.chamber_valid = isinf(chamber->value) || isfinite(one.chamber[0]);
   }
   daq_offer_live_report(&one);
   kg1000->ready = 0U;
@@ -663,6 +742,7 @@ void daq_thread_entry(ULONG initial_input)
     calibration = daq_calibration_current();
 #endif
     daq_loadcell_window_t window;
+    daq_ovr_window_t ovr;
     daq_loadcell_bins_t bins;
     daq_report_t report = {.monotonic_ms = snapshot.monotonic_ms,
                            .kg50_input = mcp3564r_kg50_input()};
@@ -672,10 +752,10 @@ void daq_thread_entry(ULONG initial_input)
     const uint16_t raw_count = daq_drain_ext_adc(&snapshot,
                                                  raw_records,
                                                  DAQ_RAW_BATCH_MAX, &calibration, &window,
-                                                 kg50_channel, &bins, supply_fresh ? &supply : NULL);
+                                                 kg50_channel, &bins, supply_fresh ? &supply : NULL, &ovr);
 #else
     (void)daq_drain_ext_adc(&snapshot, NULL, DAQ_RAW_BATCH_MAX, &calibration, &window,
-                            kg50_channel, &bins, NULL);
+                            kg50_channel, &bins, NULL, &ovr);
 #endif
 
     stage_started = daq_profile_stage(1U, stage_started);
@@ -710,9 +790,9 @@ void daq_thread_entry(ULONG initial_input)
       else ++kg1000_wait;
     }
 #if (DISABLE_SD_CARD == 0U)
-    daq_observe_input_faults(&snapshot, &window, report.kg50_input, supply_fresh ? &supply : NULL);
+    daq_observe_input_faults(&snapshot, &window, report.kg50_input, supply_fresh ? &supply : NULL, &ovr);
 #else
-    daq_observe_input_faults(&snapshot, &window, report.kg50_input, NULL);
+    daq_observe_input_faults(&snapshot, &window, report.kg50_input, NULL, &ovr);
 #endif
     if (bins.kg50.ready)
     {

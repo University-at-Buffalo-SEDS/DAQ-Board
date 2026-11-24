@@ -30,6 +30,14 @@ typedef struct { float kg1000_slope, kg1000_intercept, iadc_slope, iadc_intercep
 #define SEDS_DT_DAQ_THERMAL_CALIBRATION 141
 #define SEDS_DT_DAQ_FILTER_CALIBRATION 142
 #define SEDS_DT_DAQ_KG50_INPUT 147
+#define SEDS_DT_DAQ_MCP_REFERENCE 148
+#define MCP3564R_NOMINAL_VREF_V 2.4f
+#define MCP3564R_VREF_MIN_V 1.9f
+#define MCP3564R_VREF_MAX_V 2.6f
+#define DAQ_MCP_VREF_FROM_STATION 0x1U
+#define DAQ_MCP_VREF_RESTORED 0x2U
+static volatile float g_mcp3564r_vref_v = 2.4f;
+static float mcp3564r_vref_v(void) { return g_mcp3564r_vref_v; }
 static unsigned requested_input;
 static void mcp3564r_request_kg50_input(uint8_t input) { requested_input=input; }
 #define SEDS_OK 0
@@ -38,7 +46,7 @@ static void mcp3564r_request_kg50_input(uint8_t input) { requested_input=input; 
 #define LAUNCHCORE_PERSIST_OK 0
 #define LAUNCHCORE_PERSIST_NOT_FOUND 1
 volatile uint32_t g_telemetry_discovery_seen=1, g_reliable_refusal_count;
-static unsigned ticks, fail_persist, requests[11], rotations, invalidations;
+static unsigned ticks, fail_persist, requests[12], rotations, invalidations;
 static int seds_router_invalidate_network_variable_cache(SedsRouter *r,unsigned ty,bool *out){(void)r;(void)ty;assert(!out);++invalidations;return 0;}
 static unsigned char persisted[sizeof(daq_calibration_t) + 4];
 static size_t persisted_len;
@@ -50,6 +58,7 @@ static uint32_t HAL_GetTick(void) { return ticks; }
 static unsigned persistent_store_init(void) { return 0; }
 static unsigned char persisted_input; static size_t persisted_input_len; static unsigned input_writes;
 static unsigned persistent_store_get(unsigned key, void *value, size_t *size) {
+  if (key==0x44415652u) return LAUNCHCORE_PERSIST_NOT_FOUND;
   if (key==0x4441494Eu) {
     if (!persisted_input_len) return LAUNCHCORE_PERSIST_NOT_FOUND;
     memcpy(value,&persisted_input,1); *size=persisted_input_len; return 0;
@@ -66,16 +75,18 @@ static unsigned persistent_store_set(unsigned key, const void *value, size_t siz
 }
 static void sd_card_set_calibration(const daq_calibration_t *c) { sd_calibration=*c; rotations++; }
 static unsigned seds_router_enable_network_variable(SedsRouter *r,unsigned ty,bool read,bool write) {
-  assert(r && ty>=137 && ty<=147 && read && !write); return 0;
+  assert(r && ty>=137 && ty<=148 && read && !write); return 0;
 }
 static unsigned seds_router_on_network_variable_update(SedsRouter *r,unsigned ty,
     SedsResult (*cb)(const SedsPacketView *, void *),void *user) {
-  assert(r && user==r && ty>=137 && ty<=147 && cb); return 0;
+  assert(r && user==r && ty>=137 && ty<=148 && cb); return 0;
 }
 static unsigned seds_router_request_managed_variable(SedsRouter *r,unsigned ty) {
-  assert(r && ty>=137 && ty<=147); requests[ty-137]++; return 0;
+  assert(r && ty>=137 && ty<=148); requests[ty-137]++; return 0;
 }
 static daq_calibration_t daq_calibration_current(void);
+void daq_calibration_scale_input(daq_calibration_t *calibration, double k);
+float daq_calibration_mcp_vref(uint32_t *source);
 ''' + source + r'''
 int main(void) {
   float legacy[4]={2,3,4,5};
@@ -91,7 +102,7 @@ int main(void) {
   /* The identity default was raw-identity; it stays kg-identical in volts. */
   assert(fabsf(daq_calibration_apply_kg50(&g_calibration,5*k)-5)<1e-5f);
   ticks=500; assert(daq_calibration_poll(&router)==0);
-  assert(requests[10]==1);
+  assert(requests[10]==1 && requests[11]==1); /* the reference is requested like the input */
   uint8_t input=1;
   SedsPacketView source_packet={147,&input,1};
   assert(apply_kg50_input(&source_packet,NULL)==SEDS_OK && requested_input==1);

@@ -16,19 +16,20 @@ class RawRecordFormatTests(unittest.TestCase):
 #include <limits.h>
 #include <stdio.h>
 #include <time.h>
+#include <math.h>
 static unsigned conversions;
 static void counted_float(char output[24], float value) {++conversions;sd_format_float(output,value);}
 #define sd_format_float counted_float
 #include "sd_raw_record_format.h"
 #undef sd_format_float
-static int original(char *line,size_t cap,uint64_t utc,uint64_t uptime,uint64_t fine,uint32_t hz,const char *sensor,
+static int original(char *line,size_t cap,uint64_t utc,uint64_t uptime,uint64_t fine,uint32_t hz,const char *sensor,int over,
     int32_t code,float raw,float cal,float temp,int32_t tempcode,uint64_t sequence,int with_temp) {
  char raw_text[24],cal_text[24],temp_text[24],stamp[21],ticks[21],fine_text[21],seq[21],code_text[16];
  sd_format_float(raw_text,raw);sd_format_float(cal_text,cal);sd_format_float(temp_text,temp);
  sd_format_u64(stamp,utc?utc:uptime);sd_format_u64(ticks,uptime);sd_format_u64(fine_text,fine);sd_format_u64(seq,sequence);
  snprintf(code_text,sizeof code_text,"%ld",(long)tempcode);
- return snprintf(line,cap,"%s,%s,%s,,%ld,%s,%s,%s,%s,%s,%s,%u,%s\r\n",
-   stamp,ticks,sensor,(long)code,raw_text,cal_text,utc?"network":"local",with_temp?temp_text:"",with_temp?code_text:"",
+ return snprintf(line,cap,"%s,%s,%s,%s,%ld,%s,%s,%s,%s,%s,%s,%u,%s\r\n",
+   stamp,ticks,sensor,over>0?"1":over<0?"-1":"",(long)code,raw_text,cal_text,utc?"network":"local",with_temp?temp_text:"",with_temp?code_text:"",
    fine_text,hz,seq);
 }
 static float value(uint32_t bits) {float v;memcpy(&v,&bits,4);return v;}
@@ -48,25 +49,32 @@ int main(void) {
   uint32_t bits;memcpy(&bits,&temp,4);
   const int with_temp=!have||bits!=last_temp||tempcode!=last_code||since+1U>=SD_RAW_TEMPERATURE_REPEAT;
   if(with_temp){have=1;last_temp=bits;last_code=tempcode;since=0;}else ++since;
-  int old=original(expected,sizeof(expected),utc,uptime,fine,hz,sensor,code,raw,cal,temp,tempcode,sequence,with_temp);
-  int fresh=sd_format_csv_raw_record(actual,sizeof(actual),utc,uptime,fine,hz,sensor,code,raw,cal,temp,tempcode,sequence,&cache);
+  const int over=i%11==0?1:i%13==0?-1:0;
+  int old=original(expected,sizeof(expected),utc,uptime,fine,hz,sensor,over,code,raw,cal,temp,tempcode,sequence,with_temp);
+  int fresh=sd_format_csv_raw_record(actual,sizeof(actual),utc,uptime,fine,hz,sensor,(int8_t)over,code,raw,cal,temp,tempcode,sequence,&cache);
   assert(old==fresh && !strcmp(expected,actual));
  }
  conversions=0;cache=(sd_raw_format_cache_t){0};
- for(unsigned i=0;i<1000;i++)assert(sd_format_csv_raw_record(actual,sizeof(actual),1,i,i,1000,"chamber_pressure_v",10,1.25f,1.25f,26.0f,20,i,&cache)>0);
+ for(unsigned i=0;i<1000;i++)assert(sd_format_csv_raw_record(actual,sizeof(actual),1,i,i,1000,"chamber_pressure_v",0,10,1.25f,1.25f,26.0f,20,i,&cache)>0);
  assert(conversions==1004); /* One raw format per row; the temperature again every 256 rows. */
- assert(sd_format_csv_raw_record(actual,sizeof(actual),1,1001,1001000,1000000,"chamber_pressure_v",10,1.25f,250.0f,27.0f,20,1001,&cache)>0);
+ assert(sd_format_csv_raw_record(actual,sizeof(actual),1,1001,1001000,1000000,"chamber_pressure_v",0,10,1.25f,250.0f,27.0f,20,1001,&cache)>0);
  assert(conversions==1007); /* Independently changing calibration/temperature still formats both. */
  for(size_t capacity=1;capacity<=strlen(actual);capacity++) {
   unsigned char box[520];memset(box,0xa5,sizeof(box));cache=(sd_raw_format_cache_t){0};
-  int n=sd_format_csv_raw_record((char*)box,capacity,1,1001,1001000,1000000,"chamber_pressure_v",10,1.25f,250.0f,27.0f,20,1001,&cache);
+  int n=sd_format_csv_raw_record((char*)box,capacity,1,1001,1001000,1000000,"chamber_pressure_v",0,10,1.25f,250.0f,27.0f,20,1001,&cache);
   assert(n==-1 && !box[0]);for(size_t i=capacity;i<sizeof(box);i++)assert(box[i]==0xa5);
  }
- assert(sd_format_csv_raw_record(NULL,0,0,0,0,1000,"x",0,0,0,0,0,0,&cache)==-1);
+ /* SD format v4: the over-range flag is the value column of an MCP3564R row. */
+ cache=(sd_raw_format_cache_t){0};
+ assert(sd_format_csv_raw_record(actual,sizeof(actual),1,2,2000,1000000,"kg1000_v",1,11796480,3.375f,INFINITY,26.0f,20,3,&cache)>0);
+ assert(!strncmp(actual,"1,2,kg1000_v,1,11796480,",strlen("1,2,kg1000_v,1,11796480,")) && strstr(actual,",inf,network,"));
+ assert(sd_format_csv_raw_record(actual,sizeof(actual),1,2,2000,1000000,"kg50_p6_v",-1,-8388609,-0.150000018f,-INFINITY,26.0f,20,4,&cache)>0);
+ assert(strstr(actual,",kg50_p6_v,-1,-8388609,") && strstr(actual,",-inf,"));
+ assert(sd_format_csv_raw_record(NULL,0,0,0,0,1000,"x",0,0,0,0,0,0,0,&cache)==-1);
  clock_t start=clock();volatile unsigned checksum=0;
- for(unsigned i=0;i<100000;i++) checksum+=(unsigned)original(expected,sizeof(expected),1789136975096ULL,i,i*1000ULL,1000000,"chamber_pressure_v",123,1.25f,250,26,123,i,1);
+ for(unsigned i=0;i<100000;i++) checksum+=(unsigned)original(expected,sizeof(expected),1789136975096ULL,i,i*1000ULL,1000000,"chamber_pressure_v",0,123,1.25f,250,26,123,i,1);
  double before=(double)(clock()-start)/CLOCKS_PER_SEC;start=clock();
- for(unsigned i=0;i<100000;i++) checksum+=(unsigned)sd_format_csv_raw_record(actual,sizeof(actual),1789136975096ULL,i,i*1000ULL,1000000,"chamber_pressure_v",123,1.25f,250,26,123,i,&cache);
+ for(unsigned i=0;i<100000;i++) checksum+=(unsigned)sd_format_csv_raw_record(actual,sizeof(actual),1789136975096ULL,i,i*1000ULL,1000000,"chamber_pressure_v",0,123,1.25f,250,26,123,i,&cache);
  double after=(double)(clock()-start)/CLOCKS_PER_SEC;
  printf("raw CSV host benchmark: old%.3fs new%.3fs checksum%u; all byte/precision/bounds checks passed\n",before,after,checksum);
 }

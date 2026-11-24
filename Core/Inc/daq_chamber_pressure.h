@@ -30,7 +30,8 @@
 #endif
 static inline float daq_chamber_pressure_psi(float connector_v)
 {
-    const float pressure = isfinite(connector_v) ? connector_v * 200.0f : NAN;
+    /* +/-INFINITY is the ADC over-range marker (daq_over_range.h): kept. */
+    const float pressure = isinf(connector_v) ? connector_v : isfinite(connector_v) ? connector_v * 200.0f : NAN;
 #if DAQ_CHAMBER_NOISE_FLOOR_MILLIPSI > 0
     /* Test the computed value so overflow never becomes a fabricated zero.
      * Exact threshold and larger values retain the original multiply's bits. */

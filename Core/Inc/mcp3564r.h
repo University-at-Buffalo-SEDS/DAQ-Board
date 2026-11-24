@@ -43,6 +43,8 @@ typedef struct
   volatile uint32_t fast_done_max_us; /* latest scan A end seen, from the frame start */
   volatile uint32_t slot_done_max_us; /* latest slot end seen, from the frame start */
   volatile uint32_t start_late_max_us; /* worst START latency after its compare */
+  volatile uint32_t temperature_over_range; /* TEMP conversions over range (daq_over_range.h) */
+  volatile int8_t temperature_over_range_last; /* latest TEMP conversion: -1/0/+1 */
 } mcp3564r_diag_t;
 
 extern mcp3564r_diag_t g_mcp3564r_diag;

@@ -56,6 +56,53 @@ int main(void) {
 }
 ''')
 
+    def test_over_range_conversions_never_enter_a_published_mean(self):
+        # daq_bin_us_add_over: over-range conversions place the bin in time but
+        # never enter its mean; a bin of only such conversions is +/-INFINITY.
+        run_c(r'''
+#include <assert.h>
+#include "daq_median.h"
+#include "daq_over_range.h"
+int main(void) {
+  /* Classification at the boundaries: |code| > 2^23 - 1 at every gain. */
+  assert(daq_adc_over_range(8388607) == 0 && daq_adc_over_range(-8388607) == 0);
+  assert(daq_adc_over_range(8388608) == 1 && daq_adc_over_range(-8388608) == -1);
+  assert(daq_adc_over_range(0xB40000) == 1);            /* the 2026-11-16 KG1000 plateau */
+  assert(daq_adc_over_range(16777215) == 1 && daq_adc_over_range(-16777216) == -1); /* 25-bit clips */
+  assert(daq_adc_over_range(0) == 0);
+  assert(daq_ovr_bit(0) == 0 && daq_ovr_bit(7) == 7 && daq_ovr_bit(9) == (int)DAQ_OVR_BIT_P6 && daq_ovr_bit(8) == -1);
+  daq_bin_us_t b = {0}; daq_bin_out_t out;
+  /* Bin 0: two in-range, one over range -> mean of the in-range two. */
+  assert(!daq_bin_us_add(&b, 1.0f, 1000, 20000, &out));
+  assert(!daq_bin_us_add_over(&b, 1, 2000, 20000, &out));
+  assert(!daq_bin_us_add(&b, 3.0f, 3000, 20000, &out));
+  /* Bin 1: only over range (high). Closing bin 0 reports 2.0. */
+  assert(daq_bin_us_add_over(&b, 1, 21000, 20000, &out));
+  assert(out.mean == 2.0f && out.count == 2 && out.over == 1 && out.centre_us == 10000);
+  assert(!daq_bin_us_add_over(&b, 1, 22000, 20000, &out));
+  /* Bin 2 starts: bin 1 is the +INFINITY marker. */
+  assert(daq_bin_us_add(&b, 5.0f, 41000, 20000, &out));
+  assert(isinf(out.mean) && out.mean > 0 && out.count == 0 && out.over == 2 && out.centre_us == 30000);
+  /* Bin 3: only low over range -> -INFINITY. */
+  assert(daq_bin_us_add_over(&b, -1, 61000, 20000, &out) && out.mean == 5.0f && out.over == 0);
+  assert(daq_bin_us_add(&b, 6.0f, 81000, 20000, &out) && isinf(out.mean) && out.mean < 0);
+  /* A direction of 0 is not an over-range conversion. */
+  assert(!daq_bin_us_add_over(&b, 0, 101000, 20000, &out));
+  /* The fast pipeline: an over-range run never reaches the median, so the
+   * first in-range bin after it holds only in-range medians. */
+  daq_median_t m; daq_median_init(&m, 3); b = (daq_bin_us_t){0};
+  float last = NAN; unsigned markers = 0;
+  for (unsigned i = 0; i < 200; ++i) {
+    const uint64_t t = 1000ULL * i + 288;
+    const int over = i >= 40 && i < 100; /* 60 ms over range */
+    const int ready = over ? daq_bin_us_add_over(&b, 1, t, 20000, &out)
+                           : daq_bin_us_add(&b, daq_median_add(&m, 0.25f), t, 20000, &out);
+    if (ready) { if (isinf(out.mean)) ++markers; else assert(out.mean == 0.25f); last = out.mean; }
+  }
+  assert(markers == 3 && last == 0.25f);
+}
+''')
+
     def test_fast_pipeline_step_reaches_report_within_one_bin(self):
         # Ignition-like step at 1 kHz: median-3 then 20 ms bins. The bin holding
         # the step carries a partial mean; the next bin carries the full value.

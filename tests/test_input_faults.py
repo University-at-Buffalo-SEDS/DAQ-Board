@@ -22,7 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = json.loads((ROOT / 'tests/fixtures/input_faults_fire_20261116.json').read_text())
 
 # Bits, in DAQ_INPUT_HEALTH order.
-SUPPLY, KG1000_HIGH, KG1000_LOW, KG50_HIGH, KG50_LOW, P6_IMBALANCE, P6_COMMON, CHAMBER = (1 << i for i in range(8))
+SUPPLY, KG1000_HIGH, KG1000_LOW, KG50_HIGH, KG50_LOW, P6_IMBALANCE, P6_COMMON, CHAMBER, VDDA_HIGH, VDDA_LOW = (
+    1 << i for i in range(10))
 
 DRIVER = r'''
 #include "daq_input_faults.h"
@@ -42,6 +43,19 @@ int main(void) {
     } else if (op[0] == 'I') {
       if (scanf("%lf", &a) != 1) return 2;
       daq_input_faults_kg50_input(&s, (uint8_t)a);
+    } else if (op[0] == 'W') {
+      /* W k (bit state count) x k: one window's conversions, in order */
+      daq_ovr_window_t w; daq_ovr_window_reset(&w);
+      unsigned k, bit, n; int state;
+      if (scanf("%u", &k) != 1) return 2;
+      for (unsigned j = 0; j < k; ++j) {
+        if (scanf("%u %d %u", &bit, &state, &n) != 3) return 2;
+        for (unsigned i = 0; i < n; ++i) daq_ovr_window_note(&w, bit, (int8_t)state);
+      }
+      daq_input_faults_over_range(&s, &w);
+    } else if (op[0] == 'O') {
+      if (scanf("%u %lf", &t, &b) != 2) return 2;
+      daq_input_faults_chamber_over_range(&s, t, b < 0.0 ? DAQ_CHAMBER_NO_LAUNCH : (uint32_t)b);
     } else if (op[0] == 'P') {
       if (scanf("%u %lf %lf", &t, &a, &b) != 3) return 2;
       daq_input_faults_p6_legs(&s, (float)a, (float)b, t);
@@ -50,6 +64,7 @@ int main(void) {
       if (op[0] == 'S') daq_input_faults_supply(&s, (float)a, t);
       else if (op[0] == 'K') daq_input_faults_kg1000(&s, (float)a, t);
       else if (op[0] == 'F') daq_input_faults_kg50(&s, (float)a, t);
+      else if (op[0] == 'V') daq_input_faults_vdda(&s, (float)a, t);
       else if (op[0] == 'C') {
         /* C t volts since_t0_ms; a negative since_t0_ms is no launch window. */
         if (scanf("%lf", &b) != 1) return 2;
@@ -71,6 +86,12 @@ class Report:
         self.vmain_min_mv, self.vmain_mv = words[6] & 0xFFFF, words[6] >> 16
         self.chamber_min_mv, self.chamber_mv = words[7] & 0xFFFF, words[7] >> 16
         self.p6_imbalance_max_mv, self.p6_common_mv = words[8] & 0xFFFF, words[8] >> 16
+        if len(words) >= 27:
+            self.episodes += [words[26] & 0xFFFF, words[26] >> 16]
+            self.ovr_now, self.ovr_latched = words[18] & 0xFFFF, words[18] >> 16
+            self.ovr_low = words[19] & 0xFFFF
+            self.ovr_count = [(words[20 + i // 2] >> (16 * (i & 1))) & 0xFFFF for i in range(10)]
+            self.vdda_max_mv, self.vdda_mv = words[25] & 0xFFFF, words[25] >> 16
 
 
 def build(binary, *defines):
@@ -373,8 +394,8 @@ class InputFaultTests(unittest.TestCase):
 
     def test_counters_saturate_and_unknown_readings_are_marked(self):
         reports = self.run_ops(['R'])
-        self.assertEqual(reports[0].words[0], 2)
-        self.assertEqual(len(reports[0].words), 18)
+        self.assertEqual(reports[0].words[0], 3)
+        self.assertEqual(len(reports[0].words), 28)
         self.assertEqual(reports[0].words[6:9], [0xFFFFFFFF] * 3)
         # v2: per-channel statistics unknown, no excitation reading.
         self.assertEqual(reports[0].words[10:14], [0x8000FFFF] * 4)
@@ -391,11 +412,107 @@ class InputFaultTests(unittest.TestCase):
         self.assertEqual(reports[1].words[6:9], [0xFFFFFFFF] * 3)
 
 
+class OverRangeAndVddaTests(unittest.TestCase):
+    """Version 3: ADC over-range bits and counters, +3V3A (VDDA) faults."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.binary = Path(cls.tmp.name) / 'faults'
+        build(cls.binary)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    run_ops = InputFaultTests.run_ops
+
+    def test_v3_report_is_v2_plus_ten_words_with_nothing_seen(self):
+        report = self.run_ops(['R'])[0]
+        self.assertEqual(len(report.words), 28)
+        self.assertEqual((report.ovr_now, report.ovr_latched, report.ovr_low), (0, 0, 0))
+        self.assertEqual(report.ovr_count, [0] * 10)
+        self.assertEqual((report.vdda_max_mv, report.vdda_mv), (0xFFFF, 0xFFFF))
+        self.assertEqual(report.episodes[8:], [0, 0])
+
+    def test_over_range_now_latched_direction_and_counts(self):
+        reports = self.run_ops([
+            'W 1 0 1 20', 'W 1 9 -1 3', 'W 1 8 1 1', 'R',
+            # KG1000's next conversion is in range: now clears, the latch shows it until reported.
+            'W 2 0 1 5 0 0 1', 'R', 'R'])
+        first, second, third = reports
+        self.assertEqual(first.ovr_now, 1 | 1 << 8 | 1 << 9)
+        self.assertEqual(first.ovr_latched, first.ovr_now)
+        self.assertEqual(first.ovr_low, 1 << 9, 'P6 went below -150 mV')
+        self.assertEqual(first.ovr_count[0], 20)
+        self.assertEqual((first.ovr_count[8], first.ovr_count[9]), (1, 3))
+        self.assertEqual(second.ovr_now, 1 << 8 | 1 << 9, 'KG1000 back in range')
+        self.assertEqual(second.ovr_latched & 1, 1, 'but over range during this interval')
+        self.assertEqual(second.ovr_count[0], 25)
+        self.assertEqual(third.ovr_latched, third.ovr_now)
+
+    def test_a_window_without_a_conversion_keeps_the_state(self):
+        reports = self.run_ops(['W 1 3 1 1', 'W 1 0 0 1', 'R'])
+        self.assertEqual(reports[0].ovr_now, 1 << 3, 'CH3 not converted again: still over range')
+
+    def test_counters_wrap_modulo_65536(self):
+        ops = ['W 1 6 1 65535', 'W 1 6 1 3', 'R']
+        self.assertEqual(self.run_ops(ops)[0].ovr_count[6], 2)
+
+    def test_vdda_fire_level_sets_the_high_fault_after_100_ms(self):
+        # 4.19 V: 3.3 V x 14.1 / 11.1, the 2026-11-16 fire's implied +3V3A.
+        reports = self.run_ops(['V 0 3.30', 'V 100 4.19', 'A', 'V 200 4.19', 'A', 'R',
+                                'V 300 3.43', 'V 2300 3.43', 'A', 'V 2400 3.41', 'V 4399 3.41', 'A',
+                                'V 4400 3.41', 'A', 'R', 'R'])
+        self.assertEqual(reports[0][0], 0)
+        self.assertEqual(reports[1][0], VDDA_HIGH)
+        self.assertEqual((reports[2].vdda_max_mv, reports[2].vdda_mv), (4190, 4190))
+        self.assertEqual(reports[2].episodes[8], 1)
+        self.assertEqual(reports[3][0], VDDA_HIGH, '3.43 V is inside the 3.42-3.45 V hysteresis')
+        self.assertEqual(reports[4][0], VDDA_HIGH, 'clears only after 2 s below 3.42 V')
+        self.assertEqual(reports[5][0], 0)
+        self.assertEqual(reports[6].vdda_max_mv, 4190, 'the interval starts at the last reading')
+        self.assertEqual(reports[7].vdda_max_mv, 3410)
+
+    def test_vdda_band_edges(self):
+        cases = [(3.45, 0), (3.451, VDDA_HIGH), (3.15, 0), (3.149, VDDA_LOW), (3.3, 0)]
+        for volts, expected in cases:
+            state = self.run_ops([f'V 0 {volts}', f'V 100 {volts}', 'A'])[0]
+            self.assertEqual(state[0], expected, volts)
+        low = self.run_ops(['V 0 3.0', 'R'])[0]
+        self.assertEqual(low.episodes[9], 1)
+        self.assertEqual(low.latched, VDDA_LOW, 'one low reading is latched')
+
+    def test_vdda_faults_do_not_move_the_v2_episode_words(self):
+        report = self.run_ops(['V 0 4.0', 'V 100 4.0', 'R'])[0]
+        self.assertEqual(report.words[2:6], [0, 0, 0, 0])
+        self.assertEqual(report.words[26], 1)
+
+    def test_chamber_over_range_in_the_burn_is_not_no_signal(self):
+        # A live chamber goes over range in the burn window: no no-signal fault,
+        # and a dead input that then goes over range clears it.
+        ops = [f'O {t} {2000 + t}' for t in range(0, 3000, 2)] + ['A']
+        self.assertEqual(self.run_ops(ops)[0][0], 0)
+        ops = ([f'C {t} 0.01 {1500 + t}' for t in range(0, 2100, 100)] + ['A'] +
+               [f'O {2100 + t} {3600 + t}' for t in range(0, 1100, 100)] + ['A', 'R'])
+        dead, over, report = self.run_ops(ops)
+        self.assertEqual(dead[0], CHAMBER)
+        self.assertEqual(over[0], 0)
+        self.assertTrue(report.words[0] & (1 << 9), 'the chamber input was seen')
+
+    def test_over_range_rails_reach_the_rail_checks(self):
+        # Acquisition passes an over-range window as +/-INFINITY.
+        state = self.run_ops(['K 0 inf', 'K 20 inf', 'A'])[0]
+        self.assertEqual(state[0], KG1000_HIGH)
+        state = self.run_ops(['I 1', 'F 0 -inf', 'F 20 -inf', 'A'])[0]
+        self.assertEqual(state[0], KG50_LOW)
+
+
 class InputHealthWiringTests(unittest.TestCase):
     def test_schema_header_and_firmware_agree(self):
         definitions = json.loads((ROOT / 'config/sedsnet.json').read_text())
         entry = next(t for t in definitions['types'] if t['name'] == 'DAQ_INPUT_HEALTH')
-        self.assertEqual(entry['element'], dict(kind='Static', data_type='UInt32', count=18))
+        self.assertEqual(entry['element'], dict(kind='Static', data_type='UInt32', count=28))
         self.assertEqual((entry['reliable'], entry['endpoints']), ('Off', ['ActuatorGroundStation']))
         hashed = 0x811c9dc5 ^ 0x5459
         for byte in b'DAQ_INPUT_HEALTH':
@@ -403,7 +520,8 @@ class InputHealthWiringTests(unittest.TestCase):
         header = (ROOT / 'Core/Inc/sedsnet_config.h').read_text()
         self.assertIn(f'#define SEDS_DT_DAQ_INPUT_HEALTH ((uint32_t){0x10000 | (hashed & 0x0fffffff)}U)', header)
         thread = (ROOT / 'Core/Src/daq_thread.c').read_text()
-        self.assertIn('daq_observe_input_faults(&snapshot, &window, report.kg50_input, supply_fresh ? &supply : NULL);', thread)
+        self.assertIn('daq_observe_input_faults(&snapshot, &window, report.kg50_input, supply_fresh ? &supply : NULL, &ovr);',
+                      thread)
         health = (ROOT / 'Core/Src/board_health.c').read_text()
         self.assertIn('SEDS_DT_DAQ_INPUT_HEALTH', health)
 

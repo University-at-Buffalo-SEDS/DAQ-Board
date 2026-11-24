@@ -58,6 +58,7 @@ static void daq_board_note_supply(void)
     .input_current_a = adc1_sample.input_current_a,
     .pin_v = {adc1_sample.power_monitor_v[0], adc1_sample.power_monitor_v[1]},
     .code = {adc1_sample.power_monitor_code[0], adc1_sample.power_monitor_code[1]},
+    .vdda_v = adc1_sample.vdda_v, .vrefint_code = adc1_sample.vrefint_code,
   };
   g_supply_fresh = 1U;
 }

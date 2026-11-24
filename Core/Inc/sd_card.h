@@ -45,8 +45,10 @@ typedef struct
   float adc_temperature_c;
   int32_t adc_temperature_code;
   uint8_t channel;
+  int8_t over_range;  /* MCP3564R: +1/-1 beyond +/-full scale (daq_over_range.h), else 0 */
   uint16_t sample_us; /* sub-millisecond part of the capture time, 0..999 */
 } sd_raw_adc_record_t;
+_Static_assert(sizeof(sd_raw_adc_record_t) == 40U, "The over-range flag uses padding: compact records stay 40 B");
 /* MCP3564R records carry microsecond capture times (uptime_ticks in us). */
 static inline int sd_raw_channel_has_us(uint8_t channel) { return channel < 8U || channel == 9U; }
 /* Raw-record channels beyond the MCP3564R (0..7, 9): the board supply from
@@ -55,6 +57,10 @@ static inline int sd_raw_channel_has_us(uint8_t channel) { return channel < 8U |
  * is the board input voltage (V) or current (A). */
 #define SD_RAW_CHANNEL_INPUT_VOLTAGE 10U
 #define SD_RAW_CHANNEL_INPUT_CURRENT 11U
+/* STM32 VDDA (+3V3A): raw_adc_code = VREFINT code, raw_value =
+ * calibrated_value = VDDA volts (daq_vdda.h). Beside a supply reading when
+ * VDDA moved 5 mV or more, and at least every 100 ms. */
+#define SD_RAW_CHANNEL_VDDA 12U
 
 UINT sd_card_init(TX_BYTE_POOL *byte_pool);
 void sd_card_set_hardware_ready(uint8_t ready);

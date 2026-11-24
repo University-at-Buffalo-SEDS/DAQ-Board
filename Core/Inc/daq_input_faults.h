@@ -4,7 +4,8 @@
  * Pure state machine: no HAL, no RTOS; the caller serializes observations
  * against daq_input_faults_report(). Thresholds: daq_input_fault_config.h.
  *
- * DAQ_INPUT_HEALTH, 18 little-endian UInt32 words (version 2):
+ * DAQ_INPUT_HEALTH, 28 little-endian UInt32 words (version 3; version 2 sent
+ * words 0-17 and version 1 words 0-9, with the same meaning):
  *   0  version (bits 0-7) | KG50 input is P6 (bit 8) | chamber reading
  *      seen (bit 9)
  *   1  active fault mask (bits 0-15) | latched mask (bits 16-31): any fault
@@ -24,10 +25,24 @@
  *  15  MCP3564R frames skipped | slot items skipped (u16 each, saturating)
  *  16  scans restarted after a lost DRDY | device recoveries + STATUS faults
  *  17  latest fast-scan end | latest slot end, us from the frame start
- * 0xFFFF in a mV half means no reading in that interval. */
+ *  18  ADC over range now (bits 0-9) | over range latched since the previous
+ *      report (bits 16-25). Bit n = MCP3564R CH n (0..7), bit 8 = die
+ *      temperature, bit 9 = P6 differential (daq_over_range.h). "Now": the
+ *      channel's latest conversion was over range.
+ *  19  direction of the now bits, set = below -full scale (bits 0-9) | 0
+ *  20-24 over-range conversions since boot, u16 each, wrapping modulo 2^16
+ *      (readers take differences): CH0|CH1, CH2|CH3, CH4|CH5, CH6|CH7,
+ *      TEMP|P6
+ *  25  VDDA (+3V3A, from VREFINT) maximum since the previous report | now (mV)
+ *  26  episode counters of faults 8 | 9 (u16 each, saturating)
+ *  27  applied MCP3564R reference, mV (bits 0-15) | set by the station this
+ *      boot (bit 16), restored from flash (bit 17); neither: nominal 2.4 V
+ * 0xFFFF in a mV half means no reading in that interval. Faults 0-7 keep
+ * their version 2 bits and episode words; 8 and 9 are new in version 3. */
 #include <math.h>
 #include <stdint.h>
 #include "daq_input_fault_config.h"
+#include "daq_over_range.h"
 
 enum {
   DAQ_FAULT_SUPPLY_LOW = 0,
@@ -38,13 +53,21 @@ enum {
   DAQ_FAULT_P6_LEG_IMBALANCE,
   DAQ_FAULT_P6_COMMON_MODE,
   DAQ_FAULT_CHAMBER_NO_SIGNAL,
+  DAQ_FAULT_VDDA_HIGH,
+  DAQ_FAULT_VDDA_LOW,
   DAQ_FAULT_COUNT
 };
-#define DAQ_INPUT_HEALTH_VERSION 2U
-#define DAQ_INPUT_HEALTH_WORDS 18U
+#define DAQ_INPUT_HEALTH_VERSION 3U
+#define DAQ_INPUT_HEALTH_WORDS 28U
 #define DAQ_INPUT_HEALTH_STATS_WORD 10U
 #define DAQ_INPUT_HEALTH_EXCITATION_WORD 14U
 #define DAQ_INPUT_HEALTH_FRAME_WORD 15U
+#define DAQ_INPUT_HEALTH_OVR_WORD 18U
+#define DAQ_INPUT_HEALTH_OVR_COUNT_WORD 20U
+#define DAQ_INPUT_HEALTH_VDDA_WORD 25U
+#define DAQ_INPUT_HEALTH_EPISODES_V3_WORD 26U
+#define DAQ_INPUT_HEALTH_VREF_WORD 27U
+#define DAQ_FAULT_V2_COUNT 8U
 #define DAQ_INPUT_HEALTH_NO_MV 0xFFFFU
 
 typedef struct {
@@ -60,6 +83,9 @@ typedef struct {
   uint16_t vmain_min_mv, vmain_mv, chamber_min_mv, chamber_mv;
   uint16_t p6_imbalance_max_mv, p6_common_mv;
   uint16_t excitation_min_mv, excitation_mv;
+  uint16_t vdda_max_mv, vdda_mv;
+  uint16_t ovr_now, ovr_low, ovr_latched;
+  uint16_t ovr_count[DAQ_OVR_CHANNELS]; /* wrapping */
   uint8_t kg50_input, chamber_seen;
 } daq_input_faults_t;
 
@@ -77,6 +103,7 @@ static inline void daq_input_faults_reset(daq_input_faults_t *s)
   s->vmain_min_mv = s->vmain_mv = s->chamber_min_mv = s->chamber_mv = DAQ_INPUT_HEALTH_NO_MV;
   s->p6_common_mv = s->p6_imbalance_max_mv = DAQ_INPUT_HEALTH_NO_MV;
   s->excitation_min_mv = s->excitation_mv = DAQ_INPUT_HEALTH_NO_MV;
+  s->vdda_max_mv = s->vdda_mv = DAQ_INPUT_HEALTH_NO_MV;
 }
 
 /* Two counters in one word, each saturating at 0xFFFF. */
@@ -102,11 +129,11 @@ static inline void daq_input_fault_step(daq_input_faults_t *s, unsigned id, int 
   static const uint16_t set_ms[DAQ_FAULT_COUNT] = {
     DAQ_FAULT_SUPPLY_SET_MS, DAQ_FAULT_RAIL_SET_MS, DAQ_FAULT_RAIL_SET_MS,
     DAQ_FAULT_RAIL_SET_MS, DAQ_FAULT_RAIL_SET_MS, DAQ_FAULT_P6_IMBALANCE_SET_MS,
-    DAQ_FAULT_P6_COMMON_SET_MS, DAQ_FAULT_CHAMBER_SET_MS};
+    DAQ_FAULT_P6_COMMON_SET_MS, DAQ_FAULT_CHAMBER_SET_MS, DAQ_FAULT_VDDA_SET_MS, DAQ_FAULT_VDDA_SET_MS};
   static const uint16_t clear_ms[DAQ_FAULT_COUNT] = {
     DAQ_FAULT_SUPPLY_CLEAR_MS, DAQ_FAULT_RAIL_CLEAR_MS, DAQ_FAULT_RAIL_CLEAR_MS,
     DAQ_FAULT_RAIL_CLEAR_MS, DAQ_FAULT_RAIL_CLEAR_MS, DAQ_FAULT_P6_IMBALANCE_CLEAR_MS,
-    DAQ_FAULT_P6_COMMON_CLEAR_MS, DAQ_FAULT_CHAMBER_CLEAR_MS};
+    DAQ_FAULT_P6_COMMON_CLEAR_MS, DAQ_FAULT_CHAMBER_CLEAR_MS, DAQ_FAULT_VDDA_CLEAR_MS, DAQ_FAULT_VDDA_CLEAR_MS};
   daq_fault_t *f = &s->fault[id];
   const uint16_t bit = (uint16_t)(1U << id);
   if (!f->raw && beyond_set) {
@@ -223,6 +250,50 @@ static inline void daq_input_faults_chamber(daq_input_faults_t *s, float connect
                        connector_v >= DAQ_FAULT_CHAMBER_CLEAR_V, now_ms);
 }
 
+/* The chamber channel's conversions in one window were all over range
+ * (`direction` +1/-1). A 0-5 V transducer behind the 11:1 divider can only
+ * reach the ADC's +/-26.4 V connector limit through a wiring fault (e.g. its
+ * output shorted to a supply) or a damaged sensor; it is never "no signal".
+ * The no-signal check therefore sees it as a present signal, and the
+ * over-range bits (word 18) carry the condition; the station treats chamber
+ * over range during the burn as overpressure or a sensor fault. */
+static inline void daq_input_faults_chamber_over_range(daq_input_faults_t *s, uint32_t now_ms,
+                                                       uint32_t since_t0_ms)
+{
+  s->chamber_seen = 1U;
+  if (!daq_input_faults_chamber_armed(since_t0_ms)) {
+    daq_input_fault_idle(s, DAQ_FAULT_CHAMBER_NO_SIGNAL);
+    return;
+  }
+  daq_input_fault_step(s, DAQ_FAULT_CHAMBER_NO_SIGNAL, 0, 1, now_ms);
+}
+
+/* STM32 VDDA = +3V3A, measured from VREFINT (daq_vdda.h). */
+static inline void daq_input_faults_vdda(daq_input_faults_t *s, float vdda_v, uint32_t now_ms)
+{
+  if (!isfinite(vdda_v)) return;
+  const uint16_t mv = daq_input_faults_mv(vdda_v);
+  s->vdda_mv = mv;
+  if (s->vdda_max_mv == DAQ_INPUT_HEALTH_NO_MV || mv > s->vdda_max_mv) s->vdda_max_mv = mv;
+  daq_input_fault_step(s, DAQ_FAULT_VDDA_HIGH, vdda_v > DAQ_FAULT_VDDA_HIGH_V,
+                       vdda_v < DAQ_FAULT_VDDA_HIGH_CLEAR_V, now_ms);
+  daq_input_fault_step(s, DAQ_FAULT_VDDA_LOW, vdda_v < DAQ_FAULT_VDDA_LOW_V,
+                       vdda_v > DAQ_FAULT_VDDA_LOW_CLEAR_V, now_ms);
+}
+
+/* One acquisition window's over-range observations (daq_ovr_window_t). */
+static inline void daq_input_faults_over_range(daq_input_faults_t *s, const daq_ovr_window_t *w)
+{
+  for (unsigned i = 0U; i < DAQ_OVR_CHANNELS; ++i) {
+    const uint16_t bit = (uint16_t)(1U << i);
+    s->ovr_count[i] = (uint16_t)(s->ovr_count[i] + w->count[i]);
+    if (w->count[i] != 0U) s->ovr_latched |= bit;
+    if (w->last[i] == 2) continue;
+    if (w->last[i] != 0) s->ovr_now |= bit; else s->ovr_now &= (uint16_t)~bit;
+    if (w->last[i] < 0) s->ovr_low |= bit; else s->ovr_low &= (uint16_t)~bit;
+  }
+}
+
 static inline uint16_t daq_input_faults_active(const daq_input_faults_t *s)
 {
   uint16_t mask = 0U;
@@ -239,8 +310,15 @@ static inline void daq_input_faults_report(daq_input_faults_t *s, uint32_t words
   words[0] = DAQ_INPUT_HEALTH_VERSION | ((uint32_t)(s->kg50_input == 1U) << 8U) |
              ((uint32_t)(s->chamber_seen != 0U) << 9U);
   words[1] = (uint32_t)daq_input_faults_active(s) | ((uint32_t)s->latched << 16U);
-  for (unsigned i = 0; i < DAQ_FAULT_COUNT; ++i)
+  for (unsigned i = 0; i < DAQ_FAULT_V2_COUNT; ++i)
     words[2U + i / 2U] |= (uint32_t)s->fault[i].episodes << (16U * (i & 1U));
+  words[DAQ_INPUT_HEALTH_EPISODES_V3_WORD] = s->fault[DAQ_FAULT_VDDA_HIGH].episodes |
+      ((uint32_t)s->fault[DAQ_FAULT_VDDA_LOW].episodes << 16U);
+  words[DAQ_INPUT_HEALTH_OVR_WORD] = (uint32_t)s->ovr_now | ((uint32_t)(s->ovr_latched | s->ovr_now) << 16U);
+  words[DAQ_INPUT_HEALTH_OVR_WORD + 1U] = (uint32_t)(s->ovr_low & s->ovr_now);
+  for (unsigned i = 0; i < DAQ_OVR_CHANNELS; ++i)
+    words[DAQ_INPUT_HEALTH_OVR_COUNT_WORD + i / 2U] |= (uint32_t)s->ovr_count[i] << (16U * (i & 1U));
+  words[DAQ_INPUT_HEALTH_VDDA_WORD] = s->vdda_max_mv | ((uint32_t)s->vdda_mv << 16U);
   words[6] = s->vmain_min_mv | ((uint32_t)s->vmain_mv << 16U);
   words[7] = s->chamber_min_mv | ((uint32_t)s->chamber_mv << 16U);
   words[8] = (s->kg50_input == 1U ? s->p6_imbalance_max_mv : DAQ_INPUT_HEALTH_NO_MV) |
@@ -257,6 +335,8 @@ static inline void daq_input_faults_report(daq_input_faults_t *s, uint32_t words
   s->vmain_min_mv = s->vmain_mv;
   s->chamber_min_mv = s->chamber_mv;
   s->excitation_min_mv = s->excitation_mv;
+  s->vdda_max_mv = s->vdda_mv;
+  s->ovr_latched = s->ovr_now;
   s->p6_imbalance_max_mv = DAQ_INPUT_HEALTH_NO_MV;
 }
 

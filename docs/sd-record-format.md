@@ -14,9 +14,9 @@ SEDS-SD format block (`Core/Inc/sd_format.h`), then the `# channel=`,
 
 ```
 timestamp_ms,monotonic_ms,sensor,...,record_sequence
-# seds-sd,format=daq,version=3,board=DAQ,firmware=<rev>,tick_hz=1000,schema=ade30ff7
+# seds-sd,format=daq,version=4,board=DAQ,firmware=<rev>,tick_hz=1000,schema=bc9e710a
 # seds-sd-columns,u64:ms,u64:ms,label,vec,vec,vec,vec,clock,f32:degC,i32:code,u64:tick,u32:Hz,u64:seq
-# seds-sd-records,kg1000_v:a=code:r=V:c=kg@1000000,...
+# seds-sd-records,kg1000_v:v=ovr:a=code:r=V:c=kg@1000000,...
 # seds-sd-records,...
 ```
 
@@ -45,6 +45,27 @@ compares it with the compiled `schema=` and the frozen table, and checks
 that every label the source writes is declared, so a layout change without a
 bump fails. The ground station refuses an unknown version and a damaged
 hash.
+
+**Version 4** (from version 3):
+
+- Every MCP3564R record (`kg1000_v`, `kg50_v`, `kg50_p6_v`,
+  `chamber_pressure_v`, `excitation_v`, `mcp3564r_ch2_v`..`_ch7_v`) declares
+  `v=ovr`: the `value` column, empty before, is the ADC over-range flag. It is
+  empty in range, `1` above +full scale and `-1` below -full scale
+  (|raw_adc_code| > 2^23 - 1, `Core/Inc/daq_over_range.h`). A flagged row
+  keeps the true `raw_adc_code` and the linear (invalid) `raw_value`; its
+  `calibrated_value` is `inf` or `-inf`. Nothing is lost, and no reader can
+  take a flagged row for a measurement by reading `calibrated_value`.
+- `vdda_v` (`a=code:r=V:c=V`, milliseconds) is written beside a supply
+  reading whenever VDDA moved 5 mV or more since the last one, and at least
+  every 100 ms (so a quiet rail adds no launch-window rows): `raw_adc_code` is the STM32 VREFINT conversion and `raw_value` =
+  `calibrated_value` the VDDA (+3V3A) it gives (`Core/Inc/daq_vdda.h`).
+  `input_voltage_v`/`input_current_a` pin volts are converted with that VDDA
+  instead of an assumed 3.3 V.
+- The `# calibration` line gains `mcp_vref_v`, the MCP3564R reference every
+  MCP3564R volt in the file was converted with (absent: 2.4 V). Volts are
+  `raw_adc_code x mcp_vref_v / 2^23` (`kg50_p6_v`: divided by 16). A new line
+  is written whenever the reference or the calibration changes.
 
 Files without the block are legacy DAQ files: legacy daq v1 (mapping profile
 `daq-20261101`) and legacy daq v2 (profiles `daq-20261117` and
@@ -129,8 +150,11 @@ drained in one acquisition cycle.
 `valve_pressure_psi` carries VB OX-tank pressure (ADC code and psi).
 
 The SEDSnet `KG1000`/`KG50` values are not stored separately. Each one is the
-mean of one bin of a running median of `kg1000_v` (or of the selected
-`kg50_v`/`kg50_p6_v`) `raw_value`s: KG1000 a 3-sample median and 20000 us bins,
+mean of one bin of a running median of the in-range (unflagged) `kg1000_v`
+(or of the selected `kg50_v`/`kg50_p6_v`) `raw_value`s. Over-range rows
+(`value` = 1/-1) never enter the median or the mean; they only place their
+bin in time, and a bin holding nothing but over-range rows is published as
++INFINITY or -INFINITY (the direction of its last row). Otherwise: KG1000 a 3-sample median and 20000 us bins,
 KG50 a 5-sample median and 50000 us bins, bin = `uptime_ticks` (us) / bin
 width. The median is taken in record order over the last N values of that
 sensor (fewer at the start); the bin sums the medians in double precision and

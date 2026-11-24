@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # version -> schema hash. Never edit an existing entry: a changed layout gets
 # a new version and a new entry here, in sd_format.h and in the GS SD parser.
-FROZEN = {3: 'ade30ff7'}
+FROZEN = {3: 'ade30ff7', 4: 'bc9e710a'}
 BUMP = ("SD record layout changed: bump SD format version, add the frozen hash and "
         "register the version in the GroundStation26 SD parser")
 

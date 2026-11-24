@@ -17,20 +17,25 @@
 #endif
 
 #define SD_FORMAT_ID "daq"
-#define SD_FORMAT_VERSION "3"
+#define SD_FORMAT_VERSION "4"
 #define SD_FORMAT_BOARD "DAQ"
 #define SD_FORMAT_TICK_HZ "1000"
-#define SD_FORMAT_SCHEMA "ade30ff7"
+#define SD_FORMAT_SCHEMA "bc9e710a"
 
 #define SD_FORMAT_COLUMNS_LINE \
     "# seds-sd-columns,u64:ms,u64:ms,label,vec,vec,vec,vec,clock,f32:degC,i32:code,u64:tick,u32:Hz,u64:seq\r\n"
 
 /* MCP3564R raw records carry microsecond uptime_ticks (@1000000); ADC1
- * supply, VB pressure, scalar and DAC rows carry milliseconds. */
+ * supply, VB pressure, scalar and DAC rows carry milliseconds.
+ * Version 4: MCP3564R records carry their over-range flag in the value
+ * column (`v=ovr`: 1 / -1 / empty; calibrated_value is inf/-inf then), and
+ * vdda_v (VREFINT code, VDDA volts) joins a supply reading (on a 5 mV move,
+ * at least every 100 ms), and supply readings' pin
+ * volts are converted with that VDDA. */
 #define SD_FORMAT_RECORDS_LINES \
-    "# seds-sd-records,kg1000_v:a=code:r=V:c=kg@1000000,kg50_v:a=code:r=V:c=kg@1000000,kg50_p6_v:a=code:r=V:c=V@1000000,chamber_pressure_v:a=code:r=V:c=psig@1000000,excitation_v:a=code:r=V:c=V@1000000\r\n" \
-    "# seds-sd-records,mcp3564r_ch2_v:a=code:r=V:c=V@1000000,mcp3564r_ch3_v:a=code:r=V:c=V@1000000,mcp3564r_ch4_v:a=code:r=V:c=V@1000000,mcp3564r_ch5_v:a=code:r=V:c=V@1000000,mcp3564r_ch6_v:a=code:r=V:c=V@1000000,mcp3564r_ch7_v:a=code:r=V:c=V@1000000\r\n" \
-    "# seds-sd-records,input_voltage_v:a=code:r=V:c=V,input_current_a:a=code:r=V:c=A,valve_pressure_psi:v=psi:a=code:r=code:c=psi\r\n" \
+    "# seds-sd-records,kg1000_v:v=ovr:a=code:r=V:c=kg@1000000,kg50_v:v=ovr:a=code:r=V:c=kg@1000000,kg50_p6_v:v=ovr:a=code:r=V:c=V@1000000,chamber_pressure_v:v=ovr:a=code:r=V:c=psig@1000000,excitation_v:v=ovr:a=code:r=V:c=V@1000000\r\n" \
+    "# seds-sd-records,mcp3564r_ch2_v:v=ovr:a=code:r=V:c=V@1000000,mcp3564r_ch3_v:v=ovr:a=code:r=V:c=V@1000000,mcp3564r_ch4_v:v=ovr:a=code:r=V:c=V@1000000,mcp3564r_ch5_v:v=ovr:a=code:r=V:c=V@1000000,mcp3564r_ch6_v:v=ovr:a=code:r=V:c=V@1000000,mcp3564r_ch7_v:v=ovr:a=code:r=V:c=V@1000000\r\n" \
+    "# seds-sd-records,input_voltage_v:a=code:r=V:c=V,input_current_a:a=code:r=V:c=A,vdda_v:a=code:r=V:c=V,valve_pressure_psi:v=psi:a=code:r=code:c=psi\r\n" \
     "# seds-sd-records,adc1_aux_v:v=V,analog_in_1_v:v=V,analog_in_2_v:v=V,analog_in_3_v:v=V,analog_in_4_v:v=V,analog_in_5_v:v=V,analog_in_6_v:v=V,analog_in_7_v:v=V,analog_in_8_v:v=V\r\n" \
     "# seds-sd-records,isense1_v:v=V,isense2_v:v=V,isense1_a:v=A,isense2_a:v=A,vmon_v:v=V,imon_v:v=V,analog_out_1_v:v=V,analog_out_2_v:v=V,kg1000_window_code:v=code,kg1000_window_v:v=V,mcp3564r_temp_c:v=degC,kg50_window_v:v=V\r\n" \
     "# seds-sd-records,dac_ch1_active:v=1,dac_ch1_waveform:v=code,dac_ch1_amplitude_v:v=V,dac_ch1_offset_v:v=V,dac_ch1_frequency_hz:v=Hz,dac_ch1_steps:v=1,dac_ch1_dwell_ms:v=ms,dac_ch1_sequence:v=1\r\n" \

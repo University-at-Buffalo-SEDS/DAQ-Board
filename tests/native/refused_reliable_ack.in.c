@@ -37,6 +37,9 @@ static bool g_persist_ready=true,g_network_value_seen,g_kg50_network_value_seen,
 static uint32_t g_daq_calibration_errors,g_daq_calibration_persist_writes,g_daq_calibration_updates;
 #define DAQ_CALIBRATION_PERSIST_KEY 1U
 #define DAQ_CALIBRATION_VOLTS_MARK 0x56544C56u
+#define DAQ_MCP_VREF_PERSIST_KEY 2U
+static float g_vref_stored=2.4f;
+static float mcp3564r_vref_v(void){return 2.4f;}
 typedef struct{daq_calibration_t calibration;uint32_t units;}daq_calibration_record_t;
 static unsigned calibration_sets;static void sd_card_set_calibration(const daq_calibration_t*c){(void)c;++calibration_sets;}
 static uint8_t g_calibration_persist_pending;
