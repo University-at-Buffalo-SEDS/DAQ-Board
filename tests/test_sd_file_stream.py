@@ -629,7 +629,8 @@ uint8_t *sd_file_stream_block(void) { return have_area ? area : NULL; }
 void *sd_file_stream_handle(void) { return have_area ? handle : NULL; }
 void *sd_file_stream_scratch(void) { return &sha_ctx; }
 void sd_file_stream_handle_open(bool open) { handle_open = open; }
-void sd_file_stream_answer(uint32_t t, const uint8_t *f, size_t n) { if (t != ticket_now) return; memcpy(last, f, n); last_len = n; ++answered; }
+static unsigned released;   /* NULL answers: the slot freed, nothing sent (sd_file_stream.c) */
+void sd_file_stream_answer(uint32_t t, const uint8_t *f, size_t n) { if (!f) { ++released; return; } if (t != ticket_now) return; memcpy(last, f, n); last_len = n; ++answered; }
 void sd_file_stream_open(uint32_t t, const sd_xfer_open_t *o, uint32_t size, bool growing)
 { opened_xfer = o->xfer; opened_size = size; opened_growing = growing; xfer_active = true;
   uint8_t a[SD_XFER_OPEN_ANSWER] = {0xa5}; sd_file_stream_answer(t, a, sizeof a); }
@@ -720,9 +721,10 @@ int main(void)
     request(SD_FILE_OP_OPEN, 1, 0, "DAQ_1700000000000_001.CSV"); assert(handle_open);
     seek_fail = 1; (void)sd_file_service_turn(); assert(!produce_ok && !handle_open); seek_fail = 0;
     hash(1, "DAQ_1700000000000_001.CSV"); assert(last[1] == 0);
-    /* A cancelled hash stops quietly. */
-    request(SD_FILE_OP_HASH, 1, 0, "DAQ_1700000000000_001.CSV"); const unsigned a = answered;
-    ++ticket_now; (void)sd_file_service_turn(); (void)sd_file_service_turn(); assert(answered == a);
+    /* A cancelled hash stops quietly and releases its request slot (else the
+     * session answers BUSY to everything after it). */
+    request(SD_FILE_OP_HASH, 1, 0, "DAQ_1700000000000_001.CSV"); const unsigned a = answered, r0 = released;
+    ++ticket_now; (void)sd_file_service_turn(); (void)sd_file_service_turn(); assert(answered == a && released == r0 + 1);
     /* Gate re-checked in the writer (state, launch file open, its close flush):
      * a request is answered BAD_STATE and the handle closes. */
     request(SD_FILE_OP_OPEN, 1, 0, "DAQ_1700000000000_001.CSV"); assert(handle_open);
@@ -738,8 +740,8 @@ int main(void)
     assert(last[0] == 0xa5 && last[1] == SD_FILE_STATUS_BAD_STATE && last[2] == 0x42 && !xfer_active);
     allowed = true;
     /* A gated hash in progress stops. */
-    request(SD_FILE_OP_HASH, 1, 0, "DAQ_1700000000000_001.CSV"); const unsigned b = answered;
-    allowed = false; (void)sd_file_service_turn(); allowed = true; (void)sd_file_service_turn(); assert(answered == b);
+    request(SD_FILE_OP_HASH, 1, 0, "DAQ_1700000000000_001.CSV"); const unsigned b = answered, r1 = released;
+    allowed = false; (void)sd_file_service_turn(); allowed = true; (void)sd_file_service_turn(); assert(answered == b && released == r1 + 1);
     /* Idle close after 3 s without a transfer; session end closes at once. */
     request(SD_FILE_OP_OPEN, 1, 0, "DAQ_1700000000000_001.CSV"); assert(handle_open); xfer_active = false;
     clock_ms += 2999; (void)sd_file_service_turn(); assert(handle_open);

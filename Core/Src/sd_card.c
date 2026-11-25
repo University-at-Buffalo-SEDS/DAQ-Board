@@ -1921,9 +1921,20 @@ static bool sd_dl_read(void *ctx, uint32_t offset, uint8_t *dst, uint32_t len)
   return false;
 }
 
+/* Stops a hash in progress without an answer. The claimed request slot stays
+ * BUSY until the writer answers its ticket, so an abandoned hash releases it
+ * (a NULL answer frees the slot and sends nothing): before, a hash cancelled by
+ * the station (or stopped by the gate or the session's end) left the slot BUSY,
+ * and every later request of the session was answered BUSY. */
+static void sd_dl_hash_abandon(void)
+{
+  if (g_sd_dl_hash.active) sd_file_stream_answer(g_sd_dl_hash.ticket, NULL, 0U);
+  g_sd_dl_hash.active = 0U;
+}
+
 static void sd_dl_hash_step(void)
 {
-  if (!sd_file_stream_ticket_current(g_sd_dl_hash.ticket)) { g_sd_dl_hash.active = 0U; return; }
+  if (!sd_file_stream_ticket_current(g_sd_dl_hash.ticket)) { sd_dl_hash_abandon(); return; }
   launchcore_sha256_ctx_t *sha = sd_file_stream_scratch();
   uint8_t *const block = sd_file_stream_block();
   uint8_t answer[SD_FILE_HASH_ANSWER] = {SD_FILE_OP_HASH | SD_FILE_RESPONSE_FLAG, SD_FILE_STATUS_OK};
@@ -2000,7 +2011,7 @@ static uint8_t sd_file_service_turn(void)
   if ((!allowed || !session || (!busy && now - g_sd_dl_last_ms >= SD_DL_IDLE_CLOSE_MS)) &&
       (g_sd_dl_open || g_sd_dl_list_valid))
     sd_dl_release();
-  if (!session) { g_sd_dl_hash.active = 0U; return 0U; }
+  if (!session) { sd_dl_hash_abandon(); return 0U; }
   sd_file_request_t request;
   uint32_t ticket = 0U;
   if (!g_sd_dl_hash.active && sd_file_stream_claim(&request, &ticket)) {
@@ -2010,7 +2021,7 @@ static uint8_t sd_file_service_turn(void)
     g_sd_dl_last_ms = now;
     return 1U;
   }
-  if (!allowed) { g_sd_dl_hash.active = 0U; return 0U; }
+  if (!allowed) { sd_dl_hash_abandon(); return 0U; }
   if (g_sd_dl_hash.active) { sd_dl_hash_step(); g_sd_dl_last_ms = now; return 1U; }
   /* A transfer whose handle was closed (gate, I/O error) ends at its next read. */
   if (sd_file_stream_transfer_active() && sd_file_stream_produce(sd_dl_read, NULL, now)) {
